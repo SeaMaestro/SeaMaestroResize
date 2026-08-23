@@ -6,3 +6,4 @@
 /vendor/
 /releases/
 /.cargo/config.toml
+/.cargo/config.toml
