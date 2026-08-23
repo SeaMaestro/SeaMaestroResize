@@ -1,0 +1,7 @@
+/target/
+*.bak*
+.vscode/
+*.tmp
+*.log
+/vendor/
+/releases/
