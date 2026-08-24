@@ -282,5 +282,19 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, layout: jxl_encoder::PixelLayout, 
 }
 
 pub(crate) fn encode_pdf_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
-    encode_jpeg_to_vec(img, quality, false, None, None)
+    if let Some(gray) = img.as_luma8() {
+        return encode_jpeg_gray(gray, quality, false, None, None);
+    }
+    let rgb = img.to_rgb8();
+    let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+    let raw = rgb.into_raw();
+    let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
+    comp.set_size(w, h);
+    comp.set_quality(quality.clamp(1, 100) as f32);
+    comp.set_chroma_sampling_pixel_sizes((2, 2), (2, 2));
+    let mut comp = comp.start_compress(Vec::new())?;
+    for line in 0..h {
+        comp.write_scanlines(&raw[line * w * 3..(line + 1) * w * 3])?;
+    }
+    Ok(comp.finish()?)
 }
