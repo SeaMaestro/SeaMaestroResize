@@ -33,33 +33,41 @@ pub(crate) fn make_page(img: &DynamicImage, config: &Config) -> Result<PdfPage> 
 
 pub(crate) fn single_page_pdf(img: &DynamicImage, config: &Config) -> Result<Vec<u8>> {
     let page = make_page(img, config)?;
-    build_pdf(&[page])
+    let mut builder = PdfBuilder::new();
+    builder.add_page(&page);
+    Ok(builder.finish())
 }
 
-pub(crate) fn build_pdf(pages: &[PdfPage]) -> Result<Vec<u8>> {
-    let mut pdf = Pdf::new();
-    let catalog_id = Ref::new(1);
-    let page_tree_id = Ref::new(2);
+pub(crate) struct PdfBuilder {
+    pdf: Pdf,
+    page_tree_id: Ref,
+    next_ref: i32,
+    page_refs: Vec<Ref>,
+}
 
-    pdf.catalog(catalog_id).pages(page_tree_id);
-
-    let mut page_ids = Vec::with_capacity(pages.len());
-    let mut content_ids = Vec::with_capacity(pages.len());
-    let mut image_ids = Vec::with_capacity(pages.len());
-    for i in 0..pages.len() {
-        page_ids.push(Ref::new(3 + i as i32 * 3));
-        content_ids.push(Ref::new(4 + i as i32 * 3));
-        image_ids.push(Ref::new(5 + i as i32 * 3));
+impl PdfBuilder {
+    pub(crate) fn new() -> Self {
+        let mut pdf = Pdf::new();
+        pdf.catalog(Ref::new(1)).pages(Ref::new(2));
+        Self {
+            pdf,
+            page_tree_id: Ref::new(2),
+            next_ref: 3,
+            page_refs: Vec::new(),
+        }
     }
 
-    pdf.pages(page_tree_id).kids(page_ids.iter().copied()).count(pages.len() as i32);
+    pub(crate) fn add_page(&mut self, page: &PdfPage) {
+        let page_id = Ref::new(self.next_ref);
+        let content_id = Ref::new(self.next_ref + 1);
+        let image_id = Ref::new(self.next_ref + 2);
+        self.next_ref += 3;
 
-    for (i, page) in pages.iter().enumerate() {
         let w = page.width as f32;
         let h = page.height as f32;
         let image_name = Name(b"Im");
 
-        let mut image = pdf.image_xobject(image_ids[i], &page.data);
+        let mut image = self.pdf.image_xobject(image_id, &page.data);
         image.filter(if page.dct { Filter::DctDecode } else { Filter::FlateDecode });
         image.width(page.width as i32);
         image.height(page.height as i32);
@@ -71,11 +79,11 @@ pub(crate) fn build_pdf(pages: &[PdfPage]) -> Result<Vec<u8>> {
         image.bits_per_component(8);
         image.finish();
 
-        let mut p = pdf.page(page_ids[i]);
+        let mut p = self.pdf.page(page_id);
         p.media_box(Rect::new(0.0, 0.0, w, h));
-        p.parent(page_tree_id);
-        p.contents(content_ids[i]);
-        p.resources().x_objects().pair(image_name, image_ids[i]);
+        p.parent(self.page_tree_id);
+        p.contents(content_id);
+        p.resources().x_objects().pair(image_name, image_id);
         p.finish();
 
         let mut content = Content::new();
@@ -83,8 +91,16 @@ pub(crate) fn build_pdf(pages: &[PdfPage]) -> Result<Vec<u8>> {
         content.transform([w, 0.0, 0.0, h, 0.0, 0.0]);
         content.x_object(image_name);
         content.restore_state();
-        pdf.stream(content_ids[i], &content.finish());
+        self.pdf.stream(content_id, &content.finish());
+
+        self.page_refs.push(page_id);
     }
 
-    Ok(pdf.finish())
+    pub(crate) fn finish(mut self) -> Vec<u8> {
+        self.pdf
+            .pages(self.page_tree_id)
+            .kids(self.page_refs.iter().copied())
+            .count(self.page_refs.len() as i32);
+        self.pdf.finish()
+    }
 }

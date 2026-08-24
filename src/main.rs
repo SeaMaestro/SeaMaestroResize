@@ -1449,7 +1449,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         unique_pdf_file(&out_dir)
     };
 
-    let mut pages: Vec<crate::pdf::PdfPage> = Vec::with_capacity(total);
+    let mut builder = crate::pdf::PdfBuilder::new();
     let mut ok = 0usize;
 
     for (idx, entry) in ordered.iter().enumerate() {
@@ -1458,7 +1458,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             Ok(page) => {
                 eprintln!("  [{}/{}]  {}  →  PDF page {} ({}×{})",
                     idx + 1, total, short_name(&name, 40), ok + 1, page.width, page.height);
-                pages.push(page);
+                builder.add_page(&page);
                 ok += 1;
             }
             Err(e) => {
@@ -1468,27 +1468,20 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         }
     }
 
-    if pages.is_empty() {
+    if ok == 0 {
         captain_log(0);
         return;
     }
 
-    match crate::pdf::build_pdf(&pages) {
-        Ok(bytes) => {
-            let size = bytes.len() as u64;
-            if let Err(e) = atomic_write(&out_file, &bytes) {
-                eprintln!("  {:#}", e);
-                HAD_ERRORS.store(true, Ordering::Relaxed);
-                return;
-            }
-            eprintln!("  {} {}", msg().output_label, out_file.display());
-            eprintln!("  {} pages · {}", ok, human_size(size));
-        }
-        Err(e) => {
-            eprintln!("  {:#}", e);
-            HAD_ERRORS.store(true, Ordering::Relaxed);
-        }
+    let bytes = builder.finish();
+    let size = bytes.len() as u64;
+    if let Err(e) = atomic_write(&out_file, &bytes) {
+        eprintln!("  {:#}", e);
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+        return;
     }
+    eprintln!("  {} {}", msg().output_label, out_file.display());
+    eprintln!("  {} pages · {}", ok, human_size(size));
 
     captain_log(ok);
 }
