@@ -1446,7 +1446,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return;
         }
-        unique_pdf_file(&out_dir)
+        unique_pdf_file(&out_dir, config)
     };
 
     let mut builder = crate::pdf::PdfBuilder::new();
@@ -1480,7 +1480,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         HAD_ERRORS.store(true, Ordering::Relaxed);
         return;
     }
-    eprintln!("  {} {}", msg().output_label, out_file.display());
+    eprintln!("  {}", msg().output_label.replacen("{}", &out_file.display().to_string(), 1));
     eprintln!("  {} pages · {}", ok, human_size(size));
 
     captain_log(ok);
@@ -1513,14 +1513,15 @@ fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
     unique_output_dir(&common.join("SeaMonkeyResized"))
 }
 
-fn unique_pdf_file(dir: &Path) -> PathBuf {
-    let base = dir.join("SeaMonkeyResized.pdf");
+fn unique_pdf_file(dir: &Path, config: &Config) -> PathBuf {
+    let suffix = build_suffix(config);
+    let base = dir.join(format!("SeaMonkeyMerged{}.pdf", suffix));
     if !base.exists() { return base; }
     let (y, mo, d, h, mi, s) = local_now();
     let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
-    let candidate = dir.join(format!("SeaMonkeyResized_{}.pdf", stamp));
+    let candidate = dir.join(format!("SeaMonkeyMerged{}_{}.pdf", suffix, stamp));
     if candidate.exists() {
-        return dir.join(format!("SeaMonkeyResized_{}_{}.pdf", stamp, fastrand::u32(100..999)));
+        return dir.join(format!("SeaMonkeyMerged{}_{}_{}.pdf", suffix, stamp, fastrand::u32(100..999)));
     }
     candidate
 }
