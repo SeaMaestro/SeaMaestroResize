@@ -95,6 +95,10 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
             config.sharpen = true;
             return true;
         }
+        "merge" => {
+            config.merge = true;
+            return true;
+        }
         _ => {}
     }
 
@@ -121,6 +125,7 @@ impl Config {
             output: None,
             shanty: false,
             keep_exif: false,
+            merge: false,
         };
 
         let cleaned: String = stem
@@ -193,7 +198,7 @@ fn get_bare_re() -> &'static Regex {
 }
 
 const KEYWORDS_ORDERED: &[&str] = &[
-    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "exif",
+    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "exif", "merge",
 ];
 
 fn try_match_at_start(s: &str) -> Option<(&str, &str)> {

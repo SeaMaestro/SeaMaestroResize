@@ -37,6 +37,8 @@ jwalk = "0.8"
 jxl-oxide = { version = "0.12.5", features = ["image"] }
 jxl-encoder = "0.3.1"
 tiff = "0.11"
+pdf-writer = "0.15"
+miniz_oxide = "0.8"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

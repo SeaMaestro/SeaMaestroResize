@@ -89,6 +89,7 @@ mod encode;
 mod decode;
 mod rename;
 mod help;
+mod pdf;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::env;
@@ -210,6 +211,8 @@ struct Cli {
     shanty: bool,
     #[arg(long, help_heading = "MISC")]
     keep_exif: bool,
+    #[arg(long, help = "Combine all images into a single PDF (implies --format pdf)", help_heading = "MISC")]
+    merge: bool,
     #[arg(long, help = "Language code: en, ru, uk, de, es, fr, el, fil", help_heading = "MISC")]
     lang: Option<String>,
     #[arg(help_heading = "INPUT")]
@@ -231,6 +234,7 @@ pub(crate) struct Config {
     output: Option<String>,
     shanty: bool,
     keep_exif: bool,
+    merge: bool,
 }
 
 enum Size {
@@ -253,6 +257,7 @@ pub(crate) enum ImageFormat {
     #[clap(name = "bmp")] Bmp,
     #[clap(name = "gif")] Gif,
     #[clap(name = "jxl")] Jxl,
+    #[clap(name = "pdf")] Pdf,
 }
 
 impl ImageFormat {
@@ -268,6 +273,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "bmp",
             ImageFormat::Gif => "gif",
             ImageFormat::Jxl => "jxl",
+            ImageFormat::Pdf => "pdf",
         }
     }
     fn from_str(s: &str) -> Option<Self> {
@@ -282,6 +288,7 @@ impl ImageFormat {
             "bmp" => Some(ImageFormat::Bmp),
             "gif" => Some(ImageFormat::Gif),
             "jxl" => Some(ImageFormat::Jxl),
+            "pdf" => Some(ImageFormat::Pdf),
             _ => None,
         }
     }
@@ -366,6 +373,7 @@ fn run() -> Result<Config> {
             output: cli.output.clone(),
             shanty: cli.shanty,
             keep_exif: cli.keep_exif,
+            merge: cli.merge,
         };
         if let Some(ref s) = cli.size {
             if s == "42" {
@@ -401,7 +409,10 @@ fn run() -> Result<Config> {
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return Ok(config);
         }
-        if entries.len() > 1 && config.output.is_some() {
+        if config.merge {
+            config.format = ImageFormat::Pdf;
+        }
+        if entries.len() > 1 && config.output.is_some() && !config.merge {
             eprintln!("  {}", msg().output_ignored);
             config.output = None;
         }
@@ -444,11 +455,14 @@ fn run() -> Result<Config> {
         return Ok(Config {
             target_size: None, quality: 85, format: ImageFormat::WebP,
             grayscale: false, lossless: false, progressive: false,
-            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false,
+            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false,
         });
     }
 
-    let config = Config::from_exe_name()?;
+    let mut config = Config::from_exe_name()?;
+    if config.merge {
+        config.format = ImageFormat::Pdf;
+    }
     banner(&config);
 
     if args.len() < 2 {
@@ -696,6 +710,11 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     HAD_ERRORS.store(false, Ordering::Relaxed);
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
+
+    if config.merge && total > 1 {
+        process_merge(entries, config);
+        return;
+    }
 
     let grouped = group_by_root(entries);
     let single_file_mode = total == 1 && entries[0].direct_file;
@@ -1395,4 +1414,120 @@ fn short_name(name: &str, max: usize) -> String {
 fn random_funny_message() -> String {
     let m = msg();
     m.funny[fastrand::usize(..m.funny.len())].to_string()
+}
+
+
+fn process_merge(entries: &[InputEntry], config: &Config) {
+    HAD_ERRORS.store(false, Ordering::Relaxed);
+    let total = entries.len();
+    if total == 0 { captain_log(0); return; }
+
+    let mut ordered: Vec<&InputEntry> = entries.iter().collect();
+    ordered.sort_by(|a, b| path_key(&a.file).cmp(&path_key(&b.file)));
+
+    let out_file = if let Some(o) = &config.output {
+        let p = PathBuf::from(o);
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("  {}", msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1));
+                    eprintln!("  {:#}", e);
+                    HAD_ERRORS.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        p
+    } else {
+        let out_dir = merge_output_dir(entries);
+        if let Err(e) = fs::create_dir_all(&out_dir) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &out_dir.display().to_string(), 1));
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+        unique_pdf_file(&out_dir)
+    };
+
+    let mut pages: Vec<crate::pdf::PdfPage> = Vec::with_capacity(total);
+    let mut ok = 0usize;
+
+    for (idx, entry) in ordered.iter().enumerate() {
+        let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+        match process_one_to_pdf(entry, config) {
+            Ok(page) => {
+                eprintln!("  [{}/{}]  {}  →  PDF page {} ({}×{})",
+                    idx + 1, total, short_name(&name, 40), ok + 1, page.width, page.height);
+                pages.push(page);
+                ok += 1;
+            }
+            Err(e) => {
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                eprintln!("  [{}/{}]  {} {:#}", idx + 1, total, msg().mayday_captain, e);
+            }
+        }
+    }
+
+    if pages.is_empty() {
+        captain_log(0);
+        return;
+    }
+
+    match crate::pdf::build_pdf(&pages) {
+        Ok(bytes) => {
+            let size = bytes.len() as u64;
+            if let Err(e) = atomic_write(&out_file, &bytes) {
+                eprintln!("  {:#}", e);
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                return;
+            }
+            eprintln!("  {} {}", msg().output_label, out_file.display());
+            eprintln!("  {} pages · {}", ok, human_size(size));
+        }
+        Err(e) => {
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+        }
+    }
+
+    captain_log(ok);
+}
+
+fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
+    let raw = fs::read(&entry.file)
+        .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let (img, _icc, _exif) = decode_image(&raw, None)
+        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let img = if !is_heif(&raw) { auto_orient(img, &raw) } else { img };
+    let img = if config.grayscale { img.grayscale() } else { img };
+    let img = if let Some(ref size) = config.target_size { apply_resize(img, size) } else { img };
+    let img = if config.sharpen { img.unsharpen(1.0, 3) } else { img };
+    crate::pdf::make_page(&img, config)
+}
+
+fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
+    let grouped = group_by_root(entries);
+    let any_removable = grouped.keys().any(|r| is_on_removable_drive(r));
+    if any_removable {
+        return entries[0].root.clone();
+    }
+    if grouped.len() == 1 {
+        let root = grouped.keys().next().unwrap().clone();
+        return unique_output_dir(&root.join("SeaMonkeyResized"));
+    }
+    let roots: Vec<&PathBuf> = grouped.keys().collect();
+    let common = find_common_parent(roots);
+    unique_output_dir(&common.join("SeaMonkeyResized"))
+}
+
+fn unique_pdf_file(dir: &Path) -> PathBuf {
+    let base = dir.join("SeaMonkeyResized.pdf");
+    if !base.exists() { return base; }
+    let (y, mo, d, h, mi, s) = local_now();
+    let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
+    let candidate = dir.join(format!("SeaMonkeyResized_{}.pdf", stamp));
+    if candidate.exists() {
+        return dir.join(format!("SeaMonkeyResized_{}_{}.pdf", stamp, fastrand::u32(100..999)));
+    }
+    candidate
 }

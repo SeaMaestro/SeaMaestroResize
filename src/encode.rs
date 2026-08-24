@@ -5,6 +5,7 @@ use crate::msg;
 use crate::Config;
 use crate::ImageFormat;
 use crate::metadata::{encode_tiff_icc, normalize_exif, webp_embed_metadata};
+use crate::pdf::single_page_pdf;
 
 fn write_jpeg_exif(comp: &mut mozjpeg::compress::CompressStarted<Vec<u8>>, blob: &[u8]) {
     let mut data = Vec::with_capacity(blob.len() + 6);
@@ -46,6 +47,7 @@ pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Opt
         ImageFormat::Bmp => encode_bmp_to_vec(img),
         ImageFormat::Gif => encode_gif_to_vec(img),
         ImageFormat::Jxl => encode_jxl_to_vec(img, config.quality, config.lossless, icc, exif),
+        ImageFormat::Pdf => single_page_pdf(img, config),
     }
 }pub(crate) fn encode_bmp(img: &image::DynamicImage, out: &Path) -> Result<()> {
     img.save_with_format(out, image::ImageFormat::Bmp)?;
@@ -277,4 +279,8 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, layout: jxl_encoder::PixelLayout, 
         &owned
     };
     encode_jxl_raw(rgba_img.as_raw(), rgba_img.width(), rgba_img.height(), jxl_encoder::PixelLayout::Rgba8, quality, lossless, icc, exif)
+}
+
+pub(crate) fn encode_pdf_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
+    encode_jpeg_to_vec(img, quality, false, None, None)
 }
