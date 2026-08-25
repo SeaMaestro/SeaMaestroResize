@@ -1298,6 +1298,9 @@ fn banner(config: &Config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_progressive, pad_right(m.on, 45));
     }
     eprintln!("  ║  {:<13}{}  ║", m.label_grayscale, pad_right(gray_str, 45));
+    if config.merge {
+        eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
+    }
     if config.keep_exif {
         eprintln!("  ║  {:<13}{}  ║", m.label_exif, pad_right(m.on, 45));
     }
