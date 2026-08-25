@@ -89,6 +89,7 @@ mod encode;
 mod decode;
 mod rename;
 mod help;
+mod pdf;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::env;
@@ -210,6 +211,8 @@ struct Cli {
     shanty: bool,
     #[arg(long, help_heading = "MISC")]
     keep_exif: bool,
+    #[arg(long, help = "Combine all images into a single PDF (implies --format pdf)", help_heading = "MISC")]
+    merge: bool,
     #[arg(long, help = "Language code: en, ru, uk, de, es, fr, el, fil", help_heading = "MISC")]
     lang: Option<String>,
     #[arg(help_heading = "INPUT")]
@@ -231,6 +234,7 @@ pub(crate) struct Config {
     output: Option<String>,
     shanty: bool,
     keep_exif: bool,
+    merge: bool,
 }
 
 enum Size {
@@ -253,6 +257,7 @@ pub(crate) enum ImageFormat {
     #[clap(name = "bmp")] Bmp,
     #[clap(name = "gif")] Gif,
     #[clap(name = "jxl")] Jxl,
+    #[clap(name = "pdf")] Pdf,
 }
 
 impl ImageFormat {
@@ -268,6 +273,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "bmp",
             ImageFormat::Gif => "gif",
             ImageFormat::Jxl => "jxl",
+            ImageFormat::Pdf => "pdf",
         }
     }
     fn from_str(s: &str) -> Option<Self> {
@@ -282,6 +288,7 @@ impl ImageFormat {
             "bmp" => Some(ImageFormat::Bmp),
             "gif" => Some(ImageFormat::Gif),
             "jxl" => Some(ImageFormat::Jxl),
+            "pdf" => Some(ImageFormat::Pdf),
             _ => None,
         }
     }
@@ -366,6 +373,7 @@ fn run() -> Result<Config> {
             output: cli.output.clone(),
             shanty: cli.shanty,
             keep_exif: cli.keep_exif,
+            merge: cli.merge,
         };
         if let Some(ref s) = cli.size {
             if s == "42" {
@@ -401,7 +409,10 @@ fn run() -> Result<Config> {
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return Ok(config);
         }
-        if entries.len() > 1 && config.output.is_some() {
+        if config.merge {
+            config.format = ImageFormat::Pdf;
+        }
+        if entries.len() > 1 && config.output.is_some() && !config.merge {
             eprintln!("  {}", msg().output_ignored);
             config.output = None;
         }
@@ -444,11 +455,14 @@ fn run() -> Result<Config> {
         return Ok(Config {
             target_size: None, quality: 85, format: ImageFormat::WebP,
             grayscale: false, lossless: false, progressive: false,
-            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false,
+            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false,
         });
     }
 
-    let config = Config::from_exe_name()?;
+    let mut config = Config::from_exe_name()?;
+    if config.merge {
+        config.format = ImageFormat::Pdf;
+    }
     banner(&config);
 
     if args.len() < 2 {
@@ -696,6 +710,11 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     HAD_ERRORS.store(false, Ordering::Relaxed);
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
+
+    if config.merge && total > 1 {
+        process_merge(entries, config);
+        return;
+    }
 
     let grouped = group_by_root(entries);
     let single_file_mode = total == 1 && entries[0].direct_file;
@@ -1279,6 +1298,9 @@ fn banner(config: &Config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_progressive, pad_right(m.on, 45));
     }
     eprintln!("  ║  {:<13}{}  ║", m.label_grayscale, pad_right(gray_str, 45));
+    if config.merge {
+        eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
+    }
     if config.keep_exif {
         eprintln!("  ║  {:<13}{}  ║", m.label_exif, pad_right(m.on, 45));
     }
@@ -1395,4 +1417,221 @@ fn short_name(name: &str, max: usize) -> String {
 fn random_funny_message() -> String {
     let m = msg();
     m.funny[fastrand::usize(..m.funny.len())].to_string()
+}
+
+
+fn process_merge(entries: &[InputEntry], config: &Config) {
+    HAD_ERRORS.store(false, Ordering::Relaxed);
+    let total = entries.len();
+    if total == 0 { captain_log(0); return; }
+
+    let mut ordered: Vec<&InputEntry> = entries.iter().collect();
+    ordered.sort_by(|a, b| path_key(&a.file).cmp(&path_key(&b.file)));
+
+    let out_file = if let Some(o) = &config.output {
+        let p = PathBuf::from(o);
+        if let Some(parent) = p.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    eprintln!("  {}", msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1));
+                    eprintln!("  {:#}", e);
+                    HAD_ERRORS.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+        p
+    } else {
+        let out_dir = merge_output_dir(entries);
+        if let Err(e) = fs::create_dir_all(&out_dir) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &out_dir.display().to_string(), 1));
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+        unique_pdf_file(&out_dir, config)
+    };
+
+    let mut builder = crate::pdf::PdfBuilder::new();
+    let mut ok = 0usize;
+
+    captain_log(total);
+    let m = msg();
+
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    let pb: Option<ProgressBar> = if stderr_is_tty {
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed}] {msg} {wide_bar:.cyan/blue} {pos}/{len} ({percent}%) {eta}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░ "),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_message("building PDF…");
+        Some(pb)
+    } else {
+        None
+    };
+
+    let stat_in = AtomicU64::new(0);
+    let mut error_list: Vec<(String, String)> = Vec::new();
+    let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+    for (idx, entry) in ordered.iter().enumerate() {
+        let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+        let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
+        match process_one_to_pdf(entry, config) {
+            Ok(page) => {
+                let out_size = page.data.len() as u64;
+                let pct = (out_size as f64 / in_size as f64) * 100.0;
+                let remark = if pct < 20.0 { m.remark_great }
+                    else if pct < 50.0 { m.remark_good }
+                    else if pct < 80.0 { m.remark_ok }
+                    else if pct < 100.0 { m.remark_bail }
+                    else { m.remark_gain };
+                let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                let diff_str = if out_size < in_size {
+                    m.diff_down
+                        .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                } else {
+                    m.diff_up
+                        .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                };
+                let line = m.file_line
+                    .replacen("{}", &(idx + 1).to_string(), 1)
+                    .replacen("{}", &total.to_string(), 1)
+                    .replacen("{}", &short_name(&name, 28), 1)
+                    .replacen("{}", &short_name(&out_name, 28), 1)
+                    .replacen("{}", &human_size(in_size), 1)
+                    .replacen("{}", &human_size(out_size), 1)
+                    .replacen("{}", &diff_str, 1)
+                    .replacen("{}", remark, 1);
+                match &pb {
+                    Some(pb) => pb.println(line),
+                    None => eprintln!("{}", line),
+                }
+                builder.add_page(&page);
+                ok += 1;
+                stat_in.fetch_add(in_size, Ordering::Relaxed);
+            }
+            Err(e) => {
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                let line = m.file_error
+                    .replacen("{}", &(idx + 1).to_string(), 1)
+                    .replacen("{}", &total.to_string(), 1)
+                    .replacen("{}", &short_name(&name, 28), 1);
+                match &pb {
+                    Some(pb) => pb.println(line),
+                    None => eprintln!("{}", line),
+                }
+                error_list.push((name.to_string(), format!("{:#}", e)));
+            }
+        }
+        if let Some(ref pb) = pb {
+            pb.inc(1);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    for (name, e) in &error_list {
+        eprintln!("  MAYDAY! {} — {}", name, e);
+    }
+
+    let in_total = stat_in.load(Ordering::Relaxed);
+    let out_total = if ok > 0 {
+        let bytes = builder.finish();
+        let size = bytes.len() as u64;
+        if let Err(e) = atomic_write(&out_file, &bytes) {
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+        size
+    } else {
+        0
+    };
+
+    eprintln!("\n  ═══════════════════════════════════════════════");
+    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
+    if !error_list.is_empty() {
+        eprintln!("  {}", m.voyage_errors.replacen("{}", &error_list.len().to_string(), 1));
+    }
+
+    let (diff_str, pct_total, arrow) = if in_total > out_total {
+        let pct = (in_total as f64 - out_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_discharged.replacen("{}", &human_size(in_total - out_total), 1), pct, "↑")
+    } else if out_total > in_total {
+        let pct = (out_total as f64 - in_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_took_on.replacen("{}", &human_size(out_total - in_total), 1), pct, "↓")
+    } else {
+        (String::new(), 0.0, "=")
+    };
+
+    if in_total == out_total {
+        eprintln!("  {}", m.cargo_line_nochange
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1));
+    } else {
+        eprintln!("  {}", m.cargo_line
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1)
+            .replacen("{}", &diff_str, 1)
+            .replacen("{}", arrow, 1)
+            .replacen("{:.0}", &format!("{:.0}", pct_total), 1));
+    }
+    eprintln!("  {}", m.output_label.replacen("{}", &out_file.display().to_string(), 1));
+    eprintln!("  {}", random_funny_message());
+    HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
+}
+
+fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
+    let raw = fs::read(&entry.file)
+        .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let (img, _icc, _exif) = decode_image(&raw, None)
+        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let img = if !is_heif(&raw) { auto_orient(img, &raw) } else { img };
+    let img = if config.grayscale { img.grayscale() } else { img };
+    let img = if let Some(ref size) = config.target_size { apply_resize(img, size) } else { img };
+    let img = if config.sharpen { img.unsharpen(1.0, 3) } else { img };
+    crate::pdf::make_page(&img, config)
+}
+
+fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
+    let grouped = group_by_root(entries);
+    let any_removable = grouped.keys().any(|r| is_on_removable_drive(r));
+    if any_removable {
+        return entries[0].root.clone();
+    }
+    if grouped.len() == 1 {
+        let root = grouped.keys().next().unwrap().clone();
+        let is_loose = entries.iter().all(|e| e.direct_file);
+        if is_loose {
+            return unique_output_dir(&root.join("SeaMonkeyResized"));
+        }
+        let parent = root.parent().unwrap_or(&root).to_path_buf();
+        return unique_output_dir(&parent.join("SeaMonkeyResized"));
+    }
+    let roots: Vec<&PathBuf> = grouped.keys().collect();
+    let common = find_common_parent(roots);
+    unique_output_dir(&common.join("SeaMonkeyResized"))
+}
+
+fn unique_pdf_file(dir: &Path, config: &Config) -> PathBuf {
+    let suffix = build_suffix(config);
+    let base = dir.join(format!("SeaMonkeyMerged{}.pdf", suffix));
+    if !base.exists() { return base; }
+    let (y, mo, d, h, mi, s) = local_now();
+    let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
+    let candidate = dir.join(format!("SeaMonkeyMerged{}_{}.pdf", suffix, stamp));
+    if candidate.exists() {
+        return dir.join(format!("SeaMonkeyMerged{}_{}_{}.pdf", suffix, stamp, fastrand::u32(100..999)));
+    }
+    candidate
 }
