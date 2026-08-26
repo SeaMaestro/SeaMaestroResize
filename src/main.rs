@@ -174,14 +174,16 @@ static HAD_ERRORS: AtomicBool = AtomicBool::new(false);
 #[derive(Parser)]
 #[command(
     name = "SeaMonkeyResize",
+    version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
     after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
-    OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif\n\n  \
+    OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
     seamonkey --size 800 --format webp --quality 80 photo.jpg\n    \
     seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    \
     seamonkey --size 50pct --format avif photo.heic\n    \
     seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    \
+    seamonkey --merge vacation_folder\n    \
     cat photo.jpg | seamonkey --format webp > out.webp\n\n  \
     EXE RENAME EXAMPLES (Windows):\n    \
     SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
@@ -812,7 +814,6 @@ fn process_files(entries: &[InputEntry], config: &Config) {
 
     captain_log(total);
     let m = msg();
-
     let stderr_is_tty = std::io::stderr().is_terminal();
     let pb: Option<ProgressBar> = if stderr_is_tty {
         let pb = ProgressBar::new(total as u64);
@@ -829,7 +830,6 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     } else {
         None
     };
-
     let progress = Arc::new(AtomicUsize::new(0));
     let stat_in = Arc::new(AtomicU64::new(0));
     let stat_out = Arc::new(AtomicU64::new(0));
@@ -1489,12 +1489,14 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         }
     };
     if let Err(e) = sink.write_catalog() {
+        drop(sink);
         let _ = fs::remove_file(&tmp);
         eprintln!("  {:#}", e);
         HAD_ERRORS.store(true, Ordering::Relaxed);
         return;
     }
 
+    let progress = Arc::new(AtomicUsize::new(0));
     let stat_in = AtomicU64::new(0);
     let mut error_list: Vec<(String, String)> = Vec::new();
     let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -1510,70 +1512,83 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             .par_iter()
             .enumerate()
             .map(|(local, entry)| {
-                (offset + local, process_one_to_pdf(entry, config).map_err(|e| format!("{:#}", e)))
+                let idx = offset + local;
+                let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+                let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
+                let res = process_one_to_pdf(entry, config).map_err(|e| format!("{:#}", e));
+
+                let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                if let Some(ref pb) = pb {
+                    pb.inc(1);
+                }
+
+                match &res {
+                    Ok(page) => {
+                        let out_size = page.data.len() as u64;
+                        let pct = (out_size as f64 / in_size as f64) * 100.0;
+                        let remark = if pct < 20.0 { m.remark_great }
+                            else if pct < 50.0 { m.remark_good }
+                            else if pct < 80.0 { m.remark_ok }
+                            else if pct < 100.0 { m.remark_bail }
+                            else { m.remark_gain };
+                        let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                        let diff_str = if out_size < in_size {
+                            m.diff_down
+                                .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                                .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                        } else {
+                            m.diff_up
+                                .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                                .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                        };
+                        let line = m.file_line
+                            .replacen("{}", &current.to_string(), 1)
+                            .replacen("{}", &total.to_string(), 1)
+                            .replacen("{}", &short_name(&name, 28), 1)
+                            .replacen("{}", &short_name(&out_name, 28), 1)
+                            .replacen("{}", &human_size(in_size), 1)
+                            .replacen("{}", &human_size(out_size), 1)
+                            .replacen("{}", &diff_str, 1)
+                            .replacen("{}", remark, 1);
+                        match &pb {
+                            Some(pb) => pb.println(line),
+                            None => eprintln!("{}", line),
+                        }
+                        stat_in.fetch_add(in_size, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        let line = m.file_error
+                            .replacen("{}", &current.to_string(), 1)
+                            .replacen("{}", &total.to_string(), 1)
+                            .replacen("{}", &short_name(&name, 28), 1);
+                        match &pb {
+                            Some(pb) => pb.println(line),
+                            None => eprintln!("{}", line),
+                        }
+                    }
+                }
+
+                (idx, res)
             })
             .collect();
 
         for (idx, res) in results {
-            let entry = ordered[idx];
-            let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
-            let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
             match res {
                 Ok(page) => {
-                    let out_size = page.data.len() as u64;
-                    let pct = (out_size as f64 / in_size as f64) * 100.0;
-                    let remark = if pct < 20.0 { m.remark_great }
-                        else if pct < 50.0 { m.remark_good }
-                        else if pct < 80.0 { m.remark_ok }
-                        else if pct < 100.0 { m.remark_bail }
-                        else { m.remark_gain };
-                    let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
-                    let diff_str = if out_size < in_size {
-                        m.diff_down
-                            .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
-                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                    } else {
-                        m.diff_up
-                            .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
-                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                    };
-                    let line = m.file_line
-                        .replacen("{}", &(idx + 1).to_string(), 1)
-                        .replacen("{}", &total.to_string(), 1)
-                        .replacen("{}", &short_name(&name, 28), 1)
-                        .replacen("{}", &short_name(&out_name, 28), 1)
-                        .replacen("{}", &human_size(in_size), 1)
-                        .replacen("{}", &human_size(out_size), 1)
-                        .replacen("{}", &diff_str, 1)
-                        .replacen("{}", remark, 1);
-                    match &pb {
-                        Some(pb) => pb.println(line),
-                        None => eprintln!("{}", line),
-                    }
                     if let Err(e) = sink.write_page(&page, written) {
+                        drop(sink);
                         let _ = fs::remove_file(&tmp);
                         eprintln!("  {:#}", e);
                         HAD_ERRORS.store(true, Ordering::Relaxed);
                         return;
                     }
                     written += 1;
-                    stat_in.fetch_add(in_size, Ordering::Relaxed);
                 }
                 Err(e) => {
                     HAD_ERRORS.store(true, Ordering::Relaxed);
-                    let line = m.file_error
-                        .replacen("{}", &(idx + 1).to_string(), 1)
-                        .replacen("{}", &total.to_string(), 1)
-                        .replacen("{}", &short_name(&name, 28), 1);
-                    match &pb {
-                        Some(pb) => pb.println(line),
-                        None => eprintln!("{}", line),
-                    }
+                    let name = ordered[idx].file.file_name().unwrap_or_default().to_string_lossy();
                     error_list.push((name.to_string(), e));
                 }
-            }
-            if let Some(ref pb) = pb {
-                pb.inc(1);
             }
         }
         offset = end;
@@ -1592,6 +1607,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         match sink.finish(written) {
             Ok(size) => size,
             Err(e) => {
+                drop(sink);
                 let _ = fs::remove_file(&tmp);
                 eprintln!("  {:#}", e);
                 HAD_ERRORS.store(true, Ordering::Relaxed);
@@ -1599,18 +1615,20 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             }
         }
     } else {
-        let _ = fs::remove_file(&tmp);
         0
     };
 
+    drop(sink);
+
     if written > 0 {
-        drop(sink);
         if let Err(e) = fs::rename(&tmp, &out_file) {
             let _ = fs::remove_file(&tmp);
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return;
         }
+    } else {
+        let _ = fs::remove_file(&tmp);
     }
 
     eprintln!("\n  ═══════════════════════════════════════════════");

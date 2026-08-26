@@ -10,6 +10,15 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 use crate::encode::encode_pdf_jpeg;
 use crate::Config;
 
+fn document_id() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:032x}", nanos)
+}
+
 pub(crate) struct PdfPage {
     pub width: u32,
     pub height: u32,
@@ -155,14 +164,17 @@ impl<W: Write> PdfSink<W> {
         let max_id = 2 + 3 * page_count as u32;
         let xref_start = self.pos;
         self.raw(&format!("xref\n0 {}\n", max_id + 1))?;
-        self.raw("0000000000 65535 f \r\n")?;
+        self.raw("0000000000 65535 f\r\n")?;
         for id in 1..=max_id {
             let off = self.offsets.get(&id).copied().unwrap_or(0);
-            self.raw(&format!("{:010} 00000 n \r\n", off))?;
+            self.raw(&format!("{:010} 00000 n\r\n", off))?;
         }
+        let id = document_id();
         self.raw(&format!(
-            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            "trailer\n<< /Size {} /Root 1 0 R /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
             max_id + 1,
+            id,
+            id,
             xref_start
         ))?;
         self.w.flush()?;
