@@ -1419,6 +1419,12 @@ fn random_funny_message() -> String {
     m.funny[fastrand::usize(..m.funny.len())].to_string()
 }
 
+fn merge_chunk_len(total: usize) -> usize {
+    let budget = (usable_ram() / 8).clamp(64 * 1024 * 1024, 512 * 1024 * 1024);
+    let per_page = 8 * 1024 * 1024;
+    let n = (budget / per_page) as usize;
+    n.clamp(1, total)
+}
 
 fn process_merge(entries: &[InputEntry], config: &Config) {
     HAD_ERRORS.store(false, Ordering::Relaxed);
@@ -1452,9 +1458,6 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         unique_pdf_file(&out_dir, config)
     };
 
-    let mut builder = crate::pdf::PdfBuilder::new();
-    let mut ok = 0usize;
-
     captain_log(total);
     let m = msg();
 
@@ -1475,65 +1478,105 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         None
     };
 
+    let tmp = temp_path(&out_file);
+    let mut sink = match crate::pdf::PdfSink::create(&tmp) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+    };
+    if let Err(e) = sink.write_catalog() {
+        let _ = fs::remove_file(&tmp);
+        eprintln!("  {:#}", e);
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+        return;
+    }
+
     let stat_in = AtomicU64::new(0);
     let mut error_list: Vec<(String, String)> = Vec::new();
     let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-    for (idx, entry) in ordered.iter().enumerate() {
-        let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
-        let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
-        match process_one_to_pdf(entry, config) {
-            Ok(page) => {
-                let out_size = page.data.len() as u64;
-                let pct = (out_size as f64 / in_size as f64) * 100.0;
-                let remark = if pct < 20.0 { m.remark_great }
-                    else if pct < 50.0 { m.remark_good }
-                    else if pct < 80.0 { m.remark_ok }
-                    else if pct < 100.0 { m.remark_bail }
-                    else { m.remark_gain };
-                let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
-                let diff_str = if out_size < in_size {
-                    m.diff_down
-                        .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
-                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                } else {
-                    m.diff_up
-                        .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
-                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                };
-                let line = m.file_line
-                    .replacen("{}", &(idx + 1).to_string(), 1)
-                    .replacen("{}", &total.to_string(), 1)
-                    .replacen("{}", &short_name(&name, 28), 1)
-                    .replacen("{}", &short_name(&out_name, 28), 1)
-                    .replacen("{}", &human_size(in_size), 1)
-                    .replacen("{}", &human_size(out_size), 1)
-                    .replacen("{}", &diff_str, 1)
-                    .replacen("{}", remark, 1);
-                match &pb {
-                    Some(pb) => pb.println(line),
-                    None => eprintln!("{}", line),
+    let chunk = merge_chunk_len(total);
+    let mut written = 0usize;
+
+    let mut offset = 0usize;
+    while offset < total {
+        let end = (offset + chunk).min(total);
+        let slice = &ordered[offset..end];
+        let results: Vec<(usize, Result<crate::pdf::PdfPage, String>)> = slice
+            .par_iter()
+            .enumerate()
+            .map(|(local, entry)| {
+                (offset + local, process_one_to_pdf(entry, config).map_err(|e| format!("{:#}", e)))
+            })
+            .collect();
+
+        for (idx, res) in results {
+            let entry = ordered[idx];
+            let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+            let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
+            match res {
+                Ok(page) => {
+                    let out_size = page.data.len() as u64;
+                    let pct = (out_size as f64 / in_size as f64) * 100.0;
+                    let remark = if pct < 20.0 { m.remark_great }
+                        else if pct < 50.0 { m.remark_good }
+                        else if pct < 80.0 { m.remark_ok }
+                        else if pct < 100.0 { m.remark_bail }
+                        else { m.remark_gain };
+                    let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                    let diff_str = if out_size < in_size {
+                        m.diff_down
+                            .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                    } else {
+                        m.diff_up
+                            .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                    };
+                    let line = m.file_line
+                        .replacen("{}", &(idx + 1).to_string(), 1)
+                        .replacen("{}", &total.to_string(), 1)
+                        .replacen("{}", &short_name(&name, 28), 1)
+                        .replacen("{}", &short_name(&out_name, 28), 1)
+                        .replacen("{}", &human_size(in_size), 1)
+                        .replacen("{}", &human_size(out_size), 1)
+                        .replacen("{}", &diff_str, 1)
+                        .replacen("{}", remark, 1);
+                    match &pb {
+                        Some(pb) => pb.println(line),
+                        None => eprintln!("{}", line),
+                    }
+                    if let Err(e) = sink.write_page(&page, written) {
+                        let _ = fs::remove_file(&tmp);
+                        eprintln!("  {:#}", e);
+                        HAD_ERRORS.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    written += 1;
+                    stat_in.fetch_add(in_size, Ordering::Relaxed);
                 }
-                builder.add_page(&page);
-                ok += 1;
-                stat_in.fetch_add(in_size, Ordering::Relaxed);
+                Err(e) => {
+                    HAD_ERRORS.store(true, Ordering::Relaxed);
+                    let line = m.file_error
+                        .replacen("{}", &(idx + 1).to_string(), 1)
+                        .replacen("{}", &total.to_string(), 1)
+                        .replacen("{}", &short_name(&name, 28), 1);
+                    match &pb {
+                        Some(pb) => pb.println(line),
+                        None => eprintln!("{}", line),
+                    }
+                    error_list.push((name.to_string(), e));
+                }
             }
-            Err(e) => {
-                HAD_ERRORS.store(true, Ordering::Relaxed);
-                let line = m.file_error
-                    .replacen("{}", &(idx + 1).to_string(), 1)
-                    .replacen("{}", &total.to_string(), 1)
-                    .replacen("{}", &short_name(&name, 28), 1);
-                match &pb {
-                    Some(pb) => pb.println(line),
-                    None => eprintln!("{}", line),
-                }
-                error_list.push((name.to_string(), format!("{:#}", e)));
+            if let Some(ref pb) = pb {
+                pb.inc(1);
             }
         }
-        if let Some(ref pb) = pb {
-            pb.inc(1);
-        }
+        offset = end;
     }
 
     if let Some(pb) = pb {
@@ -1545,18 +1588,30 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     }
 
     let in_total = stat_in.load(Ordering::Relaxed);
-    let out_total = if ok > 0 {
-        let bytes = builder.finish();
-        let size = bytes.len() as u64;
-        if let Err(e) = atomic_write(&out_file, &bytes) {
+    let out_total = if written > 0 {
+        match sink.finish(written) {
+            Ok(size) => size,
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                eprintln!("  {:#}", e);
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                return;
+            }
+        }
+    } else {
+        let _ = fs::remove_file(&tmp);
+        0
+    };
+
+    if written > 0 {
+        drop(sink);
+        if let Err(e) = fs::rename(&tmp, &out_file) {
+            let _ = fs::remove_file(&tmp);
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return;
         }
-        size
-    } else {
-        0
-    };
+    }
 
     eprintln!("\n  ═══════════════════════════════════════════════");
     eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
@@ -1594,6 +1649,10 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
     let raw = fs::read(&entry.file)
         .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let need = probe_image(&raw);
+    let budget = mem_budget();
+    budget.acquire(need);
+    let _permit = MemPermit { budget, need };
     let (img, _icc, _exif) = decode_image(&raw, None)
         .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
     let img = if !is_heif(&raw) { auto_orient(img, &raw) } else { img };
