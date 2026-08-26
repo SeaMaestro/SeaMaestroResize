@@ -1,0 +1,114 @@
+# SeaMonkeyResize v2.2.1
+
+⚓ Multiformat batch image resizer and converter for Windows.
+A single static executable — no installer, no external DLLs, no MSVC runtime.
+Download, run, done.
+
+## What's new in 2.2
+
+- **PDF output** — `--format pdf` writes one PDF per input; `--merge` combines
+  all inputs into a single PDF sorted by path.
+- **Streaming merge** (2.2.1) — the merged PDF is written to a temp file as a
+  stream and renamed at the end, so merging thousands of files stays at
+  constant memory instead of holding the whole PDF in RAM.
+- **Chunked parallel merge** (2.2.1) — pages are decoded, resized and encoded
+  on all cores in memory-budgeted chunks, then written in sorted order.
+
+## The idea
+
+Copy `SeaMonkeyResize.exe` anywhere, rename it to bake in settings, drop photos
+on it. Done.
+
+- One photo → resized next to the original.
+- Several photos → a `SeaMonkeyResized` folder next to them.
+- A folder with subfolders → structure preserved under `SeaMonkeyResized`.
+- `--merge` → one `SeaMonkeyMerged{settings}.pdf` next to the source folder.
+
+## Highlights
+
+- **Full color fidelity** — ICC color profiles are preserved for JPEG, PNG,
+  JXL, WebP and TIFF, so converted images keep their original colors instead
+  of being flattened to sRGB.
+- **EXIF passthrough** (`--keep-exif`) — keeps metadata for JPEG, PNG, WebP
+  and JXL, normalizes Orientation to 1 and updates pixel dimensions to the
+  resized size. EXIF is cleared by default for privacy.
+- **Auto-rotation** — honors EXIF Orientation, so portrait photos come out
+  upright without manual steps.
+- **Parallel batch processing** — multicore via Rayon, recursive folder scan,
+  with a RAM guard so huge RAW files never cause an out-of-memory crash.
+- **PDF generation** — single-file PDFs and merged multi-page PDFs.
+  `--quality` controls lossy JPEG (4:2:0) compression, `--lossless` uses
+  FlateDecode, `--bw` makes grayscale pages, and transparency is flattened
+  to white.
+- **Drag-and-drop** — rename the exe to bake in settings, then drop photos
+  onto it.
+- **Smart output layout** — one photo lands next to the original; several
+  photos go into a `SeaMonkeyResized` folder; a folder with subfolders keeps
+  its tree under `SeaMonkeyResized`.
+- **Scriptable** — stdin/stdout pipe mode:
+  `cat photo.jpg | SeaMonkeyResize --format webp > out.webp`.
+- **8 languages** — English (`en`), Русский (`ru`), Українська (`uk`),
+  Deutsch (`de`), Español (`es`), Français (`fr`), Ελληνικά (`el`),
+  Filipino (`fil`).
+- **Maritime charm** — progress bars, sea shanties, and a captain's log.
+
+## Formats
+
+**Input**
+
+JPEG, PNG, WebP, AVIF, JXL, ICO, TIFF, QOI, BMP, GIF, HEIC/HEIF, and RAW
+(CR2, CR3, NEF, NRW, ARW, SRF, SR2, DNG, RAF, ORF, PEF, RW2, MRW, MEF, ERF,
+KDC, DCS, DCR, SRW, IIQ, 3FR, MOS, X3F, ARI).
+
+**Output**
+
+WebP, JPEG, AVIF, JXL, PNG, ICO, TIFF, QOI, BMP, GIF, PDF.
+
+## Resize & adjust
+
+- `--size 800` (long edge), `w800`, `h600`, `800x600` (cover crop), `50pct`
+- `--quality 1..100` (default 85), lossless WebP/JXL/PDF, progressive JPEG
+- `--bw` grayscale, `--sharpen` after resize (sigma 1.0)
+
+## PDF & merge
+
+```text
+SeaMonkeyResize --format pdf photo.jpg             → photo_q85.pdf
+SeaMonkeyResize --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
+SeaMonkeyResize --merge vacation_folder            → SeaMonkeyMerged_q85.pdf
+SeaMonkeyResize --merge --lossless --bw folder     → SeaMonkeyMerged_bw.pdf
+Single PDF keeps the normal output name, e.g. photo_q85.pdf.
+--merge forces PDF output, sorts inputs by path, and writes pages in sorted order.
+Merge writes to a temp file first and renames it at the end, so an interrupted run leaves no half-written PDF behind.
+Usage examples
+Command line
+text
+SeaMonkeyResize --size 800 --format webp --quality 80 photo.jpg
+SeaMonkeyResize --size 1024x768 --format jpeg --progressive *.jpg
+SeaMonkeyResize --size 50pct --format avif photo.heic
+SeaMonkeyResize --size 300 --format png --bw --output result.png photo.jpg
+SeaMonkeyResize --format pdf photo.jpg
+SeaMonkeyResize --merge vacation_folder
+cat photo.jpg | SeaMonkeyResize --format webp > out.webp
+Drag-and-drop (rename the exe, then drop photos onto it)
+text
+SeaMonkeyResize_q80_w800_webp.exe        → quality 80, 800px wide, WebP
+SeaMonkeyResize_w300_h300_png_bw.exe     → 300×300 cover crop, PNG, grayscale
+SeaMonkeyResize_w800_sharp.exe           → 800px wide, sharpen after resize
+SeaMonkeyResize_w800_exif.exe            → 800px wide, keep EXIF
+SeaMonkeyResize_q80_w800_webp_exif.exe   → quality 80, 800px wide, WebP, keep EXIF
+SeaMonkeyResize_merge.exe                → merge dropped files/folder into one PDF
+SeaMonkeyResize_ua.exe                   → Ukrainian interface (all defaults)
+SeaMonkeyResize_q80_w800_jpeg_ru.exe     → quality 80, 800px wide, JPEG, Russian
+SeaMonkeyResize_w800_sharp_de.exe        → 800px wide, sharpen, German
+Language suffixes: _en _ru _uk _ua _de _es _fr _el _fil — or full words
+like english, russian, ukrainian, german.
+
+Build
+Static CRT, LTO, stripped — single ∼27 MB executable.
+
+Version
+2.2.1
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.

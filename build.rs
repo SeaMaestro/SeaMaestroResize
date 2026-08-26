@@ -19,8 +19,8 @@ fn windows_resources() {
     res.set("InternalName", "SeaMonkeyResize");
     res.set("OriginalFilename", "SeaMonkeyResize.exe");
     res.set("CompanyName", "Independent Developer — Capt. Volodymyr Gumanyuk");
-    res.set("FileVersion", "2.2.0.0");
-    res.set("ProductVersion", "2.2.0.0");
+    res.set("FileVersion", "2.2.1.0");
+    res.set("ProductVersion", "2.2.1.0");
     res.set("LegalCopyright", "Copyright (c) Captain Volodymyr Gumanyuk");
     res.set("Comments", "Multiformat batch/group image resizer tool. Email: captvg@proton.me");
 
