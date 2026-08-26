@@ -1455,6 +1455,9 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let mut builder = crate::pdf::PdfBuilder::new();
     let mut ok = 0usize;
 
+    captain_log(total);
+    let m = msg();
+
     let stderr_is_tty = std::io::stderr().is_terminal();
     let pb: Option<ProgressBar> = if stderr_is_tty {
         let pb = ProgressBar::new(total as u64);
@@ -1472,26 +1475,60 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         None
     };
 
+    let stat_in = AtomicU64::new(0);
+    let mut error_list: Vec<(String, String)> = Vec::new();
+    let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
+
     for (idx, entry) in ordered.iter().enumerate() {
         let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+        let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
         match process_one_to_pdf(entry, config) {
             Ok(page) => {
-                let line = format!("  [{}/{}]  {}  →  PDF page {} ({}×{})",
-                    idx + 1, total, short_name(&name, 40), ok + 1, page.width, page.height);
+                let out_size = page.data.len() as u64;
+                let pct = (out_size as f64 / in_size as f64) * 100.0;
+                let remark = if pct < 20.0 { m.remark_great }
+                    else if pct < 50.0 { m.remark_good }
+                    else if pct < 80.0 { m.remark_ok }
+                    else if pct < 100.0 { m.remark_bail }
+                    else { m.remark_gain };
+                let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                let diff_str = if out_size < in_size {
+                    m.diff_down
+                        .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                } else {
+                    m.diff_up
+                        .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                };
+                let line = m.file_line
+                    .replacen("{}", &(idx + 1).to_string(), 1)
+                    .replacen("{}", &total.to_string(), 1)
+                    .replacen("{}", &short_name(&name, 28), 1)
+                    .replacen("{}", &short_name(&out_name, 28), 1)
+                    .replacen("{}", &human_size(in_size), 1)
+                    .replacen("{}", &human_size(out_size), 1)
+                    .replacen("{}", &diff_str, 1)
+                    .replacen("{}", remark, 1);
                 match &pb {
                     Some(pb) => pb.println(line),
                     None => eprintln!("{}", line),
                 }
                 builder.add_page(&page);
                 ok += 1;
+                stat_in.fetch_add(in_size, Ordering::Relaxed);
             }
             Err(e) => {
                 HAD_ERRORS.store(true, Ordering::Relaxed);
-                let line = format!("  [{}/{}]  {} {:#}", idx + 1, total, msg().mayday_captain, e);
+                let line = m.file_error
+                    .replacen("{}", &(idx + 1).to_string(), 1)
+                    .replacen("{}", &total.to_string(), 1)
+                    .replacen("{}", &short_name(&name, 28), 1);
                 match &pb {
                     Some(pb) => pb.println(line),
                     None => eprintln!("{}", line),
                 }
+                error_list.push((name.to_string(), format!("{:#}", e)));
             }
         }
         if let Some(ref pb) = pb {
@@ -1503,22 +1540,55 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         pb.finish_and_clear();
     }
 
-    if ok == 0 {
-        captain_log(0);
-        return;
+    for (name, e) in &error_list {
+        eprintln!("  MAYDAY! {} — {}", name, e);
     }
 
-    let bytes = builder.finish();
-    let size = bytes.len() as u64;
-    if let Err(e) = atomic_write(&out_file, &bytes) {
-        eprintln!("  {:#}", e);
-        HAD_ERRORS.store(true, Ordering::Relaxed);
-        return;
-    }
-    eprintln!("  {}", msg().output_label.replacen("{}", &out_file.display().to_string(), 1));
-    eprintln!("  {} pages · {}", ok, human_size(size));
+    let in_total = stat_in.load(Ordering::Relaxed);
+    let out_total = if ok > 0 {
+        let bytes = builder.finish();
+        let size = bytes.len() as u64;
+        if let Err(e) = atomic_write(&out_file, &bytes) {
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+        size
+    } else {
+        0
+    };
 
-    captain_log(ok);
+    eprintln!("\n  ═══════════════════════════════════════════════");
+    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
+    if !error_list.is_empty() {
+        eprintln!("  {}", m.voyage_errors.replacen("{}", &error_list.len().to_string(), 1));
+    }
+
+    let (diff_str, pct_total, arrow) = if in_total > out_total {
+        let pct = (in_total as f64 - out_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_discharged.replacen("{}", &human_size(in_total - out_total), 1), pct, "↑")
+    } else if out_total > in_total {
+        let pct = (out_total as f64 - in_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_took_on.replacen("{}", &human_size(out_total - in_total), 1), pct, "↓")
+    } else {
+        (String::new(), 0.0, "=")
+    };
+
+    if in_total == out_total {
+        eprintln!("  {}", m.cargo_line_nochange
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1));
+    } else {
+        eprintln!("  {}", m.cargo_line
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1)
+            .replacen("{}", &diff_str, 1)
+            .replacen("{}", arrow, 1)
+            .replacen("{:.0}", &format!("{:.0}", pct_total), 1));
+    }
+    eprintln!("  {}", m.output_label.replacen("{}", &out_file.display().to_string(), 1));
+    eprintln!("  {}", random_funny_message());
+    HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
 }
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
@@ -1541,7 +1611,12 @@ fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
     }
     if grouped.len() == 1 {
         let root = grouped.keys().next().unwrap().clone();
-        return unique_output_dir(&root.join("SeaMonkeyResized"));
+        let is_loose = entries.iter().all(|e| e.direct_file);
+        if is_loose {
+            return unique_output_dir(&root.join("SeaMonkeyResized"));
+        }
+        let parent = root.parent().unwrap_or(&root).to_path_buf();
+        return unique_output_dir(&parent.join("SeaMonkeyResized"));
     }
     let roots: Vec<&PathBuf> = grouped.keys().collect();
     let common = find_common_parent(roots);
