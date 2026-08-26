@@ -1455,20 +1455,52 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let mut builder = crate::pdf::PdfBuilder::new();
     let mut ok = 0usize;
 
+    let stderr_is_tty = std::io::stderr().is_terminal();
+    let pb: Option<ProgressBar> = if stderr_is_tty {
+        let pb = ProgressBar::new(total as u64);
+        pb.set_style(
+            ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed}] {msg} {wide_bar:.cyan/blue} {pos}/{len} ({percent}%) {eta}",
+            )
+            .unwrap()
+            .progress_chars("█▓▒░ "),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(100));
+        pb.set_message("building PDF…");
+        Some(pb)
+    } else {
+        None
+    };
+
     for (idx, entry) in ordered.iter().enumerate() {
         let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
         match process_one_to_pdf(entry, config) {
             Ok(page) => {
-                eprintln!("  [{}/{}]  {}  →  PDF page {} ({}×{})",
+                let line = format!("  [{}/{}]  {}  →  PDF page {} ({}×{})",
                     idx + 1, total, short_name(&name, 40), ok + 1, page.width, page.height);
+                match &pb {
+                    Some(pb) => pb.println(line),
+                    None => eprintln!("{}", line),
+                }
                 builder.add_page(&page);
                 ok += 1;
             }
             Err(e) => {
                 HAD_ERRORS.store(true, Ordering::Relaxed);
-                eprintln!("  [{}/{}]  {} {:#}", idx + 1, total, msg().mayday_captain, e);
+                let line = format!("  [{}/{}]  {} {:#}", idx + 1, total, msg().mayday_captain, e);
+                match &pb {
+                    Some(pb) => pb.println(line),
+                    None => eprintln!("{}", line),
+                }
             }
         }
+        if let Some(ref pb) = pb {
+            pb.inc(1);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
     }
 
     if ok == 0 {
