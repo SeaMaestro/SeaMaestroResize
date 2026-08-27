@@ -22,7 +22,7 @@ struct RuntimeLimits {
 fn runtime_limits() -> &'static RuntimeLimits {
     static LIMITS: OnceLock<RuntimeLimits> = OnceLock::new();
     LIMITS.get_or_init(|| {
-        let usable = (usable_ram() as f64 * RAM_FRACTION) as u64;
+        let usable = ((usable_ram() as f64 * RAM_FRACTION) as u64).max(256 * 1024 * 1024);
         RuntimeLimits {
             max_alloc: usable.min(HARD_CAP),
             budget: usable,
@@ -50,9 +50,9 @@ impl Drop for MemPermit<'_> {
 impl MemBudget {
     pub(crate) fn acquire(&self, need: u64) {
         let need = need.min(self.total.max(1));
-        let mut used = self.used.lock().unwrap();
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
         while *used + need > self.total {
-            used = self.cv.wait(used).unwrap();
+            used = self.cv.wait(used).unwrap_or_else(|e| e.into_inner());
         }
         *used += need;
     }
@@ -352,17 +352,18 @@ fn png_exif(raw: &[u8]) -> Option<Vec<u8>> {
     let mut i = 8usize;
     while i + 12 <= raw.len() {
         let len = u32::from_be_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]) as usize;
-        let end = i.checked_add(12)?.checked_add(len)?;
-        if end > raw.len() {
+        let data_end = i.checked_add(8)?.checked_add(len)?;
+        let chunk_end = data_end.checked_add(4)?;
+        if chunk_end > raw.len() {
             return None;
         }
         if &raw[i + 4..i + 8] == b"eXIf" {
-            return Some(raw[i + 8..end].to_vec());
+            return Some(raw[i + 8..data_end].to_vec());
         }
-        i = end;
+        i = chunk_end;
     }
     None
-}
+}   
 
 fn webp_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < 20 || &raw[0..4] != b"RIFF" || &raw[8..12] != b"WEBP" {
@@ -418,13 +419,17 @@ pub(crate) fn decode_image(
     raw: &[u8],
     path: Option<&Path>,
     target: Option<(u32, u32)>,
+    svg: Option<&usvg::Tree>,
 ) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
-    if looks_like_svg(raw) {
-        let (tw, th) = match target.or_else(|| probe_svg_dims(raw)) {
+    if let Some(tree) = svg {
+        let (tw, th) = match target {
             Some(d) => d,
-            None => anyhow::bail!("{}", msg().err_unsupported),
+            None => {
+                let size = tree.size();
+                (size.width().ceil() as u32, size.height().ceil() as u32)
+            }
         };
-        let img = decode_svg(raw, tw, th).map_err(anyhow::Error::msg)?;
+        let img = decode_svg(tree, tw, th).map_err(anyhow::Error::msg)?;
         return Ok((img, None, None));
     }
 
@@ -527,9 +532,10 @@ fn svg_font_db() -> Arc<fontdb::Database> {
     .clone()
 }
 
-fn svg_options() -> usvg::Options<'static> {
+fn svg_options(path: Option<&Path>) -> usvg::Options<'static> {
     let mut opts = usvg::Options::default();
     opts.fontdb = svg_font_db();
+    opts.resources_dir = path.and_then(|p| p.parent().map(Path::to_path_buf));
     opts
 }
 
@@ -550,21 +556,34 @@ pub(crate) fn raster_need(w: u32, h: u32) -> u64 {
         .clamp(1, runtime_limits().max_alloc)
 }
 
-pub(crate) fn probe_svg_dims(raw: &[u8]) -> Option<(u32, u32)> {
-    let tree = usvg::Tree::from_data(raw, &svg_options()).ok()?;
+pub(crate) struct ParsedSvg {
+    pub tree: usvg::Tree,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> Option<ParsedSvg> {
+    let tree = usvg::Tree::from_data(raw, &svg_options(path)).ok()?;
     let size = tree.size();
     if size.width() <= 0.0 || size.height() <= 0.0 {
         return None;
     }
-    Some((size.width().ceil() as u32, size.height().ceil() as u32))
+    Some(ParsedSvg {
+        tree,
+        width: size.width().ceil() as u32,
+        height: size.height().ceil() as u32,
+    })
+}
+
+pub(crate) fn probe_svg_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    parse_svg(raw, None).map(|s| (s.width, s.height))
 }
 
 pub fn decode_svg(
-    raw: &[u8],
+    tree: &usvg::Tree,
     target_w: u32,
     target_h: u32,
 ) -> Result<image::DynamicImage, String> {
-    let tree = usvg::Tree::from_data(raw, &svg_options()).map_err(|e| e.to_string())?;
     let size = tree.size();
     let src_w = size.width();
     let src_h = size.height();
@@ -581,7 +600,7 @@ pub fn decode_svg(
     let mut pixmap = tiny_skia::Pixmap::new(tw, th)
         .ok_or_else(|| "SVG target size too large".to_string())?;
     let transform = tiny_skia::Transform::from_scale(tw as f32 / src_w, th as f32 / src_h);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    resvg::render(tree, transform, &mut pixmap.as_mut());
 
     unpremultiply_rgba(pixmap.data_mut());
     let rgba = pixmap.data().to_vec();

@@ -45,7 +45,8 @@ the whole workflow.
 
 **Input**
 
-JPEG, PNG, WebP, AVIF, JXL, ICO, TIFF, QOI, BMP, GIF, HEIC/HEIF, and RAW
+JPEG, PNG, WebP, AVIF, JXL, ICO, TIFF, QOI, BMP, GIF, HEIC/HEIF, SVG, SVGZ,
+and RAW
 (CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, DNG, RAF, ORF, PEF, RW2, MRW, MEF,
 ERF, KDC, DCS, DCR, SRW, IIQ, 3FR, MOS, X3F, ARI).
 
@@ -113,6 +114,7 @@ seamonkey --size 300 --format png --bw --output result.png photo.jpg
 seamonkey --format pdf photo.jpg
 seamonkey --merge vacation_folder
 cat photo.jpg | seamonkey --format webp > out.webp
+seamonkey --format pdf logo.svg
 ```
 
 ## PDF & merge
@@ -127,6 +129,27 @@ SeaMonkeyResize --merge --lossless --bw folder     → SeaMonkeyMerged_bw.pdf
 Single PDF keeps the normal output name, e.g. `photo_q85.pdf`.
 `--merge` forces PDF output, sorts inputs by path, and writes pages in sorted order.
 The merged PDF is written to a temp file first and renamed at the end, so an interrupted run leaves no half-written PDF behind.
+
+## SVG & PDF
+
+SVG/SVGZ inputs render two ways:
+
+- **Raster** (all non-PDF outputs, and PDF fallback): rendered with resvg at the
+  target size. Gradients, filters, masks, clip paths, patterns, embedded images
+  and text are supported.
+- **Vector** (`--format pdf` / `--merge`): flat graphics — solid fill/stroke,
+  transforms, opacity and dash — are written as native PDF vector paths, so they
+  stay sharp at any zoom and produce small files.
+
+If an SVG contains anything the vector writer does not handle yet (gradients,
+patterns, embedded images, text, masks, filters, clip paths, blend modes or
+group opacity), the whole page falls back to raster automatically — correct
+output, just not vector. Today vector output is therefore most useful for flat
+icons, logos, diagrams and simple illustrations.
+
+Notes: `--bw`, `--sharpen` and cover-crop sizes (`WxH`) always rasterize SVG.
+Animations, scripting and other dynamic SVG features are not supported (static
+SVG subset only). 
 
 ## EXE rename (drag-and-drop)
 
