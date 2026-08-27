@@ -8,6 +8,7 @@ use image::DynamicImage;
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::encode::encode_pdf_jpeg;
+use crate::svg_pdf::VectorPage;
 use crate::Config;
 
 fn document_id() -> String {
@@ -19,12 +20,24 @@ fn document_id() -> String {
     format!("{:032x}", nanos)
 }
 
-pub(crate) struct PdfPage {
-    pub width: u32,
-    pub height: u32,
-    pub gray: bool,
-    pub dct: bool,
-    pub data: Vec<u8>,
+pub(crate) enum PdfPage {
+    Raster {
+        width: u32,
+        height: u32,
+        gray: bool,
+        dct: bool,
+        data: Vec<u8>,
+    },
+    Vector(VectorPage),
+}
+
+impl PdfPage {
+    pub(crate) fn size_hint(&self) -> usize {
+        match self {
+            PdfPage::Raster { data, .. } => data.len(),
+            PdfPage::Vector(vp) => vp.content.len(),
+        }
+    }
 }
 
 fn flatten_alpha_white(img: &DynamicImage) -> DynamicImage {
@@ -57,15 +70,14 @@ pub(crate) fn make_page(img: &DynamicImage, config: &Config) -> Result<PdfPage> 
             img.to_rgb8().into_raw()
         };
         let data = compress_to_vec_zlib(&raw, 6);
-        Ok(PdfPage { width: w, height: h, gray, dct: false, data })
+        Ok(PdfPage::Raster { width: w, height: h, gray, dct: false, data })
     } else {
         let data = encode_pdf_jpeg(img, config.quality)?;
-        Ok(PdfPage { width: w, height: h, gray, dct: true, data })
+        Ok(PdfPage::Raster { width: w, height: h, gray, dct: true, data })
     }
 }
 
-pub(crate) fn single_page_pdf(img: &DynamicImage, config: &Config) -> Result<Vec<u8>> {
-    let page = make_page(img, config)?;
+pub(crate) fn page_pdf(page: PdfPage) -> Result<Vec<u8>> {
     let mut sink = PdfSink::new(Vec::new())?;
     sink.write_catalog()?;
     sink.write_page(&page, 0)?;
@@ -73,10 +85,16 @@ pub(crate) fn single_page_pdf(img: &DynamicImage, config: &Config) -> Result<Vec
     Ok(sink.into_inner())
 }
 
+pub(crate) fn single_page_pdf(img: &DynamicImage, config: &Config) -> Result<Vec<u8>> {
+    page_pdf(make_page(img, config)?)
+}
+
 pub(crate) struct PdfSink<W: Write> {
     w: W,
     pos: u64,
     offsets: BTreeMap<u32, u64>,
+    next_id: u32,
+    page_ids: Vec<u32>,
 }
 
 impl<W: Write> PdfSink<W> {
@@ -87,6 +105,8 @@ impl<W: Write> PdfSink<W> {
             w,
             pos: header.len() as u64,
             offsets: BTreeMap::new(),
+            next_id: 3,
+            page_ids: Vec::new(),
         })
     }
 
@@ -111,28 +131,51 @@ impl<W: Write> PdfSink<W> {
         self.raw("endobj\n")
     }
 
+    fn alloc_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
     pub(crate) fn write_catalog(&mut self) -> Result<()> {
         self.begin_obj(1)?;
         self.raw("<< /Type /Catalog /Pages 2 0 R >>\n")?;
         self.end_obj()
     }
 
-    pub(crate) fn write_page(&mut self, page: &PdfPage, index: usize) -> Result<()> {
-        let page_id = 3 + 3 * index as u32;
-        let content_id = page_id + 1;
-        let image_id = page_id + 2;
+    pub(crate) fn write_page(&mut self, page: &PdfPage, _index: usize) -> Result<()> {
+        match page {
+            PdfPage::Raster { width, height, gray, dct, data } => {
+                self.write_raster_page(*width, *height, *gray, *dct, data)
+            }
+            PdfPage::Vector(vp) => self.write_vector_page(vp),
+        }
+    }
 
-        let cs = if page.gray { "/DeviceGray" } else { "/DeviceRGB" };
-        let filter = if page.dct { "/DCTDecode" } else { "/FlateDecode" };
+    fn write_raster_page(
+        &mut self,
+        width: u32,
+        height: u32,
+        gray: bool,
+        dct: bool,
+        data: &[u8],
+    ) -> Result<()> {
+        let page_id = self.alloc_id();
+        self.page_ids.push(page_id);
+        let content_id = self.alloc_id();
+        let image_id = self.alloc_id();
+
+        let cs = if gray { "/DeviceGray" } else { "/DeviceRGB" };
+        let filter = if dct { "/DCTDecode" } else { "/FlateDecode" };
 
         self.begin_obj(page_id)?;
         self.raw(&format!(
             "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources << /XObject << /Im {} 0 R >> >> /Contents {} 0 R >>\n",
-            page.width, page.height, image_id, content_id
+            width, height, image_id, content_id
         ))?;
         self.end_obj()?;
 
-        let content = format!("q\n{} 0 0 {} 0 0 cm\n/Im Do\nQ\n", page.width, page.height);
+        let content = format!("q\n{} 0 0 {} 0 0 cm\n/Im Do\nQ\n", width, height);
         self.begin_obj(content_id)?;
         self.raw(&format!("<< /Length {} >>\nstream\n", content.len()))?;
         self.raw(&content)?;
@@ -142,26 +185,70 @@ impl<W: Write> PdfSink<W> {
         self.begin_obj(image_id)?;
         self.raw(&format!(
             "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} /BitsPerComponent 8 /Filter {} /Length {} >>\nstream\n",
-            page.width, page.height, cs, filter, page.data.len()
+            width, height, cs, filter, data.len()
         ))?;
-        self.bytes(&page.data)?;
+        self.bytes(data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()
     }
 
-    pub(crate) fn finish(&mut self, page_count: usize) -> Result<u64> {
-        let kids: Vec<String> = (0..page_count)
-            .map(|i| format!("{} 0 R", 3 + 3 * i as u32))
-            .collect();
+    fn write_vector_page(&mut self, vp: &VectorPage) -> Result<()> {
+        let mut gs_refs: Vec<(String, u32)> = Vec::new();
+        for (name, fa, sa) in &vp.ext_gs {
+            let id = self.alloc_id();
+            gs_refs.push((name.clone(), id));
+            let mut dict = String::from("<< /Type /ExtGState");
+            if *fa < 0.999 {
+                dict.push_str(&format!(" /ca {}", fa));
+            }
+            if *sa < 0.999 {
+                dict.push_str(&format!(" /CA {}", sa));
+            }
+            dict.push_str(" >>\n");
+            self.begin_obj(id)?;
+            self.raw(&dict)?;
+            self.end_obj()?;
+        }
+
+        let mut resources = String::from("<< ");
+        if !gs_refs.is_empty() {
+            resources.push_str("/ExtGState <<");
+            for (name, id) in &gs_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        resources.push_str(">>");
+
+        let page_id = self.alloc_id();
+        self.page_ids.push(page_id);
+        let content_id = self.alloc_id();
+
+        self.begin_obj(page_id)?;
+        self.raw(&format!(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] /Resources {} /Contents {} 0 R >>\n",
+            vp.width, vp.height, resources, content_id
+        ))?;
+        self.end_obj()?;
+
+        self.begin_obj(content_id)?;
+        self.raw(&format!("<< /Length {} >>\nstream\n", vp.content.len()))?;
+        self.bytes(&vp.content)?;
+        self.raw("\nendstream\n")?;
+        self.end_obj()
+    }
+
+    pub(crate) fn finish(&mut self, _page_count: usize) -> Result<u64> {
+        let kids: Vec<String> = self.page_ids.iter().map(|id| format!("{} 0 R", id)).collect();
         self.begin_obj(2)?;
         self.raw(&format!(
             "<< /Type /Pages /Kids [{}] /Count {} >>\n",
             kids.join(" "),
-            page_count
+            self.page_ids.len()
         ))?;
         self.end_obj()?;
 
-        let max_id = 2 + 3 * page_count as u32;
+        let max_id = self.next_id - 1;
         let xref_start = self.pos;
         self.raw(&format!("xref\n0 {}\n", max_id + 1))?;
         self.raw("0000000000 65535 f\r\n")?;

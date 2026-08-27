@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use image::ImageDecoder;
 
 use crate::msg;
 use crate::usable_ram;
+
+use resvg::{tiny_skia, usvg};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 const HARD_CAP: u64 = 8 * GIB;
@@ -20,7 +22,7 @@ struct RuntimeLimits {
 fn runtime_limits() -> &'static RuntimeLimits {
     static LIMITS: OnceLock<RuntimeLimits> = OnceLock::new();
     LIMITS.get_or_init(|| {
-        let usable = (usable_ram() as f64 * RAM_FRACTION) as u64;
+        let usable = ((usable_ram() as f64 * RAM_FRACTION) as u64).max(256 * 1024 * 1024);
         RuntimeLimits {
             max_alloc: usable.min(HARD_CAP),
             budget: usable,
@@ -48,9 +50,9 @@ impl Drop for MemPermit<'_> {
 impl MemBudget {
     pub(crate) fn acquire(&self, need: u64) {
         let need = need.min(self.total.max(1));
-        let mut used = self.used.lock().unwrap();
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
         while *used + need > self.total {
-            used = self.cv.wait(used).unwrap();
+            used = self.cv.wait(used).unwrap_or_else(|e| e.into_inner());
         }
         *used += need;
     }
@@ -82,6 +84,9 @@ pub(crate) fn probe_image(raw: &[u8]) -> u64 {
 }
 
 fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    if looks_like_svg(raw) {
+        return probe_svg_dims(raw);
+    }
     if raw.len() >= 24 && raw.starts_with(b"\x89PNG\r\n\x1a\n") {
         let w = u32::from_be_bytes([raw[16], raw[17], raw[18], raw[19]]);
         let h = u32::from_be_bytes([raw[20], raw[21], raw[22], raw[23]]);
@@ -107,6 +112,27 @@ fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     }
     if raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP" {
         return webp_dims(raw);
+    }
+    if raw.len() >= 8 && &raw[4..8] == b"JXL " {
+        if let Ok(image) = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(raw)) {
+            return Some((image.width(), image.height()));
+        }
+    }
+    if raw.len() >= 12 && &raw[4..12] == b"ftypcrx " {
+        return bmff_tkhd_dims(raw);
+    }
+    if raw.len() >= 12 && &raw[4..8] == b"ftyp" {
+        if let Ok(ctx) = libheif_rs::HeifContext::read_from_bytes(raw) {
+            if let Ok(handle) = ctx.primary_image_handle() {
+                return Some((handle.width(), handle.height()));
+            }
+        }
+    }
+    if raw.len() >= 8 && (raw.starts_with(b"II*\0") || raw.starts_with(b"MM\0*")) {
+        return tiff_dims(raw);
+    }
+    if raw.len() >= 6 && &raw[0..4] == [0, 0, 1, 0] {
+        return ico_dims(raw);
     }
     None
 }
@@ -145,6 +171,145 @@ fn webp_dims(raw: &[u8]) -> Option<(u32, u32)> {
         }
         _ => Some((16383, 16383)),
     }
+}
+
+fn rd16(b: &[u8], off: usize, little: bool) -> Option<u16> {
+    let s = b.get(off..off + 2)?;
+    Some(if little { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
+}
+
+fn rd32(b: &[u8], off: usize, little: bool) -> Option<u32> {
+    let s = b.get(off..off + 4)?;
+    Some(if little { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
+}
+
+fn tiff_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    let little = raw.starts_with(b"II*\0");
+    let ifd0 = rd32(raw, 4, little)? as usize;
+    let n = rd16(raw, ifd0, little)? as usize;
+    let mut w = None;
+    let mut h = None;
+    for i in 0..n {
+        let e = ifd0 + 2 + i * 12;
+        if e + 12 > raw.len() { break; }
+        let tag = rd16(raw, e, little)?;
+        let typ = rd16(raw, e + 2, little)?;
+        let val = match typ {
+            3 => rd16(raw, e + 8, little)? as u32,
+            4 => rd32(raw, e + 8, little)?,
+            _ => continue,
+        };
+        if tag == 0x0100 { w = Some(val); }
+        else if tag == 0x0101 { h = Some(val); }
+    }
+    Some((w?, h?))
+}
+
+fn ico_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    let count = u16::from_le_bytes([raw[4], raw[5]]) as usize;
+    let mut mw = 0u32;
+    let mut mh = 0u32;
+    for i in 0..count {
+        let off = 6 + i * 16;
+        if off + 2 > raw.len() { break; }
+        let w = if raw[off] == 0 { 256 } else { raw[off] as u32 };
+        let h = if raw[off + 1] == 0 { 256 } else { raw[off + 1] as u32 };
+        mw = mw.max(w);
+        mh = mh.max(h);
+    }
+    if mw == 0 || mh == 0 { None } else { Some((mw, mh)) }
+}
+
+fn bmff_tkhd_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    let mut best: Option<(u32, u32)> = None;
+    bmff_tkhd_scan(raw, 0, raw.len() as u64, 0, &mut best);
+    best
+}
+
+fn bmff_tkhd_scan(
+    raw: &[u8],
+    start: u64,
+    end: u64,
+    depth: u32,
+    best: &mut Option<(u32, u32)>,
+) {
+    if depth > 8 {
+        return;
+    }
+    let mut off = start;
+    while off + 8 <= end {
+        let size32 = match raw.get(off as usize..off as usize + 4) {
+            Some(s) => u32::from_be_bytes([s[0], s[1], s[2], s[3]]),
+            None => return,
+        };
+        let ftype = match raw.get(off as usize + 4..off as usize + 8) {
+            Some(s) => s,
+            None => return,
+        };
+        let (hdr, size) = if size32 == 1 {
+            let ls = match raw.get(off as usize + 8..off as usize + 16) {
+                Some(s) => u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]]),
+                None => return,
+            };
+            (16u64, ls)
+        } else if size32 == 0 {
+            (8u64, end - off)
+        } else {
+            (8u64, size32 as u64)
+        };
+        if size < hdr || off + size > end {
+            return;
+        }
+        let box_end = off + size;
+        let payload = off + hdr;
+
+        if ftype == b"tkhd" && payload < box_end {
+            let ver = raw[payload as usize];
+            let woff = if ver == 1 { payload + 88 } else { payload + 76 };
+            if woff + 8 <= box_end {
+                let wf = u32::from_be_bytes([
+                    raw[woff as usize],
+                    raw[woff as usize + 1],
+                    raw[woff as usize + 2],
+                    raw[woff as usize + 3],
+                ]);
+                let hf = u32::from_be_bytes([
+                    raw[woff as usize + 4],
+                    raw[woff as usize + 5],
+                    raw[woff as usize + 6],
+                    raw[woff as usize + 7],
+                ]);
+                let (w, h) = (wf >> 16, hf >> 16);
+                if w > 0 && h > 0 {
+                    let area = (w as u64) * (h as u64);
+                    let better = match *best {
+                        Some((bw, bh)) => (bw as u64) * (bh as u64) < area,
+                        None => true,
+                    };
+                    if better {
+                        *best = Some((w, h));
+                    }
+                }
+            }
+        }
+
+        if is_bmff_container(ftype) {
+            let child = if ftype == b"meta" { payload + 4 } else { payload };
+            if child <= box_end {
+                bmff_tkhd_scan(raw, child, box_end, depth + 1, best);
+            }
+        }
+        off = box_end;
+    }
+}
+
+fn is_bmff_container(ftype: &[u8]) -> bool {
+    const CONTAINERS: [&[u8]; 18] = [
+        b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"udta",
+        b"moof", b"traf", b"mfra", b"meta", b"iprp", b"ipco", b"dinf",
+        b"wave", b"ilst", b"ipro", b"keys",
+    ];
+    CONTAINERS.contains(&ftype)
 }
 
 fn jpeg_exif(raw: &[u8]) -> Option<Vec<u8>> {
@@ -187,16 +352,18 @@ fn png_exif(raw: &[u8]) -> Option<Vec<u8>> {
     let mut i = 8usize;
     while i + 12 <= raw.len() {
         let len = u32::from_be_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]) as usize;
-        if i + 12 + len > raw.len() {
+        let data_end = i.checked_add(8)?.checked_add(len)?;
+        let chunk_end = data_end.checked_add(4)?;
+        if chunk_end > raw.len() {
             return None;
         }
         if &raw[i + 4..i + 8] == b"eXIf" {
-            return Some(raw[i + 8..i + 8 + len].to_vec());
+            return Some(raw[i + 8..data_end].to_vec());
         }
-        i += 12 + len;
+        i = chunk_end;
     }
     None
-}
+}   
 
 fn webp_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < 20 || &raw[0..4] != b"RIFF" || &raw[8..12] != b"WEBP" {
@@ -206,14 +373,15 @@ fn webp_exif(raw: &[u8]) -> Option<Vec<u8>> {
     while i + 8 <= raw.len() {
         let fourcc = &raw[i..i + 4];
         let size = u32::from_le_bytes([raw[i + 4], raw[i + 5], raw[i + 6], raw[i + 7]]) as usize;
-        let start = i + 8;
-        if start + size > raw.len() {
+        let start = i.checked_add(8)?;
+        let end = start.checked_add(size)?;
+        if end > raw.len() {
             return None;
         }
         if fourcc == b"EXIF" {
-            return Some(raw[start..start + size].to_vec());
+            return Some(raw[start..end].to_vec());
         }
-        i = start + size + (size & 1);
+        i = end + (size & 1);
     }
     None
 }
@@ -247,7 +415,24 @@ fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
 
 // ── decode_image ──────────────────────────────────────────────
 
-pub(crate) fn decode_image(raw: &[u8], path: Option<&Path>) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
+pub(crate) fn decode_image(
+    raw: &[u8],
+    path: Option<&Path>,
+    target: Option<(u32, u32)>,
+    svg: Option<&usvg::Tree>,
+) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
+    if let Some(tree) = svg {
+        let (tw, th) = match target {
+            Some(d) => d,
+            None => {
+                let size = tree.size();
+                (size.width().ceil() as u32, size.height().ceil() as u32)
+            }
+        };
+        let img = decode_svg(tree, tw, th).map_err(anyhow::Error::msg)?;
+        return Ok((img, None, None));
+    }
+
     let exif = extract_exif(raw);
     if raw.len() >= 3 && raw[0] == 0xFF && raw[1] == 0xD8 && raw[2] == 0xFF {
         if let Some((img, icc)) = decode_jpeg_fast(raw) {
@@ -337,6 +522,110 @@ fn decode_jpeg_fast(raw: &[u8]) -> Option<(image::DynamicImage, Option<Vec<u8>>)
     Some((img, icc))
 }
 
+fn svg_font_db() -> Arc<fontdb::Database> {
+    static DB: OnceLock<Arc<fontdb::Database>> = OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+        Arc::new(db)
+    })
+    .clone()
+}
+
+fn svg_options(path: Option<&Path>) -> usvg::Options<'static> {
+    let mut opts = usvg::Options::default();
+    opts.fontdb = svg_font_db();
+    opts.resources_dir = path.and_then(|p| p.parent().map(Path::to_path_buf));
+    opts
+}
+
+pub(crate) fn looks_like_svg(raw: &[u8]) -> bool {
+    if raw.starts_with(&[0x1f, 0x8b]) {
+        return true;
+    }
+    let raw = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
+    let first = raw.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(raw.len());
+    let head = &raw[first..];
+    head.starts_with(b"<svg") || head.starts_with(b"<?xml")
+}
+
+pub(crate) fn raster_need(w: u32, h: u32) -> u64 {
+    (w as u64)
+        .saturating_mul(h as u64)
+        .saturating_mul(4)
+        .clamp(1, runtime_limits().max_alloc)
+}
+
+pub(crate) struct ParsedSvg {
+    pub tree: usvg::Tree,
+    pub width: u32,
+    pub height: u32,
+}
+
+pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> Option<ParsedSvg> {
+    let tree = usvg::Tree::from_data(raw, &svg_options(path)).ok()?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return None;
+    }
+    Some(ParsedSvg {
+        tree,
+        width: size.width().ceil() as u32,
+        height: size.height().ceil() as u32,
+    })
+}
+
+pub(crate) fn probe_svg_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    parse_svg(raw, None).map(|s| (s.width, s.height))
+}
+
+pub fn decode_svg(
+    tree: &usvg::Tree,
+    target_w: u32,
+    target_h: u32,
+) -> Result<image::DynamicImage, String> {
+    let size = tree.size();
+    let src_w = size.width();
+    let src_h = size.height();
+    if src_w <= 0.0 || src_h <= 0.0 {
+        return Err("SVG has invalid size".to_string());
+    }
+
+    let tw = target_w.max(1);
+    let th = target_h.max(1);
+    let worst = (tw as u64).saturating_mul(th as u64).saturating_mul(4);
+    if worst > runtime_limits().max_alloc {
+        return Err("SVG target size too large".to_string());
+    }
+    let mut pixmap = tiny_skia::Pixmap::new(tw, th)
+        .ok_or_else(|| "SVG target size too large".to_string())?;
+    let transform = tiny_skia::Transform::from_scale(tw as f32 / src_w, th as f32 / src_h);
+    resvg::render(tree, transform, &mut pixmap.as_mut());
+
+    unpremultiply_rgba(pixmap.data_mut());
+    let rgba = pixmap.data().to_vec();
+    let img = image::RgbaImage::from_raw(tw, th, rgba)
+        .ok_or_else(|| "failed to build SVG raster buffer".to_string())?;
+
+    Ok(image::DynamicImage::ImageRgba8(img))
+}
+
+fn unpremultiply_rgba(buf: &mut [u8]) {
+    for px in buf.chunks_exact_mut(4) {
+        let a = px[3] as u32;
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+        } else {
+            for c in 0..3 {
+                let v = px[c] as u32;
+                px[c] = ((v * 255 + a / 2) / a) as u8;
+            }
+        }
+    }
+}
+
 // ── HEIF helpers (libheif-rs 2.7 + image feature) ─────────────
 
 pub(crate) fn is_heif(buf: &[u8]) -> bool {
@@ -383,10 +672,24 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
         packed.extend_from_slice(&row[..row_size]);
     }
 
-    let img = if has_alpha {
-        image::RgbaImage::from_raw(width, height, packed).map(image::DynamicImage::ImageRgba8)
-    } else {
-        image::RgbImage::from_raw(width, height, packed).map(image::DynamicImage::ImageRgb8)
+    let img = match (has_alpha, bpp) {
+        (false, 3) => image::RgbImage::from_raw(width, height, packed).map(image::DynamicImage::ImageRgb8),
+        (true, 4) => image::RgbaImage::from_raw(width, height, packed).map(image::DynamicImage::ImageRgba8),
+        (false, 6) | (true, 8) => {
+            let channels = if has_alpha { 4 } else { 3 };
+            let mut down = Vec::with_capacity(width as usize * height as usize * channels);
+            for px in packed.chunks_exact(bpp) {
+                for c in 0..channels {
+                    down.push(px[c * 2 + 1]);
+                }
+            }
+            if has_alpha {
+                image::RgbaImage::from_raw(width, height, down).map(image::DynamicImage::ImageRgba8)
+            } else {
+                image::RgbImage::from_raw(width, height, down).map(image::DynamicImage::ImageRgb8)
+            }
+        }
+        _ => anyhow::bail!("{}", msg().err_heif_decode),
     };
 
     Ok(img.context(msg().err_heif_decode)?)

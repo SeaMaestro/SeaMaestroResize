@@ -60,7 +60,7 @@ pub(crate) fn usable_ram() -> u64 {
     let mut st: MemoryStatusEx = unsafe { std::mem::zeroed() };
     st.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
     unsafe { GlobalMemoryStatusEx(&mut st) };
-    st.ull_total_phys
+    st.ull_avail_phys
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -90,6 +90,7 @@ mod decode;
 mod rename;
 mod help;
 mod pdf;
+mod svg_pdf;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::env;
@@ -109,7 +110,10 @@ use rayon::prelude::*;
 use unicode_width::UnicodeWidthStr;
 use indicatif::{ProgressBar, ProgressStyle};
 use encode::{encode_bmp, encode_to_vec};
-use decode::{decode_image, is_heif, mem_budget, probe_image, MemPermit};
+use decode::{
+    decode_image, is_heif, looks_like_svg, mem_budget, parse_svg, probe_image,
+    raster_need, MemPermit,
+};
 use rename::try_apply_single;
 use help::{boxed, pad_right, print_help_table};
 
@@ -169,6 +173,24 @@ fn next_shanty() -> &'static str {
 }
 
 static HAD_ERRORS: AtomicBool = AtomicBool::new(false);
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(p) => Err(anyhow::anyhow!("{}", panic_message(p))),
+    }
+}
+
 // ── CLI ───────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -176,7 +198,7 @@ static HAD_ERRORS: AtomicBool = AtomicBool::new(false);
     name = "SeaMonkeyResize",
     version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
-    after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
+    after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
     seamonkey --size 800 --format webp --quality 80 photo.jpg\n    \
@@ -295,7 +317,7 @@ impl ImageFormat {
         }
     }
     fn is_lossless(&self) -> bool {
-        matches!(self, ImageFormat::Png | ImageFormat::Ico | ImageFormat::Qoi | ImageFormat::Bmp | ImageFormat::Gif)
+        matches!(self, ImageFormat::Png | ImageFormat::Ico | ImageFormat::Qoi | ImageFormat::Bmp | ImageFormat::Gif | ImageFormat::Tiff)
     }
 }
 
@@ -421,7 +443,7 @@ fn run() -> Result<Config> {
         banner(&config);
         if let Some(buf) = stdin_buf {
             if config.output.is_none() {
-                process_and_write_stdout(&buf, &config)?;
+                run_safely(|| process_and_write_stdout(&buf, &config))?;
             } else {
                 let out = PathBuf::from(config.output.as_deref().unwrap());
                 if let Some(parent) = out.parent() {
@@ -430,7 +452,7 @@ fn run() -> Result<Config> {
                             .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
                     }
                 }
-                let bytes = process_bytes(&buf, &config)?;
+                let bytes = run_safely(|| process_bytes(&buf, &config))?;
                 atomic_write(&out, &bytes)?;
             }
         } else {
@@ -501,6 +523,7 @@ fn collect_input_files(paths: &[String]) -> Vec<InputEntry> {
         "mrw","mef","erf","kdc",
         "dcs","dcr","srw","iiq",
         "3fr","mos","x3f","ari",
+        "svg","svgz",
     ];
     let mut result = Vec::new();
     for raw in paths {
@@ -550,7 +573,7 @@ where I: IntoIterator<Item = P>, P: AsRef<Path>
         Some(p) => p.as_ref().to_path_buf(),
         None => return PathBuf::new(),
     };
-    let mut common = first;
+    let mut common = first.clone();
     for p in iter {
         common = common
             .components()
@@ -558,8 +581,15 @@ where I: IntoIterator<Item = P>, P: AsRef<Path>
             .take_while(|(a, b)| a == b)
             .map(|(a, _)| a)
             .collect();
+        if common.as_os_str().is_empty() {
+            break;
+        }
     }
-    common
+    if common.as_os_str().is_empty() {
+        first
+    } else {
+        common
+    }
 }
 
 fn has_word(haystack: &str, needle: &str) -> bool {
@@ -867,7 +897,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let results: Vec<(PathBuf, Result<PathBuf, String>, usize)> = final_tasks
         .par_iter().enumerate()
         .map(|(_idx, (input, final_path))| {
-            let result = process_image(input, config, final_path);
+            let result = run_safely(|| process_image(input, config, final_path));
 
             let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
             if let Some(ref pb) = pb {
@@ -990,6 +1020,10 @@ fn process_files(entries: &[InputEntry], config: &Config) {
 
 // ── build_suffix ──────────────────────────────────────────────
 
+fn is_lossless_mode(config: &Config) -> bool {
+    config.lossless && config.format != ImageFormat::Jpeg
+}
+
 fn build_suffix(config: &Config) -> String {
     let mut parts = Vec::new();
     if let Some(ref size) = config.target_size {
@@ -1001,7 +1035,7 @@ fn build_suffix(config: &Config) -> String {
             Size::Percent(p) => parts.push(format!("p{:.0}", p * 100.0)),
         }
     }
-    if !config.format.is_lossless() && !config.lossless {
+    if !config.format.is_lossless() && !is_lossless_mode(config) {
         parts.push(format!("q{}", config.quality));
     }
     if config.grayscale { parts.push("bw".to_string()); }
@@ -1051,24 +1085,10 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     let raw = fs::read(input)
         .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
 
-    let need = probe_image(&raw);
-    let budget = mem_budget();
-    budget.acquire(need);
-    let _permit = MemPermit { budget, need };
-
-    let (mut img, icc, exif) = decode_image(&raw, Some(input))
-        .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?;
-    if !is_heif(&raw) {
-        img = auto_orient(img, &raw);
-    }
-
-    if config.grayscale { img = img.grayscale(); }
-    if let Some(ref size) = config.target_size {
-        img = apply_resize(img, size);
-    }
-    if config.sharpen {
-        img = img.unsharpen(1.0, 3);
-    }
+    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(input)) } else { None };
+    let svg_render = svg
+        .as_ref()
+        .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
     let out_path = if let Some(ref out) = config.output {
         PathBuf::from(out)
@@ -1078,6 +1098,52 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
 
     if path_key(&out_path) == path_key(input) {
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
+    }
+
+    if !config.grayscale && !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
+        if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+                if let Some(parent) = out_path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
+                    }
+                }
+                let bytes = crate::pdf::page_pdf(crate::pdf::PdfPage::Vector(vp))?;
+                atomic_write(&out_path, &bytes)?;
+                return Ok(out_path);
+            }
+        }
+    }
+
+    let need = match svg_render {
+        Some(((tw, th), _)) => raster_need(tw, th),
+        None => probe_image(&raw),
+    };
+    let budget = mem_budget();
+    budget.acquire(need);
+    let _permit = MemPermit { budget, need };
+
+    let (mut img, icc, exif) = decode_image(
+        &raw,
+        Some(input),
+        svg_render.map(|((w, h), _)| (w, h)),
+        svg.as_ref().map(|s| &s.tree),
+    )
+    .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?;
+    if !looks_like_svg(&raw) && !is_heif(&raw) {
+        img = auto_orient(img, &raw);
+    }
+
+    if config.grayscale { img = img.grayscale(); }
+    if let Some(ref size) = config.target_size {
+        let skip_resize = matches!(svg_render, Some((_, true)));
+        if !skip_resize {
+            img = apply_resize(img, size);
+        }
+    }
+    if config.sharpen {
+        img = sharpen_par(img, 3);
     }
 
     if let Some(parent) = out_path.parent() {
@@ -1148,6 +1214,43 @@ fn apply_resize(img: image::DynamicImage, size: &Size) -> image::DynamicImage {
     }
 }
 
+fn svg_target_dims(native: (u32, u32), size: Option<&Size>) -> ((u32, u32), bool) {
+    let (nw, nh) = native;
+    match size {
+        None => ((nw, nh), true),
+        Some(Size::Width(tw)) => {
+            let h = ((nh as f64 * *tw as f64 / nw as f64) as u32).max(1);
+            ((*tw, h), true)
+        }
+        Some(Size::Height(th)) => {
+            let w = ((nw as f64 * *th as f64 / nh as f64) as u32).max(1);
+            ((w, *th), true)
+        }
+        Some(Size::LongEdge(n)) => {
+            if *n >= nw.max(nh) {
+                ((nw, nh), true)
+            } else if nw >= nh {
+                let h = ((nh as f64 * *n as f64 / nw as f64) as u32).max(1);
+                ((*n, h), true)
+            } else {
+                let w = ((nw as f64 * *n as f64 / nh as f64) as u32).max(1);
+                ((w, *n), true)
+            }
+        }
+        Some(Size::Percent(p)) => {
+            let w = ((nw as f64 * *p) as u32).max(1);
+            let h = ((nh as f64 * *p) as u32).max(1);
+            ((w, h), true)
+        }
+        Some(Size::Dimensions(tw, th)) => {
+            let ratio = (*tw as f64 / nw as f64).max(*th as f64 / nh as f64);
+            let iw = (nw as f64 * ratio).ceil() as u32;
+            let ih = (nh as f64 * ratio).ceil() as u32;
+            ((iw, ih), false)
+        }
+    }
+}
+
 fn resize_dynamic(
     img: image::DynamicImage,
     w: u32,
@@ -1163,6 +1266,67 @@ fn resize_dynamic(
         dst
     } else {
         img.resize_exact(w, h, FilterType::Lanczos3)
+    }
+}
+
+fn sharpen_par(mut img: image::DynamicImage, threshold: i32) -> image::DynamicImage {
+    let done = if let Some(g) = img.as_mut_luma8() {
+        let (w, h) = (g.width() as usize, g.height() as usize);
+        unsharp_plane(g.as_mut(), w, h, 1, threshold);
+        true
+    } else if let Some(la) = img.as_mut_luma_alpha8() {
+        let (w, h) = (la.width() as usize, la.height() as usize);
+        unsharp_plane(la.as_mut(), w, h, 2, threshold);
+        true
+    } else if let Some(rgb) = img.as_mut_rgb8() {
+        let (w, h) = (rgb.width() as usize, rgb.height() as usize);
+        unsharp_plane(rgb.as_mut(), w, h, 3, threshold);
+        true
+    } else if let Some(rgba) = img.as_mut_rgba8() {
+        let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+        unsharp_plane(rgba.as_mut(), w, h, 4, threshold);
+        true
+    } else {
+        false
+    };
+    if done {
+        img
+    } else {
+        img.unsharpen(1.0, threshold)
+    }
+}
+
+fn unsharp_plane(buf: &mut [u8], w: usize, h: usize, ch: usize, threshold: i32) {
+    let taps = [0.054488f32, 0.244201, 0.402620, 0.244201, 0.054488];
+    let r = 2isize;
+    let stride = w * ch;
+    let mut tmp = vec![0f32; w * h];
+    for c in 0..ch {
+        let src_plane: &[u8] = buf;
+        tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+            let src = &src_plane[y * stride..(y + 1) * stride];
+            for x in 0..w {
+                let mut acc = 0f32;
+                for (k, t) in taps.iter().enumerate() {
+                    let xx = (x as isize + k as isize - r).clamp(0, (w - 1) as isize) as usize;
+                    acc += src[xx * ch + c] as f32 * t;
+                }
+                row[x] = acc;
+            }
+        });
+        buf.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
+            for x in 0..w {
+                let mut acc = 0f32;
+                for (k, t) in taps.iter().enumerate() {
+                    let yy = (y as isize + k as isize - r).clamp(0, (h - 1) as isize) as usize;
+                    acc += tmp[yy * w + x] * t;
+                }
+                let o = row[x * ch + c] as f32;
+                let diff = o - acc;
+                let amt = if diff.abs() >= threshold as f32 { diff } else { 0.0 };
+                row[x * ch + c] = (o + amt).clamp(0.0, 255.0).round() as u8;
+            }
+        });
     }
 }
 
@@ -1215,14 +1379,29 @@ where F: FnOnce(&Path) -> Result<()>
 // ── process_and_write_stdout / encode_to_vec ──────────────────
 
 fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
-    let (img, icc, exif) = decode_image(raw, None)
-        .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?;
-    let img = if !is_heif(raw) { auto_orient(img, raw) } else { img };
+    let svg = if looks_like_svg(raw) { parse_svg(raw, None) } else { None };
+    let svg_render = svg
+        .as_ref()
+        .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
+
+    let (img, icc, exif) = decode_image(
+        raw,
+        None,
+        svg_render.map(|((w, h), _)| (w, h)),
+        svg.as_ref().map(|s| &s.tree),
+    )
+    .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?;
+    let img = if !looks_like_svg(raw) && !is_heif(raw) { auto_orient(img, raw) } else { img };
     let img = if config.grayscale { img.grayscale() } else { img };
     let img = if let Some(ref size) = config.target_size {
-        apply_resize(img, size)
+        let skip_resize = matches!(svg_render, Some((_, true)));
+        if skip_resize {
+            img
+        } else {
+            apply_resize(img, size)
+        }
     } else { img };
-    let img = if config.sharpen { img.unsharpen(1.0, 3) } else { img };
+    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
     let exif = if config.keep_exif { exif.as_deref() } else { None };
     encode_to_vec(&img, config, icc.as_deref(), exif)
 }
@@ -1288,10 +1467,10 @@ fn banner(config: &Config) {
     eprintln!("  ╠{}╣", "─".repeat(62));
     eprintln!("  ║  {:<13}{}  ║", m.label_size, pad_right(&size_str, 45));
     eprintln!("  ║  {:<13}{}  ║", m.label_format, pad_right(&fmt_str, 45));
-    if !config.format.is_lossless() && !config.lossless {
+    if !config.format.is_lossless() && !is_lossless_mode(config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_quality, pad_right(&format!("{}", config.quality), 45));
     }
-    if config.lossless {
+    if is_lossless_mode(config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_lossless, pad_right(m.on, 45));
     }
     if config.progressive {
@@ -1419,9 +1598,13 @@ fn random_funny_message() -> String {
     m.funny[fastrand::usize(..m.funny.len())].to_string()
 }
 
-fn merge_chunk_len(total: usize) -> usize {
+fn merge_chunk_len(total: usize, config: &Config) -> usize {
     let budget = (usable_ram() / 8).clamp(64 * 1024 * 1024, 512 * 1024 * 1024);
-    let per_page = 8 * 1024 * 1024;
+    let per_page = if config.lossless {
+        64 * 1024 * 1024
+    } else {
+        8 * 1024 * 1024
+    };
     let n = (budget / per_page) as usize;
     n.clamp(1, total)
 }
@@ -1501,7 +1684,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let mut error_list: Vec<(String, String)> = Vec::new();
     let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-    let chunk = merge_chunk_len(total);
+    let chunk = merge_chunk_len(total, config);
     let mut written = 0usize;
 
     let mut offset = 0usize;
@@ -1515,7 +1698,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
                 let idx = offset + local;
                 let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
                 let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
-                let res = process_one_to_pdf(entry, config).map_err(|e| format!("{:#}", e));
+                let res = run_safely(|| process_one_to_pdf(entry, config)).map_err(|e| format!("{:#}", e));
 
                 let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
                 if let Some(ref pb) = pb {
@@ -1524,7 +1707,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 
                 match &res {
                     Ok(page) => {
-                        let out_size = page.data.len() as u64;
+                        let out_size = page.size_hint() as u64;
                         let pct = (out_size as f64 / in_size as f64) * 100.0;
                         let remark = if pct < 20.0 { m.remark_great }
                             else if pct < 50.0 { m.remark_good }
@@ -1667,16 +1850,46 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
     let raw = fs::read(&entry.file)
         .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
-    let need = probe_image(&raw);
+
+    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(&entry.file)) } else { None };
+    let svg_render = svg
+        .as_ref()
+        .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
+
+    if !config.grayscale && !config.sharpen {
+        if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+                return Ok(crate::pdf::PdfPage::Vector(vp));
+            }
+        }
+    }
+
+    let need = match svg_render {
+        Some(((tw, th), _)) => raster_need(tw, th),
+        None => probe_image(&raw),
+    };
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
-    let (img, _icc, _exif) = decode_image(&raw, None)
-        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
-    let img = if !is_heif(&raw) { auto_orient(img, &raw) } else { img };
+
+    let (img, _icc, _exif) = decode_image(
+        &raw,
+        None,
+        svg_render.map(|((w, h), _)| (w, h)),
+        svg.as_ref().map(|s| &s.tree),
+    )
+    .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let img = if !looks_like_svg(&raw) && !is_heif(&raw) { auto_orient(img, &raw) } else { img };
     let img = if config.grayscale { img.grayscale() } else { img };
-    let img = if let Some(ref size) = config.target_size { apply_resize(img, size) } else { img };
-    let img = if config.sharpen { img.unsharpen(1.0, 3) } else { img };
+    let img = if let Some(ref size) = config.target_size {
+        let skip_resize = matches!(svg_render, Some((_, true)));
+        if skip_resize {
+            img
+        } else {
+            apply_resize(img, size)
+        }
+    } else { img };
+    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
     crate::pdf::make_page(&img, config)
 }
 
