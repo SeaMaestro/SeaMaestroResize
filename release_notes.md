@@ -1,4 +1,17 @@
-# SeaMonkeyResize v2.2.1
+## v2.3.0
+
+- SVG/SVGZ input (raster via resvg; gradients, filters, masks, clip paths,
+  patterns, embedded images and text are supported).
+- SVG → PDF vector output for flat graphics (solid fill/stroke, transforms,
+  opacity, dash), for both single-file `--format pdf` and `--merge`.
+  Any unsupported SVG feature falls back to raster per page.
+- `--bw`, `--sharpen` and cover-crop (`WxH`) force raster for SVG; fixed crop
+  producing a wrong page size in vector mode.
+- Hardening: per-file panic isolation, SVG parse guards, unsharp hoist,
+  memory/IO guards, atomic writes.
+- libheif static linking; CMYK JPEG handling; reduced temp-folder telemetry noise.
+
+## v2.2.1
 
 ⚓ Multiformat batch image resizer and converter for Windows.
 A single static executable — no installer, no external DLLs, no MSVC runtime.

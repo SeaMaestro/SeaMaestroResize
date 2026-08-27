@@ -129,7 +129,7 @@ fn encode_webp_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, ic
     let has_icc = icc.map_or(false, |p| !p.is_empty());
     let has_exif = exif.map_or(false, |e| !e.is_empty());
     if has_icc || has_exif {
-        webp_embed_metadata(bytes, icc, exif, w, h)
+        webp_embed_metadata(bytes, icc, exif, w, h, img.color().has_alpha())
     } else {
         Ok(bytes)
     }
