@@ -161,7 +161,7 @@ pub struct Messages {
 
 pub const EN: Messages = Messages {
     about: "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
-    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI EXAMPLES:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXE RENAME EXAMPLES (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
+    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI EXAMPLES:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXE RENAME EXAMPLES (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
     h_resize: "RESIZE",
     h_misc: "MISC",
     h_input: "INPUT",
@@ -373,7 +373,8 @@ pub const EN: Messages = Messages {
         HelpRow::Text("   Example name:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("DEFAULTS"),
         HelpRow::Pair("Format:", "WebP    Quality: 85    Size: original    Language: English"),
-        HelpRow::Pair("INPUT:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("INPUT:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("OUTPUT:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -429,7 +430,7 @@ pub const EN: Messages = Messages {
 
 pub const RU: Messages = Messages {
     about: "⚓ Морской конвертер изображений — изменение размера, конвертация и оптимизация из командной строки.",
-    after_help: "ВХОД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nВЫХОД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИМЕРЫ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ПРИМЕРЫ ПЕРЕИМЕНОВАНИЯ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → качество 80, ширина 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → ширина 1920px, JPEG, качество 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 кадрирование, PNG, ч/б",
+    after_help: "ВХОД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nВЫХОД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИМЕРЫ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ПРИМЕРЫ ПЕРЕИМЕНОВАНИЯ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → качество 80, ширина 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → ширина 1920px, JPEG, качество 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 кадрирование, PNG, ч/б",
     h_resize: "РАЗМЕР",
     h_misc: "ПРОЧЕЕ",
     h_input: "ВХОД",
@@ -641,7 +642,8 @@ pub const RU: Messages = Messages {
         HelpRow::Text("   Пример имени:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("ПО УМОЛЧАНИЮ"),
         HelpRow::Pair("Формат:", "WebP    Качество: 85    Размер: исходный    Язык: Английский"),
-        HelpRow::Pair("ВХОД:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("ВХОД:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("ВЫХОД:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -695,7 +697,7 @@ pub const RU: Messages = Messages {
 
 pub const UK: Messages = Messages {
     about: "⚓ Морський конвертер зображень — зміна розміру, конвертація та оптимізація з командного рядка.",
-    after_help: "ВХІД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nВИХІД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИКЛАДИ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ПРИКЛАДИ ПЕРЕЙМЕНУВАННЯ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → якість 80, ширина 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → ширина 1920px, JPEG, якість 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 кадрування, PNG, ч/б",
+    after_help: "ВХІД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nВИХІД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИКЛАДИ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ПРИКЛАДИ ПЕРЕЙМЕНУВАННЯ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → якість 80, ширина 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → ширина 1920px, JPEG, якість 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 кадрування, PNG, ч/б",
     h_resize: "РОЗМІР",
     h_misc: "ІНШЕ",
     h_input: "ВХІД",
@@ -907,7 +909,8 @@ pub const UK: Messages = Messages {
         HelpRow::Text("   Приклад імені:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("ЗА ЗАМОВЧУВАННЯМ"),
         HelpRow::Pair("Формат:", "WebP    Якість: 85    Розмір: оригінал    Мова: Англійська"),
-        HelpRow::Pair("ВХІД:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("ВХІД:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("ВИХІД:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -964,7 +967,7 @@ pub const UK: Messages = Messages {
 // =====================================================================
 pub const DE: Messages = Messages {
     about: "⚓ Maritimer Bildkonverter — Ändern der Größe, Konvertieren und Optimieren über die Kommandozeile.",
-    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI BEISPIELE:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXE UMBENENNEN BEISPIELE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → Qualität 80, 800px Breite, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px Breite, JPEG, Qualität 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 Zuschnitt, PNG, Graustufen",
+    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI BEISPIELE:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXE UMBENENNEN BEISPIELE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → Qualität 80, 800px Breite, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px Breite, JPEG, Qualität 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 Zuschnitt, PNG, Graustufen",
     h_resize: "GRÖSSE",
     h_misc: "SONSTIGES",
     h_input: "EINGABE",
@@ -1176,7 +1179,8 @@ pub const DE: Messages = Messages {
         HelpRow::Text("   Beispielname:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("STANDARDWERTE"),
         HelpRow::Pair("Format:", "WebP    Qualität: 85    Größe: Original    Sprache: Englisch"),
-        HelpRow::Pair("EINGABE:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("EINGABE:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("AUSGABE:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -1233,7 +1237,7 @@ pub const DE: Messages = Messages {
 // =====================================================================
 pub const ES: Messages = Messages {
     about: "⚓ Redimensionador de imágenes marítimo — redimensiona, convierte y optimiza imágenes desde la consola.",
-    after_help: "ENTRADA: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nSALIDA: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EJEMPLOS CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EJEMPLOS RENOMBRANDO EL EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → calidad 80, 800px de ancho, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px de ancho, JPEG, calidad 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → recorte 300×300, PNG, escala de grises",
+    after_help: "ENTRADA: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nSALIDA: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EJEMPLOS CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EJEMPLOS RENOMBRANDO EL EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → calidad 80, 800px de ancho, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px de ancho, JPEG, calidad 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → recorte 300×300, PNG, escala de grises",
     h_resize: "TAMAÑO",
     h_misc: "MISCELÁNEA",
     h_input: "ENTRADA",
@@ -1445,7 +1449,8 @@ pub const ES: Messages = Messages {
         HelpRow::Text("   Nombre de ejemplo:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("VALORES POR DEFECTO"),
         HelpRow::Pair("Formato:", "WebP    Calidad: 85    Tamaño: original    Idioma: Inglés"),
-        HelpRow::Pair("ENTRADA:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("ENTRADA:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("SALIDA:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -1502,7 +1507,7 @@ pub const ES: Messages = Messages {
 // =====================================================================
 pub const FR: Messages = Messages {
     about: "⚓ Convertisseur d'images maritime — redimensionnez, convertissez et optimisez des images en ligne de commande.",
-    after_help: "ENTRÉE: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nSORTIE: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EXEMPLES CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXEMPLES EN RENOMMANT L'EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → qualité 80, largeur 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → largeur 1920px, JPEG, qualité 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → rognage 300×300, PNG, niveaux de gris",
+    after_help: "ENTRÉE: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nSORTIE: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EXEMPLES CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  EXEMPLES EN RENOMMANT L'EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → qualité 80, largeur 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → largeur 1920px, JPEG, qualité 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → rognage 300×300, PNG, niveaux de gris",
     h_resize: "TAILLE",
     h_misc: "DIVERS",
     h_input: "ENTRÉE",
@@ -1714,7 +1719,8 @@ pub const FR: Messages = Messages {
         HelpRow::Text("   Nom d'exemple :  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("VALEURS PAR DÉFAUT"),
         HelpRow::Pair("Format :", "WebP    Qualité : 85    Taille : originale    Langue : Anglais"),
-        HelpRow::Pair("ENTRÉE :", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("ENTRÉE :", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("SORTIE :", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -1771,7 +1777,7 @@ pub const FR: Messages = Messages {
 // =====================================================================
 pub const EL: Messages = Messages {
     about: "⚓ Ναυτικός μετατροπέας εικόνων — αλλαγή μεγέθους, μετατροπή και βελτιστοποίηση εικόνων από το τερματικό.",
-    after_help: "ΕΙΣΟΔΟΣ: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nΕΞΟΔΟΣ: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ ΜΕΤΟΝΟΜΑΣΙΑΣ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → ποιότητα 80, πλάτος 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → πλάτος 1920px, JPEG, ποιότητα 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 περικοπή, PNG, ασπρόμαυρο",
+    after_help: "ΕΙΣΟΔΟΣ: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nΕΞΟΔΟΣ: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ ΜΕΤΟΝΟΜΑΣΙΑΣ EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → ποιότητα 80, πλάτος 800px, WebP\n    SeaMonkeyResize1920jpgq85.exe          → πλάτος 1920px, JPEG, ποιότητα 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 περικοπή, PNG, ασπρόμαυρο",
     h_resize: "ΜΕΓΕΘΟΣ",
     h_misc: "ΔΙΑΦΟΡΑ",
     h_input: "ΕΙΣΟΔΟΣ",
@@ -1983,7 +1989,8 @@ pub const EL: Messages = Messages {
         HelpRow::Text("   Παράδειγμα ονόματος:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("ΠΡΟΕΠΙΛΟΓΕΣ"),
         HelpRow::Pair("Μορφή:", "WebP    Ποιότητα: 85    Μέγεθος: αρχικό    Γλώσσα: Αγγλικά"),
-        HelpRow::Pair("ΕΙΣΟΔΟΣ:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("ΕΙΣΟΔΟΣ:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("ΕΞΟΔΟΣ:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
@@ -2040,7 +2047,7 @@ pub const EL: Messages = Messages {
 // =====================================================================
 pub const FIL: Messages = Messages {
     about: "⚓ Maritime image resizer — pampaliit, converter, at optimizer ng mga imahe gamit ang command line.",
-    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF  HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  MGA HALIMBAWA SA CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  MGA HALIMBAWA SA PAG-RENAME NG EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px ang lapad, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px ang lapad, JPEG, quality 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
+    after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  MGA HALIMBAWA SA CLI:\n    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    seamonkey --size 50pct --format avif photo.heic\n    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamonkey --format webp > out.webp\n    seamonkey --size 1200 --format pdf --quality 85 photo.jpg\n    seamonkey --merge --format pdf --quality 85 *.jpg\n\n  MGA HALIMBAWA SA PAG-RENAME NG EXE (Windows):\n    SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px ang lapad, WebP\n    SeaMonkeyResize1920jpgq85.exe          → 1920px ang lapad, JPEG, quality 85\n    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
     h_resize: "SIZE",
     h_misc: "IBA PA",
     h_input: "INPUT",
@@ -2252,7 +2259,9 @@ pub const FIL: Messages = Messages {
         HelpRow::Text("   Halimbawang pangalan:  SeaMonkeyResize_q80_w800_webp_ru.exe"),
         HelpRow::Title("MGA DEFAULT"),
         HelpRow::Pair("Format:", "WebP    Kalidad: 85    Laki: orihinal    Wika: Ingles"),
-        HelpRow::Pair("INPUT:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF HEIC HEIF HIF"),
+        HelpRow::Pair("INPUT:", "JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
+        HelpRow::Pair("", "HEIC HEIF HIF"),
         HelpRow::Pair("", "RAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF"),
         HelpRow::Pair("", "RW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI"),
         HelpRow::Pair("OUTPUT:", "webp jpeg avif png jxl ico tiff qoi bmp gif pdf"),
