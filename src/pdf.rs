@@ -371,6 +371,10 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()
     }
 
+    fn function2_dict(c0: [f32; 3], c1: [f32; 3]) -> String {
+        format!("<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n", c0[0], c0[1], c0[2], c1[0], c1[1], c1[2])
+    }
+
     fn write_shading(&mut self, sh: &ShadingRes) -> Result<u32> {
         let n = sh.stops.len();
 
@@ -379,10 +383,7 @@ impl<W: Write> PdfSink<W> {
             let (_, c0) = sh.stops[0];
             let (_, c1) = sh.stops[1];
             self.begin_obj(func_id)?;
-            self.raw(&format!(
-                "<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n",
-                c0[0], c0[1], c0[2], c1[0], c1[1], c1[2]
-            ))?;
+            self.raw(&Self::function2_dict(c0, c1))?;
             self.end_obj()?;
             format!("{} 0 R", func_id)
         } else {
@@ -392,10 +393,7 @@ impl<W: Write> PdfSink<W> {
                 let (_, c1) = sh.stops[i + 1];
                 let sub_id = self.alloc_id();
                 self.begin_obj(sub_id)?;
-                self.raw(&format!(
-                    "<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n",
-                    c0[0], c0[1], c0[2], c1[0], c1[1], c1[2]
-                ))?;
+                self.raw(&Self::function2_dict(c0, c1))?;
                 self.end_obj()?;
                 sub_refs.push(format!("{} 0 R", sub_id));
             }

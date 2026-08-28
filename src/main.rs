@@ -1100,9 +1100,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
     }
 
-    if !config.grayscale && !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
+    if !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 if let Some(parent) = out_path.parent() {
                     if !parent.as_os_str().is_empty() {
                         fs::create_dir_all(parent)
@@ -1856,9 +1856,9 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.grayscale && !config.sharpen {
+    if !config.sharpen {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 return Ok(crate::pdf::PdfPage::Vector(vp));
             }
         }

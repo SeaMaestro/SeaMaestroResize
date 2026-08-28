@@ -58,7 +58,7 @@ enum GradientPaint {
     Pattern(String),
 }
 
-pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32) -> Option<VectorPage> {
+pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32, grayscale: bool) -> Option<VectorPage> {
     let size = tree.size();
     let sw = size.width();
     if sw <= 0.0 || size.height() <= 0.0 {
@@ -81,7 +81,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32)
     }
 
     for node in root.children() {
-        if !emit_node(node, s, th, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images) {
+        if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images) {
             return None;
         }
     }
@@ -101,6 +101,7 @@ fn emit_node(
     node: &usvg::Node,
     s: f32,
     th: f32,
+    grayscale: bool,
     out: &mut String,
     ext_gs: &mut Vec<(String, f32, f32)>,
     gs_names: &mut BTreeMap<(u16, u16), String>,
@@ -143,7 +144,7 @@ fn emit_node(
                     out.push_str("n\n");
                 }
                 for child in g.children() {
-                    if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
                         return false;
                     }
                 }
@@ -153,21 +154,21 @@ fn emit_node(
                 return false;
             } else {
                 for child in g.children() {
-                    if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
                         return false;
                     }
                 }
                 true
             }
         }
-        usvg::Node::Path(p) => emit_path(p, s, th, out, ext_gs, gs_names, shadings, patterns),
-        usvg::Node::Image(img) => emit_image(img, s, th, out, images),
+        usvg::Node::Path(p) => emit_path(p, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns),
+        usvg::Node::Image(img) => emit_image(img, s, th, grayscale, out, images),
         usvg::Node::Text(t) => {
             for child in t.flattened().children() {
                 if !matches!(child, usvg::Node::Path(_)) {
                     return false;
                 }
-                if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
                     return false;
                 }
             }
@@ -242,6 +243,7 @@ fn emit_path(
     p: &usvg::Path,
     s: f32,
     th: f32,
+    grayscale: bool,
     out: &mut String,
     ext_gs: &mut Vec<(String, f32, f32)>,
     gs_names: &mut BTreeMap<(u16, u16), String>,
@@ -274,14 +276,14 @@ fn emit_path(
 
     let fill_res = match fill {
         None => None,
-        Some(f) => match resolve_paint(f.paint(), f.opacity().get(), &m, shadings, patterns) {
+        Some(f) => match resolve_paint(f.paint(), f.opacity().get(), &m, grayscale, shadings, patterns) {
             Some(rp) => Some((rp, f.rule())),
             None => return false,
         },
     };
     let stroke_res = match stroke {
         None => None,
-        Some(st) => match resolve_paint(st.paint(), st.opacity().get(), &m, shadings, patterns) {
+        Some(st) => match resolve_paint(st.paint(), st.opacity().get(), &m, grayscale, shadings, patterns) {
             Some(rp) => Some(rp),
             None => return false,
         },
@@ -317,17 +319,17 @@ fn emit_path(
     match (&fill_res, &stroke_res, stroke) {
         (Some((fp, rule)), Some(sp), Some(st)) => {
             set_stroke_params(st, stroke_scale, out);
-            set_fill(fp, out);
-            set_stroke_paint(sp, out);
+            set_fill(fp, grayscale, out);
+            set_stroke_paint(sp, grayscale, out);
             out.push_str(if *rule == usvg::FillRule::EvenOdd { "B*\n" } else { "B\n" });
         }
         (Some((fp, rule)), None, _) => {
-            set_fill(fp, out);
+            set_fill(fp, grayscale, out);
             out.push_str(if *rule == usvg::FillRule::EvenOdd { "f*\n" } else { "f\n" });
         }
         (None, Some(sp), Some(st)) => {
             set_stroke_params(st, stroke_scale, out);
-            set_stroke_paint(sp, out);
+            set_stroke_paint(sp, grayscale, out);
             out.push_str("S\n");
         }
         _ => {}
@@ -337,17 +339,19 @@ fn emit_path(
     true
 }
 
-fn set_fill(rp: &ResolvedPaint, out: &mut String) {
+fn set_fill(rp: &ResolvedPaint, gray: bool, out: &mut String) {
     match (&rp.pattern, &rp.color) {
         (Some(name), _) => out.push_str(&format!("/Pattern cs /{} scn\n", name)),
+        (None, Some(c)) if gray => out.push_str(&format!("{} g\n", c[0])),
         (None, Some(c)) => out.push_str(&format!("{} {} {} rg\n", c[0], c[1], c[2])),
         (None, None) => {}
     }
 }
 
-fn set_stroke_paint(rp: &ResolvedPaint, out: &mut String) {
+fn set_stroke_paint(rp: &ResolvedPaint, gray: bool, out: &mut String) {
     match (&rp.pattern, &rp.color) {
         (Some(name), _) => out.push_str(&format!("/Pattern CS /{} SCN\n", name)),
+        (None, Some(c)) if gray => out.push_str(&format!("{} G\n", c[0])),
         (None, Some(c)) => out.push_str(&format!("{} {} {} RG\n", c[0], c[1], c[2])),
         (None, None) => {}
     }
@@ -357,18 +361,23 @@ fn resolve_paint(
     paint: &usvg::Paint,
     alpha: f32,
     m: &usvg::Transform,
+    grayscale: bool,
     shadings: &mut Vec<ShadingRes>,
     patterns: &mut Vec<PatternRes>,
 ) -> Option<ResolvedPaint> {
     match paint {
         usvg::Paint::Color(c) => Some(ResolvedPaint {
-            color: Some([fr(c.red), fr(c.green), fr(c.blue)]),
+            color: Some(if grayscale {
+                gray3(c.red, c.green, c.blue)
+            } else {
+                [fr(c.red), fr(c.green), fr(c.blue)]
+            }),
             pattern: None,
             alpha,
         }),
         usvg::Paint::LinearGradient(lg) => {
             let g: &usvg::BaseGradient = lg;
-            resolve_gradient(g, 2, [lg.x1(), lg.y1(), lg.x2(), lg.y2(), 0.0, 0.0], m, shadings, patterns)
+            resolve_gradient(g, 2, [lg.x1(), lg.y1(), lg.x2(), lg.y2(), 0.0, 0.0], m, grayscale, shadings, patterns)
                 .map(|gp| into_resolved(gp, alpha))
         }
         usvg::Paint::RadialGradient(rg) => {
@@ -378,6 +387,7 @@ fn resolve_paint(
                 3,
                 [rg.fx(), rg.fy(), rg.fr().get(), rg.cx(), rg.cy(), rg.r().get()],
                 m,
+                grayscale,
                 shadings,
                 patterns,
             )
@@ -399,6 +409,7 @@ fn resolve_gradient(
     kind: u8,
     coords: [f32; 6],
     m: &usvg::Transform,
+    grayscale: bool,
     shadings: &mut Vec<ShadingRes>,
     patterns: &mut Vec<PatternRes>,
 ) -> Option<GradientPaint> {
@@ -423,7 +434,12 @@ fn resolve_gradient(
 
     if degenerate || stops.len() == 1 {
         let last = stops.last().unwrap().color();
-        return Some(GradientPaint::Solid([fr(last.red), fr(last.green), fr(last.blue)]));
+        let c = if grayscale {
+            gray3(last.red, last.green, last.blue)
+        } else {
+            [fr(last.red), fr(last.green), fr(last.blue)]
+        };
+        return Some(GradientPaint::Solid(c));
     }
 
     let gt = base.transform();
@@ -435,7 +451,12 @@ fn resolve_gradient(
     let mut collected = Vec::with_capacity(stops.len());
     for st in stops {
         let c = st.color();
-        collected.push((st.offset().get(), [fr(c.red), fr(c.green), fr(c.blue)]));
+        let col = if grayscale {
+            gray3(c.red, c.green, c.blue)
+        } else {
+            [fr(c.red), fr(c.green), fr(c.blue)]
+        };
+        collected.push((st.offset().get(), col));
     }
 
     shadings.push(ShadingRes {
@@ -523,6 +544,12 @@ fn fr(v: u8) -> f32 {
     v as f32 / 255.0
 }
 
+fn gray3(r: u8, g: u8, b: u8) -> [f32; 3] {
+    let l = (r as u32 * 2126 + g as u32 * 7152 + b as u32 * 722) / 10000;
+    let y = l as f32 / 255.0;
+    [y, y, y]
+}
+
 fn alpha_key(a: f32) -> u16 {
     (a.clamp(0.0, 1.0) * 255.0).round() as u16
 }
@@ -531,6 +558,7 @@ fn emit_image(
     img: &usvg::Image,
     s: f32,
     th: f32,
+    grayscale: bool,
     out: &mut String,
     images: &mut Vec<ImageRes>,
 ) -> bool {
@@ -542,24 +570,37 @@ fn emit_image(
     let wf = size.width().ceil().max(1.0);
     let hf = size.height().ceil().max(1.0);
 
-    let (colorspace, dct, data, smask, cmyk_inverted, icc) = match img.kind() {
-        usvg::ImageKind::JPEG(raw) => {
-            let icc = jpeg_icc(raw.as_slice());
-            match classify_jpeg(raw.as_slice()) {
-                Some(JpegClass::Gray) => (ImageColorSpace::Gray, true, raw.as_ref().clone(), None, false, icc),
-                Some(JpegClass::Rgb) => (ImageColorSpace::Rgb, true, raw.as_ref().clone(), None, false, icc),
-                Some(JpegClass::CmykInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, true, icc),
-                Some(JpegClass::CmykNonInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, false, icc),
-                _ => return false,
-            }
-        },
-        usvg::ImageKind::PNG(raw) | usvg::ImageKind::GIF(raw) | usvg::ImageKind::WEBP(raw) => {
-            match decode_image_rgba(raw.as_slice()) {
-                Some((rgb, smask)) => (ImageColorSpace::Rgb, false, rgb, smask, false, None),
+    let (colorspace, dct, data, smask, cmyk_inverted, icc) = if grayscale {
+        match img.kind() {
+            usvg::ImageKind::JPEG(raw)
+            | usvg::ImageKind::PNG(raw)
+            | usvg::ImageKind::GIF(raw)
+            | usvg::ImageKind::WEBP(raw) => match decode_image_gray(raw.as_slice()) {
+                Some((gray, smask)) => (ImageColorSpace::Gray, false, gray, smask, false, None),
                 None => return false,
-            }
-        },
-        _ => return false,
+            },
+            _ => return false,
+        }
+    } else {
+        match img.kind() {
+            usvg::ImageKind::JPEG(raw) => {
+                let icc = jpeg_icc(raw.as_slice());
+                match classify_jpeg(raw.as_slice()) {
+                    Some(JpegClass::Gray) => (ImageColorSpace::Gray, true, raw.as_ref().clone(), None, false, icc),
+                    Some(JpegClass::Rgb) => (ImageColorSpace::Rgb, true, raw.as_ref().clone(), None, false, icc),
+                    Some(JpegClass::CmykInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, true, icc),
+                    Some(JpegClass::CmykNonInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, false, icc),
+                    _ => return false,
+                }
+            },
+            usvg::ImageKind::PNG(raw) | usvg::ImageKind::GIF(raw) | usvg::ImageKind::WEBP(raw) => {
+                match decode_image_rgba(raw.as_slice()) {
+                    Some((rgb, smask)) => (ImageColorSpace::Rgb, false, rgb, smask, false, None),
+                    None => return false,
+                }
+            },
+            _ => return false,
+        }
     };
 
     let t = img.abs_transform();
@@ -740,4 +781,27 @@ fn decode_image_rgba(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         None
     };
     Some((rgb, smask))
+}
+
+fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let img = image::load_from_memory(raw).ok()?;
+    let rgba = img.to_rgba8();
+    let mut gray = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
+    let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
+    let mut has_alpha = false;
+    for px in rgba.pixels() {
+        let l = (px[0] as u32 * 2126 + px[1] as u32 * 7152 + px[2] as u32 * 722) / 10000;
+        gray.push(l as u8);
+        alpha.push(px[3]);
+        if px[3] != 255 {
+            has_alpha = true;
+        }
+    }
+    let gray = miniz_oxide::deflate::compress_to_vec_zlib(&gray, 6);
+    let smask = if has_alpha {
+        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+    } else {
+        None
+    };
+    Some((gray, smask))
 }
