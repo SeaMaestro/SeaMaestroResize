@@ -5,11 +5,57 @@ use std::collections::BTreeMap;
 use resvg::usvg;
 use usvg::tiny_skia_path::PathSegment;
 
+pub(crate) struct ShadingRes {
+    pub name: String,
+    pub kind: u8,
+    pub coords: [f32; 6],
+    pub matrix: [f32; 6],
+    pub stops: Vec<(f32, [f32; 3])>,
+}
+
+pub(crate) struct PatternRes {
+    pub name: String,
+    pub shading: String,
+}
+
 pub(crate) struct VectorPage {
     pub width: u32,
     pub height: u32,
     pub content: Vec<u8>,
     pub ext_gs: Vec<(String, f32, f32)>,
+    pub shadings: Vec<ShadingRes>,
+    pub patterns: Vec<PatternRes>,
+    pub images: Vec<ImageRes>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ImageColorSpace {
+    Gray,
+    Rgb,
+    Cmyk,
+}
+
+pub(crate) struct ImageRes {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub colorspace: ImageColorSpace,
+    pub dct: bool,
+    pub data: Vec<u8>,
+    pub smask: Option<Vec<u8>>,
+    pub cmyk_inverted: bool,
+    pub icc: Option<Vec<u8>>,
+}
+
+struct ResolvedPaint {
+    color: Option<[f32; 3]>,
+    pattern: Option<String>,
+    alpha: f32,
+}
+
+enum GradientPaint {
+    Solid([f32; 3]),
+    Pattern(String),
 }
 
 pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32) -> Option<VectorPage> {
@@ -25,6 +71,9 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32)
     let mut out = String::new();
     let mut ext_gs: Vec<(String, f32, f32)> = Vec::new();
     let mut gs_names: BTreeMap<(u16, u16), String> = BTreeMap::new();
+    let mut shadings: Vec<ShadingRes> = Vec::new();
+    let mut patterns: Vec<PatternRes> = Vec::new();
+    let mut images: Vec<ImageRes> = Vec::new();
 
     let root = tree.root();
     if root.should_isolate() {
@@ -32,7 +81,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32)
     }
 
     for node in root.children() {
-        if !emit_node(node, s, th, &mut out, &mut ext_gs, &mut gs_names) {
+        if !emit_node(node, s, th, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images) {
             return None;
         }
     }
@@ -42,6 +91,9 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32)
         height: target_h.max(1),
         content: out.into_bytes(),
         ext_gs,
+        shadings,
+        patterns,
+        images,
     })
 }
 
@@ -52,6 +104,9 @@ fn emit_node(
     out: &mut String,
     ext_gs: &mut Vec<(String, f32, f32)>,
     gs_names: &mut BTreeMap<(u16, u16), String>,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
+    images: &mut Vec<ImageRes>,
 ) -> bool {
     match node {
         usvg::Node::Group(g) => {
@@ -59,13 +114,14 @@ fn emit_node(
                 return false;
             }
             for child in g.children() {
-                if !emit_node(child, s, th, out, ext_gs, gs_names) {
+                if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
                     return false;
                 }
             }
             true
         }
-        usvg::Node::Path(p) => emit_path(p, s, th, out, ext_gs, gs_names),
+        usvg::Node::Path(p) => emit_path(p, s, th, out, ext_gs, gs_names, shadings, patterns),
+        usvg::Node::Image(img) => emit_image(img, s, th, out, images),
         _ => false,
     }
 }
@@ -77,6 +133,8 @@ fn emit_path(
     out: &mut String,
     ext_gs: &mut Vec<(String, f32, f32)>,
     gs_names: &mut BTreeMap<(u16, u16), String>,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
 ) -> bool {
     if !p.is_visible() {
         return true;
@@ -88,37 +146,37 @@ fn emit_path(
         return true;
     }
 
-    let fill_info = match fill {
-        None => None,
-        Some(f) => match f.paint() {
-            usvg::Paint::Color(c) => Some((c, f.rule(), f.opacity().get())),
-            _ => return false,
-        },
-    };
-    let stroke_info = match stroke {
-        None => None,
-        Some(st) => match st.paint() {
-            usvg::Paint::Color(c) => Some((c, st.opacity().get())),
-            _ => return false,
-        },
-    };
-
-    let fill_alpha = fill_info.map(|(_, _, a)| a).unwrap_or(1.0);
-    let stroke_alpha = stroke_info.map(|(_, a)| a).unwrap_or(1.0);
-
     let t = p.abs_transform();
     let m = usvg::Transform::from_row(
-    s * t.sx,
-    -s * t.ky,
-    s * t.kx,
-    -s * t.sy,
-    s * t.tx,
-    th - s * t.ty,
-);
+        s * t.sx,
+        -s * t.ky,
+        s * t.kx,
+        -s * t.sy,
+        s * t.tx,
+        th - s * t.ty,
+    );
     let data = match p.data().clone().transform(m) {
         Some(d) => d,
         None => return false,
     };
+
+    let fill_res = match fill {
+        None => None,
+        Some(f) => match resolve_paint(f.paint(), f.opacity().get(), &m, shadings, patterns) {
+            Some(rp) => Some((rp, f.rule())),
+            None => return false,
+        },
+    };
+    let stroke_res = match stroke {
+        None => None,
+        Some(st) => match resolve_paint(st.paint(), st.opacity().get(), &m, shadings, patterns) {
+            Some(rp) => Some(rp),
+            None => return false,
+        },
+    };
+
+    let fill_alpha = fill_res.as_ref().map(|(rp, _)| rp.alpha).unwrap_or(1.0);
+    let stroke_alpha = stroke_res.as_ref().map(|rp| rp.alpha).unwrap_or(1.0);
 
     let gs_name = if fill_alpha < 0.999 || stroke_alpha < 0.999 {
         let key = (alpha_key(fill_alpha), alpha_key(stroke_alpha));
@@ -144,20 +202,20 @@ fn emit_path(
 
     emit_path_data(&data, out);
 
-    match (fill_info, stroke_info, stroke) {
-        (Some((fc, rule, _)), Some((sc, _)), Some(st)) => {
+    match (&fill_res, &stroke_res, stroke) {
+        (Some((fp, rule)), Some(sp), Some(st)) => {
             set_stroke_params(st, stroke_scale, out);
-            out.push_str(&format!("{} {} {} rg\n", fr(fc.red), fr(fc.green), fr(fc.blue)));
-            out.push_str(&format!("{} {} {} RG\n", fr(sc.red), fr(sc.green), fr(sc.blue)));
-            out.push_str(if rule == usvg::FillRule::EvenOdd { "B*\n" } else { "B\n" });
+            set_fill(fp, out);
+            set_stroke_paint(sp, out);
+            out.push_str(if *rule == usvg::FillRule::EvenOdd { "B*\n" } else { "B\n" });
         }
-        (Some((fc, rule, _)), None, _) => {
-            out.push_str(&format!("{} {} {} rg\n", fr(fc.red), fr(fc.green), fr(fc.blue)));
-            out.push_str(if rule == usvg::FillRule::EvenOdd { "f*\n" } else { "f\n" });
+        (Some((fp, rule)), None, _) => {
+            set_fill(fp, out);
+            out.push_str(if *rule == usvg::FillRule::EvenOdd { "f*\n" } else { "f\n" });
         }
-        (None, Some((sc, _)), Some(st)) => {
+        (None, Some(sp), Some(st)) => {
             set_stroke_params(st, stroke_scale, out);
-            out.push_str(&format!("{} {} {} RG\n", fr(sc.red), fr(sc.green), fr(sc.blue)));
+            set_stroke_paint(sp, out);
             out.push_str("S\n");
         }
         _ => {}
@@ -165,6 +223,133 @@ fn emit_path(
 
     out.push_str("Q\n");
     true
+}
+
+fn set_fill(rp: &ResolvedPaint, out: &mut String) {
+    match (&rp.pattern, &rp.color) {
+        (Some(name), _) => out.push_str(&format!("/Pattern cs /{} scn\n", name)),
+        (None, Some(c)) => out.push_str(&format!("{} {} {} rg\n", c[0], c[1], c[2])),
+        (None, None) => {}
+    }
+}
+
+fn set_stroke_paint(rp: &ResolvedPaint, out: &mut String) {
+    match (&rp.pattern, &rp.color) {
+        (Some(name), _) => out.push_str(&format!("/Pattern CS /{} SCN\n", name)),
+        (None, Some(c)) => out.push_str(&format!("{} {} {} RG\n", c[0], c[1], c[2])),
+        (None, None) => {}
+    }
+}
+
+fn resolve_paint(
+    paint: &usvg::Paint,
+    alpha: f32,
+    m: &usvg::Transform,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
+) -> Option<ResolvedPaint> {
+    match paint {
+        usvg::Paint::Color(c) => Some(ResolvedPaint {
+            color: Some([fr(c.red), fr(c.green), fr(c.blue)]),
+            pattern: None,
+            alpha,
+        }),
+        usvg::Paint::LinearGradient(lg) => {
+            let g: &usvg::BaseGradient = lg;
+            resolve_gradient(g, 2, [lg.x1(), lg.y1(), lg.x2(), lg.y2(), 0.0, 0.0], m, shadings, patterns)
+                .map(|gp| into_resolved(gp, alpha))
+        }
+        usvg::Paint::RadialGradient(rg) => {
+            let g: &usvg::BaseGradient = rg;
+            resolve_gradient(
+                g,
+                3,
+                [rg.fx(), rg.fy(), rg.fr().get(), rg.cx(), rg.cy(), rg.r().get()],
+                m,
+                shadings,
+                patterns,
+            )
+            .map(|gp| into_resolved(gp, alpha))
+        }
+        _ => None,
+    }
+}
+
+fn into_resolved(gp: GradientPaint, alpha: f32) -> ResolvedPaint {
+    match gp {
+        GradientPaint::Solid(c) => ResolvedPaint { color: Some(c), pattern: None, alpha },
+        GradientPaint::Pattern(name) => ResolvedPaint { color: None, pattern: Some(name), alpha },
+    }
+}
+
+fn resolve_gradient(
+    base: &usvg::BaseGradient,
+    kind: u8,
+    coords: [f32; 6],
+    m: &usvg::Transform,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
+) -> Option<GradientPaint> {
+    if base.spread_method() != usvg::SpreadMethod::Pad {
+        return None;
+    }
+    let stops = base.stops();
+    if stops.is_empty() {
+        return None;
+    }
+    for st in stops {
+        if st.opacity().get() < 1.0 {
+            return None;
+        }
+    }
+
+    let degenerate = match kind {
+        2 => (coords[0] - coords[2]).abs() < 1e-6 && (coords[1] - coords[3]).abs() < 1e-6,
+        3 => coords[5] <= 0.0,
+        _ => true,
+    };
+
+    if degenerate || stops.len() == 1 {
+        let last = stops.last().unwrap().color();
+        return Some(GradientPaint::Solid([fr(last.red), fr(last.green), fr(last.blue)]));
+    }
+
+    let gt = base.transform();
+    let matrix = compose(m, &gt);
+
+    let sname = format!("Sh{}", shadings.len());
+    let pname = format!("P{}", patterns.len());
+
+    let mut collected = Vec::with_capacity(stops.len());
+    for st in stops {
+        let c = st.color();
+        collected.push((st.offset().get(), [fr(c.red), fr(c.green), fr(c.blue)]));
+    }
+
+    shadings.push(ShadingRes {
+        name: sname.clone(),
+        kind,
+        coords,
+        matrix: [matrix.sx, matrix.ky, matrix.kx, matrix.sy, matrix.tx, matrix.ty],
+        stops: collected,
+    });
+    patterns.push(PatternRes {
+        name: pname.clone(),
+        shading: sname,
+    });
+
+    Some(GradientPaint::Pattern(pname))
+}
+
+fn compose(a: &usvg::Transform, b: &usvg::Transform) -> usvg::Transform {
+    usvg::Transform::from_row(
+        a.sx * b.sx + a.kx * b.ky,
+        a.ky * b.sx + a.sy * b.ky,
+        a.sx * b.kx + a.kx * b.sy,
+        a.ky * b.kx + a.sy * b.sy,
+        a.sx * b.tx + a.kx * b.ty + a.tx,
+        a.ky * b.tx + a.sy * b.ty + a.ty,
+    )
 }
 
 fn set_stroke_params(st: &usvg::Stroke, scale: f32, out: &mut String) {
@@ -228,4 +413,219 @@ fn fr(v: u8) -> f32 {
 
 fn alpha_key(a: f32) -> u16 {
     (a.clamp(0.0, 1.0) * 255.0).round() as u16
+}
+
+fn emit_image(
+    img: &usvg::Image,
+    s: f32,
+    th: f32,
+    out: &mut String,
+    images: &mut Vec<ImageRes>,
+) -> bool {
+    if !img.is_visible() {
+        return true;
+    }
+
+    let size = img.size();
+    let wf = size.width().ceil().max(1.0);
+    let hf = size.height().ceil().max(1.0);
+
+    let (colorspace, dct, data, smask, cmyk_inverted, icc) = match img.kind() {
+        usvg::ImageKind::JPEG(raw) => {
+            let icc = jpeg_icc(raw.as_slice());
+            match classify_jpeg(raw.as_slice()) {
+                Some(JpegClass::Gray) => (ImageColorSpace::Gray, true, raw.as_ref().clone(), None, false, icc),
+                Some(JpegClass::Rgb) => (ImageColorSpace::Rgb, true, raw.as_ref().clone(), None, false, icc),
+                Some(JpegClass::CmykInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, true, icc),
+                Some(JpegClass::CmykNonInverted) => (ImageColorSpace::Cmyk, true, raw.as_ref().clone(), None, false, icc),
+                _ => return false,
+            }
+        },
+        usvg::ImageKind::PNG(raw) | usvg::ImageKind::GIF(raw) | usvg::ImageKind::WEBP(raw) => {
+            match decode_image_rgba(raw.as_slice()) {
+                Some((rgb, smask)) => (ImageColorSpace::Rgb, false, rgb, smask, false, None),
+                None => return false,
+            }
+        },
+        _ => return false,
+    };
+
+    let t = img.abs_transform();
+    let m = usvg::Transform::from_row(
+        s * t.sx,
+        -s * t.ky,
+        s * t.kx,
+        -s * t.sy,
+        s * t.tx,
+        th - s * t.ty,
+    );
+
+    let name = format!("Im{}", images.len());
+    images.push(ImageRes {
+        name: name.clone(),
+        width: wf as u32,
+        height: hf as u32,
+        colorspace,
+        dct,
+        data,
+        smask,
+        cmyk_inverted,
+        icc,
+    });
+
+    out.push_str("q\n");
+    out.push_str(&format!("{} {} {} {} {} {} cm\n", m.sx, m.ky, m.kx, m.sy, m.tx, m.ty));
+    out.push_str(&format!("{} 0 0 {} 0 {} cm\n", wf, -hf, hf));
+    out.push_str(&format!("/{} Do\n", name));
+    out.push_str("Q\n");
+    true
+}
+
+enum JpegClass {
+    Gray,
+    Rgb,
+    CmykInverted,
+    CmykNonInverted,
+    Other,
+}
+
+fn classify_jpeg(raw: &[u8]) -> Option<JpegClass> {
+    let mut nf: Option<u8> = None;
+    let mut adobe_transform: Option<u8> = None;
+
+    let mut i = 2usize;
+    while i + 4 <= raw.len() {
+        if raw[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = raw[i + 1];
+        if marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        if marker == 0xD8 || marker == 0xD9 {
+            i += 2;
+            continue;
+        }
+        if (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+            continue;
+        }
+        let len = ((raw[i + 2] as usize) << 8) | (raw[i + 3] as usize);
+        if len < 2 || i + 2 + len > raw.len() {
+            break;
+        }
+        match marker {
+            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF => {
+                if len >= 11 {
+                    nf = Some(raw[i + 9]);
+                }
+            }
+            0xEE => {
+                if len >= 14 && &raw[i + 4..i + 9] == b"Adobe" {
+                    adobe_transform = Some(raw[i + 15]);
+                }
+            }
+            0xDA => break,
+            _ => {}
+        }
+        i += 2 + len;
+    }
+
+    let nf = nf?;
+    match nf {
+        1 => Some(JpegClass::Gray),
+        3 => match adobe_transform {
+            Some(2) => Some(JpegClass::Other),
+            _ => Some(JpegClass::Rgb),
+        },
+        4 => match adobe_transform {
+            Some(_) => Some(JpegClass::CmykInverted),
+            None => Some(JpegClass::CmykNonInverted),
+        },
+        _ => Some(JpegClass::Other),
+    }
+}
+
+fn jpeg_icc(raw: &[u8]) -> Option<Vec<u8>> {
+    if raw.len() < 4 || raw[0] != 0xFF || raw[1] != 0xD8 {
+        return None;
+    }
+    let mut chunks = BTreeMap::new();
+    let mut total: u8 = 0;
+    let mut i = 2usize;
+    while i + 4 <= raw.len() {
+        if raw[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = raw[i + 1];
+        if marker == 0xD9 || marker == 0xDA {
+            break;
+        }
+        if marker == 0xD8 || (0xD0..=0xD7).contains(&marker) || marker == 0x01 {
+            i += 2;
+            continue;
+        }
+        if marker == 0x00 || marker == 0xFF {
+            i += 1;
+            continue;
+        }
+        let len = ((raw[i + 2] as usize) << 8) | raw[i + 3] as usize;
+        if len < 2 {
+            break;
+        }
+        let seg_end = i + 2 + len;
+        if seg_end > raw.len() {
+            break;
+        }
+        if marker == 0xE2 {
+            let payload = &raw[i + 4..seg_end];
+            if payload.len() > 14 && &payload[..12] == b"ICC_PROFILE\0" {
+                let seq = payload[12];
+                let count = payload[13];
+                if seq >= 1 && count >= 1 && seq <= count {
+                    total = count;
+                    chunks.insert(seq, payload[14..].to_vec());
+                }
+            }
+        }
+        i = seg_end;
+    }
+    if total == 0 {
+        return None;
+    }
+    let mut icc = Vec::new();
+    for seq in 1..=total {
+        match chunks.get(&seq) {
+            Some(c) => icc.extend_from_slice(c),
+            None => return None,
+        }
+    }
+    if icc.is_empty() { None } else { Some(icc) }
+}
+
+fn decode_image_rgba(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let img = image::load_from_memory(raw).ok()?;
+    let rgba = img.to_rgba8();
+    let mut rgb = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize) * 3);
+    let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
+    let mut has_alpha = false;
+    for px in rgba.pixels() {
+        rgb.push(px[0]);
+        rgb.push(px[1]);
+        rgb.push(px[2]);
+        alpha.push(px[3]);
+        if px[3] != 255 {
+            has_alpha = true;
+        }
+    }
+    let rgb = miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6);
+    let smask = if has_alpha {
+        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+    } else {
+        None
+    };
+    Some((rgb, smask))
 }

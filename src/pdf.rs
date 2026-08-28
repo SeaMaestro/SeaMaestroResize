@@ -8,7 +8,7 @@ use image::DynamicImage;
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::encode::encode_pdf_jpeg;
-use crate::svg_pdf::VectorPage;
+use crate::svg_pdf::{ImageColorSpace, ShadingRes, VectorPage};
 use crate::Config;
 
 fn document_id() -> String {
@@ -210,10 +210,134 @@ impl<W: Write> PdfSink<W> {
             self.end_obj()?;
         }
 
+        let mut sh_refs: Vec<(String, u32)> = Vec::new();
+        for sh in &vp.shadings {
+            let sh_id = self.write_shading(sh)?;
+            sh_refs.push((sh.name.clone(), sh_id));
+        }
+
+        let mut pat_refs: Vec<(String, u32)> = Vec::new();
+        for pat in &vp.patterns {
+            let sh_obj_id = sh_refs
+                .iter()
+                .find(|(n, _)| n == &pat.shading)
+                .map(|(_, i)| *i)
+                .ok_or_else(|| anyhow::anyhow!("shading '{}' not found", pat.shading))?;
+            let shading = vp.shadings.iter().find(|s| &s.name == &pat.shading).unwrap();
+            let m = shading.matrix;
+
+            let id = self.alloc_id();
+            pat_refs.push((pat.name.clone(), id));
+            self.begin_obj(id)?;
+            self.raw(&format!(
+                "<< /Type /Pattern /PatternType 2 /Matrix [{} {} {} {} {} {}] /Shading {} 0 R >>\n",
+                m[0], m[1], m[2], m[3], m[4], m[5], sh_obj_id
+            ))?;
+            self.end_obj()?;
+        }
+
+        let mut img_refs: Vec<(String, u32)> = Vec::new();
+        for img in &vp.images {
+            let smask_opt_id = if img.smask.is_some() {
+                Some(self.alloc_id())
+            } else {
+                None
+            };
+            let id = self.alloc_id();
+            img_refs.push((img.name.clone(), id));
+
+            let alt = match img.colorspace {
+                ImageColorSpace::Gray => "/DeviceGray",
+                ImageColorSpace::Rgb => "/DeviceRGB",
+                ImageColorSpace::Cmyk => "/DeviceCMYK",
+            };
+            let filter = if img.dct { "/DCTDecode" } else { "/FlateDecode" };
+            let icc_opt_id = if img.icc.is_some() {
+                Some(self.alloc_id())
+            } else {
+                None
+            };
+            let cs = match icc_opt_id {
+                Some(icc_id) => format!("[/ICCBased {} 0 R]", icc_id),
+                None => alt.to_string(),
+            };
+
+            if let (Some(smask_data), Some(smask_id)) = (&img.smask, smask_opt_id) {
+                self.begin_obj(smask_id)?;
+                self.raw(&format!(
+                    "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+                    img.width, img.height, smask_data.len()
+                ))?;
+                self.bytes(smask_data)?;
+                self.raw("\nendstream\n")?;
+                self.end_obj()?;
+            }
+
+            if let (Some(icc_data), Some(icc_id)) = (&img.icc, icc_opt_id) {
+                let n = match img.colorspace {
+                    ImageColorSpace::Gray => 1,
+                    ImageColorSpace::Rgb => 3,
+                    ImageColorSpace::Cmyk => 4,
+                };
+                self.begin_obj(icc_id)?;
+                self.raw(&format!(
+                    "<< /N {} /Alternate {} /Length {} >>\nstream\n",
+                    n, alt, icc_data.len()
+                ))?;
+                self.bytes(icc_data)?;
+                self.raw("\nendstream\n")?;
+                self.end_obj()?;
+            }
+
+            let mut dict = format!(
+                "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} ",
+                img.width, img.height, cs
+            );
+            if let ImageColorSpace::Cmyk = img.colorspace {
+                dict.push_str(if img.cmyk_inverted {
+                    "/Decode [1 0 1 0 1 0 1 0] "
+                } else {
+                    "/Decode [0 1 0 1 0 1 0 1] "
+                });
+            }
+            dict.push_str(&format!("/BitsPerComponent 8 /Filter {} /Length {}", filter, img.data.len()));
+            if let Some(smask_id) = smask_opt_id {
+                dict.push_str(&format!(" /SMask {} 0 R", smask_id));
+            }
+            dict.push_str(" >>\nstream\n");
+
+            self.begin_obj(id)?;
+            self.raw(&dict)?;
+            self.bytes(&img.data)?;
+            self.raw("\nendstream\n")?;
+            self.end_obj()?;
+        }
+
         let mut resources = String::from("<< ");
         if !gs_refs.is_empty() {
             resources.push_str("/ExtGState <<");
             for (name, id) in &gs_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !sh_refs.is_empty() {
+            resources.push_str("/Shading <<");
+            for (name, id) in &sh_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !pat_refs.is_empty() {
+            resources.push_str("/Pattern <<");
+            for (name, id) in &pat_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !img_refs.is_empty() {
+            resources.push_str("/XObject <<");
+            for (name, id) in &img_refs {
                 resources.push_str(&format!(" /{} {} 0 R", name, id));
             }
             resources.push_str(" >> ");
@@ -238,7 +362,75 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()
     }
 
-    pub(crate) fn finish(&mut self, _page_count: usize) -> Result<u64> {
+    fn write_shading(&mut self, sh: &ShadingRes) -> Result<u32> {
+        let n = sh.stops.len();
+
+        let func_ref = if n == 2 {
+            let func_id = self.alloc_id();
+            let (_, c0) = sh.stops[0];
+            let (_, c1) = sh.stops[1];
+            self.begin_obj(func_id)?;
+            self.raw(&format!(
+                "<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n",
+                c0[0], c0[1], c0[2], c1[0], c1[1], c1[2]
+            ))?;
+            self.end_obj()?;
+            format!("{} 0 R", func_id)
+        } else {
+            let mut sub_refs: Vec<String> = Vec::with_capacity(n - 1);
+            for i in 0..n - 1 {
+                let (_, c0) = sh.stops[i];
+                let (_, c1) = sh.stops[i + 1];
+                let sub_id = self.alloc_id();
+                self.begin_obj(sub_id)?;
+                self.raw(&format!(
+                    "<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n",
+                    c0[0], c0[1], c0[2], c1[0], c1[1], c1[2]
+                ))?;
+                self.end_obj()?;
+                sub_refs.push(format!("{} 0 R", sub_id));
+            }
+
+            let mut bounds: Vec<String> = Vec::new();
+            for (off, _) in &sh.stops[1..n - 1] {
+                bounds.push(format!("{}", off));
+            }
+            let mut encode: Vec<String> = Vec::with_capacity((n - 1) * 2);
+            for i in 0..(n - 1) * 2 {
+                encode.push(if i % 2 == 0 { "0".to_string() } else { "1".to_string() });
+            }
+
+            let stitch_id = self.alloc_id();
+            self.begin_obj(stitch_id)?;
+            self.raw(&format!(
+                "<< /FunctionType 3 /Domain [0 1] /Functions [{}] /Bounds [{}] /Encode [{}] >>\n",
+                sub_refs.join(" "),
+                bounds.join(" "),
+                encode.join(" ")
+            ))?;
+            self.end_obj()?;
+            format!("{} 0 R", stitch_id)
+        };
+
+        let c = sh.coords;
+        let coords_str = if sh.kind == 2 {
+            format!("{} {} {} {}", c[0], c[1], c[2], c[3])
+        } else {
+            format!("{} {} {} {} {} {}", c[0], c[1], c[2], c[3], c[4], c[5])
+        };
+
+        let sh_id = self.alloc_id();
+        self.begin_obj(sh_id)?;
+        self.raw(&format!(
+            "<< /ShadingType {} /ColorSpace /DeviceRGB /Coords [{}] /Function {} /Extend [true true] >>\n",
+            sh.kind, coords_str, func_ref
+        ))?;
+        self.end_obj()?;
+
+        Ok(sh_id)
+    }
+
+pub(crate) fn finish(&mut self, _page_count: usize) -> Result<u64> {
         let kids: Vec<String> = self.page_ids.iter().map(|id| format!("{} 0 R", id)).collect();
         self.begin_obj(2)?;
         self.raw(&format!(

@@ -7,3 +7,4 @@
 /releases/
 /.cargo/config.toml
 vector_tests/
+vector_tests/v3/*.pdf
