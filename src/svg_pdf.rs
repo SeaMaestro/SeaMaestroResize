@@ -122,7 +122,17 @@ fn emit_node(
         }
         usvg::Node::Path(p) => emit_path(p, s, th, out, ext_gs, gs_names, shadings, patterns),
         usvg::Node::Image(img) => emit_image(img, s, th, out, images),
-        _ => false,
+        usvg::Node::Text(t) => {
+            for child in t.flattened().children() {
+                if !matches!(child, usvg::Node::Path(_)) {
+                    return false;
+                }
+                if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                    return false;
+                }
+            }
+            true
+        }
     }
 }
 

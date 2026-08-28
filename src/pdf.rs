@@ -11,6 +11,8 @@ use crate::encode::encode_pdf_jpeg;
 use crate::svg_pdf::{ImageColorSpace, ShadingRes, VectorPage};
 use crate::Config;
 
+const SRGB_CALRGB: &str = "[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [2.2 2.2 2.2] /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]";
+
 fn document_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -165,7 +167,7 @@ impl<W: Write> PdfSink<W> {
         let content_id = self.alloc_id();
         let image_id = self.alloc_id();
 
-        let cs = if gray { "/DeviceGray" } else { "/DeviceRGB" };
+        let cs = if gray { "/DeviceGray" } else { SRGB_CALRGB };
         let filter = if dct { "/DCTDecode" } else { "/FlateDecode" };
 
         self.begin_obj(page_id)?;
@@ -246,7 +248,7 @@ impl<W: Write> PdfSink<W> {
             let id = self.alloc_id();
             img_refs.push((img.name.clone(), id));
 
-            let alt = match img.colorspace {
+            let device_cs = match img.colorspace {
                 ImageColorSpace::Gray => "/DeviceGray",
                 ImageColorSpace::Rgb => "/DeviceRGB",
                 ImageColorSpace::Cmyk => "/DeviceCMYK",
@@ -257,9 +259,11 @@ impl<W: Write> PdfSink<W> {
             } else {
                 None
             };
-            let cs = match icc_opt_id {
-                Some(icc_id) => format!("[/ICCBased {} 0 R]", icc_id),
-                None => alt.to_string(),
+            let cs = match (icc_opt_id, img.colorspace) {
+                (Some(icc_id), _) => format!("[/ICCBased {} 0 R]", icc_id),
+                (None, ImageColorSpace::Rgb) => SRGB_CALRGB.to_string(),
+                (None, ImageColorSpace::Gray) => "/DeviceGray".to_string(),
+                (None, ImageColorSpace::Cmyk) => "/DeviceCMYK".to_string(),
             };
 
             if let (Some(smask_data), Some(smask_id)) = (&img.smask, smask_opt_id) {
@@ -282,7 +286,7 @@ impl<W: Write> PdfSink<W> {
                 self.begin_obj(icc_id)?;
                 self.raw(&format!(
                     "<< /N {} /Alternate {} /Length {} >>\nstream\n",
-                    n, alt, icc_data.len()
+                    n, device_cs, icc_data.len()
                 ))?;
                 self.bytes(icc_data)?;
                 self.raw("\nendstream\n")?;
@@ -342,6 +346,9 @@ impl<W: Write> PdfSink<W> {
             }
             resources.push_str(" >> ");
         }
+        resources.push_str("/ColorSpace << /DefaultRGB ");
+        resources.push_str(SRGB_CALRGB);
+        resources.push_str(" >> ");
         resources.push_str(">>");
 
         let page_id = self.alloc_id();
@@ -422,8 +429,8 @@ impl<W: Write> PdfSink<W> {
         let sh_id = self.alloc_id();
         self.begin_obj(sh_id)?;
         self.raw(&format!(
-            "<< /ShadingType {} /ColorSpace /DeviceRGB /Coords [{}] /Function {} /Extend [true true] >>\n",
-            sh.kind, coords_str, func_ref
+            "<< /ShadingType {} /ColorSpace {} /Coords [{}] /Function {} /Extend [true true] >>\n",
+            sh.kind, SRGB_CALRGB, coords_str, func_ref
         ))?;
         self.end_obj()?;
 
