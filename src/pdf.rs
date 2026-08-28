@@ -178,9 +178,10 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()?;
 
         let content = format!("q\n{} 0 0 {} 0 0 cm\n/Im Do\nQ\n", width, height);
+        let content_data = compress_to_vec_zlib(content.as_bytes(), 6);
         self.begin_obj(content_id)?;
-        self.raw(&format!("<< /Length {} >>\nstream\n", content.len()))?;
-        self.raw(&content)?;
+        self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
+        self.bytes(&content_data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()?;
 
@@ -362,9 +363,10 @@ impl<W: Write> PdfSink<W> {
         ))?;
         self.end_obj()?;
 
+        let content_data = compress_to_vec_zlib(&vp.content, 6);
         self.begin_obj(content_id)?;
-        self.raw(&format!("<< /Length {} >>\nstream\n", vp.content.len()))?;
-        self.bytes(&vp.content)?;
+        self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
+        self.bytes(&content_data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()
     }
