@@ -593,11 +593,55 @@ fn emit_image(
                     _ => return false,
                 }
             },
-            usvg::ImageKind::PNG(raw) | usvg::ImageKind::GIF(raw) | usvg::ImageKind::WEBP(raw) => {
-                match decode_image_rgba(raw.as_slice()) {
-                    Some((rgb, smask)) => (ImageColorSpace::Rgb, false, rgb, smask, false, None),
+            usvg::ImageKind::PNG(raw) => {
+                let PngMeta { icc, gama, srgb } = png_meta(raw.as_slice())
+                    .unwrap_or(PngMeta { icc: None, gama: None, srgb: false });
+                match icc {
+                    Some(icc) => match icc_color_space(&icc) {
+                        Some(ImageColorSpace::Gray) => match decode_image_gray_raw(raw.as_slice()) {
+                            Some((data, smask)) => (ImageColorSpace::Gray, false, data, smask, false, Some(icc)),
+                            None => return false,
+                        },
+                        Some(_) => match decode_image_rgba(raw.as_slice(), None) {
+                            Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, Some(icc)),
+                            None => return false,
+                        },
+                        None => match decode_image_rgba(raw.as_slice(), None) {
+                            Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, None),
+                            None => return false,
+                        },
+                    },
+                    None if srgb => match decode_image_rgba(raw.as_slice(), None) {
+                        Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, None),
+                        None => return false,
+                    },
+                    None => {
+                        let gama_i = gama.unwrap_or(0) as i64;
+                        let lut = if gama_i > 0 && (gama_i - 45455).abs() > 100 {
+                            gamma_lut(gama_i as u32)
+                        } else {
+                            None
+                        };
+                        match decode_image_rgba(raw.as_slice(), lut.as_ref()) {
+                            Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, None),
+                            None => return false,
+                        }
+                    }
+                }
+            }
+            usvg::ImageKind::WEBP(raw) => {
+                let icc = webp_icc(raw.as_slice()).and_then(|i| match icc_color_space(&i) {
+                    Some(ImageColorSpace::Rgb) => Some(i),
+                    _ => None,
+                });
+                match decode_image_rgba(raw.as_slice(), None) {
+                    Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, icc),
                     None => return false,
                 }
+            }
+            usvg::ImageKind::GIF(raw) => match decode_image_rgba(raw.as_slice(), None) {
+                Some((data, smask)) => (ImageColorSpace::Rgb, false, data, smask, false, None),
+                None => return false,
             },
             _ => return false,
         }
@@ -759,16 +803,111 @@ fn jpeg_icc(raw: &[u8]) -> Option<Vec<u8>> {
     if icc.is_empty() { None } else { Some(icc) }
 }
 
-fn decode_image_rgba(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+struct PngMeta {
+    icc: Option<Vec<u8>>,
+    gama: Option<u32>,
+    srgb: bool,
+}
+
+fn png_meta(raw: &[u8]) -> Option<PngMeta> {
+    const SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if raw.len() < 8 || &raw[0..8] != SIG {
+        return None;
+    }
+    let mut meta = PngMeta { icc: None, gama: None, srgb: false };
+    let mut i = 8usize;
+    while i + 8 <= raw.len() {
+        let len = u32::from_be_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]) as usize;
+        let tag = &raw[i + 4..i + 8];
+        let data_start = i + 8;
+        if data_start + len > raw.len() {
+            break;
+        }
+        let payload = &raw[data_start..data_start + len];
+        if tag == b"iCCP" {
+            if meta.icc.is_none() {
+                if let Some(nul) = payload.iter().position(|&b| b == 0) {
+                    if nul + 1 < payload.len() && payload[nul + 1] == 0 {
+                        meta.icc = miniz_oxide::inflate::decompress_to_vec_zlib(&payload[nul + 2..]).ok();
+                    }
+                }
+            }
+        } else if tag == b"gAMA" {
+            if len >= 4 && meta.gama.is_none() {
+                meta.gama = Some(u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]));
+            }
+        } else if tag == b"sRGB" {
+            meta.srgb = true;
+        }
+        i = data_start + len + 4;
+    }
+    Some(meta)
+}
+
+fn icc_color_space(icc: &[u8]) -> Option<ImageColorSpace> {
+    if icc.len() < 128 || &icc[36..40] != b"acsp" {
+        return None;
+    }
+    match &icc[16..20] {
+        b"RGB " => Some(ImageColorSpace::Rgb),
+        b"GRAY" => Some(ImageColorSpace::Gray),
+        _ => None,
+    }
+}
+
+fn gamma_lut(gama: u32) -> Option<[u8; 256]> {
+    let g = gama as f64 / 100000.0;
+    if !(g > 0.0) || !g.is_finite() {
+        return None;
+    }
+    let mut lut = [0u8; 256];
+    for i in 0..=255 {
+        let x = i as f64 / 255.0;
+        let linear = x.powf(1.0 / g);
+        let srgb = if linear <= 0.0031308 {
+            12.92 * linear
+        } else {
+            1.055 * linear.powf(1.0 / 2.4) - 0.055
+        };
+        lut[i] = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    Some(lut)
+}
+
+fn webp_icc(raw: &[u8]) -> Option<Vec<u8>> {
+    if raw.len() < 12 || &raw[0..4] != b"RIFF" || &raw[8..12] != b"WEBP" {
+        return None;
+    }
+    let mut i = 12usize;
+    while i + 8 <= raw.len() {
+        let tag = &raw[i..i + 4];
+        let size = u32::from_le_bytes([raw[i + 4], raw[i + 5], raw[i + 6], raw[i + 7]]) as usize;
+        let data_start = i + 8;
+        if data_start + size > raw.len() {
+            break;
+        }
+        if tag == b"ICCP" {
+            return Some(raw[data_start..data_start + size].to_vec());
+        }
+        i = data_start + size + (size & 1);
+    }
+    None
+}
+
+fn decode_image_rgba(raw: &[u8], lut: Option<&[u8; 256]>) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
     let img = image::load_from_memory(raw).ok()?;
     let rgba = img.to_rgba8();
     let mut rgb = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize) * 3);
     let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
     let mut has_alpha = false;
     for px in rgba.pixels() {
-        rgb.push(px[0]);
-        rgb.push(px[1]);
-        rgb.push(px[2]);
+        let (r, g, b) = match lut {
+            Some(l) => (l[px[0] as usize], l[px[1] as usize], l[px[2] as usize]),
+            None => (px[0], px[1], px[2]),
+        };
+        rgb.push(r);
+        rgb.push(g);
+        rgb.push(b);
         alpha.push(px[3]);
         if px[3] != 255 {
             has_alpha = true;
@@ -781,6 +920,28 @@ fn decode_image_rgba(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         None
     };
     Some((rgb, smask))
+}
+
+fn decode_image_gray_raw(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let img = image::load_from_memory(raw).ok()?;
+    let rgba = img.to_rgba8();
+    let mut gray = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
+    let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
+    let mut has_alpha = false;
+    for px in rgba.pixels() {
+        gray.push(px[0]);
+        alpha.push(px[3]);
+        if px[3] != 255 {
+            has_alpha = true;
+        }
+    }
+    let gray = miniz_oxide::deflate::compress_to_vec_zlib(&gray, 6);
+    let smask = if has_alpha {
+        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+    } else {
+        None
+    };
+    Some((gray, smask))
 }
 
 fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
