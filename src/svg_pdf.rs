@@ -110,15 +110,55 @@ fn emit_node(
 ) -> bool {
     match node {
         usvg::Node::Group(g) => {
-            if g.should_isolate() {
-                return false;
-            }
-            for child in g.children() {
-                if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+            if let Some(clip) = g.clip_path() {
+                if g.mask().is_some()
+                    || !g.filters().is_empty()
+                    || g.blend_mode() != usvg::BlendMode::Normal
+                    || g.opacity().get() < 0.999
+                {
                     return false;
                 }
+                let group_abs = g.abs_transform();
+                out.push_str("q\n");
+                let mut rule = None;
+                if !emit_clip_children(clip.root(), &clip.transform(), &group_abs, s, th, out, &mut rule) {
+                    return false;
+                }
+                let evenodd = match rule {
+                    Some(r) => r == usvg::FillRule::EvenOdd,
+                    None => return false,
+                };
+                out.push_str(if evenodd { "W*\n" } else { "W\n" });
+                out.push_str("n\n");
+                if let Some(sub) = clip.clip_path() {
+                    let mut sub_rule = None;
+                    if !emit_clip_children(sub.root(), &sub.transform(), &group_abs, s, th, out, &mut sub_rule) {
+                        return false;
+                    }
+                    let sub_evenodd = match sub_rule {
+                        Some(r) => r == usvg::FillRule::EvenOdd,
+                        None => return false,
+                    };
+                    out.push_str(if sub_evenodd { "W*\n" } else { "W\n" });
+                    out.push_str("n\n");
+                }
+                for child in g.children() {
+                    if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                        return false;
+                    }
+                }
+                out.push_str("Q\n");
+                true
+            } else if g.should_isolate() {
+                return false;
+            } else {
+                for child in g.children() {
+                    if !emit_node(child, s, th, out, ext_gs, gs_names, shadings, patterns, images) {
+                        return false;
+                    }
+                }
+                true
             }
-            true
         }
         usvg::Node::Path(p) => emit_path(p, s, th, out, ext_gs, gs_names, shadings, patterns),
         usvg::Node::Image(img) => emit_image(img, s, th, out, images),
@@ -134,6 +174,68 @@ fn emit_node(
             true
         }
     }
+}
+
+fn emit_clip_children(
+    parent: &usvg::Group,
+    clip_t: &usvg::Transform,
+    group_abs: &usvg::Transform,
+    s: f32,
+    th: f32,
+    out: &mut String,
+    rule: &mut Option<usvg::FillRule>,
+) -> bool {
+    for child in parent.children() {
+        match child {
+            usvg::Node::Path(p) => {
+                if !p.is_visible() {
+                    continue;
+                }
+                let fill = match p.fill() {
+                    Some(f) => f,
+                    None => return false,
+                };
+                match *rule {
+                    None => *rule = Some(fill.rule()),
+                    Some(r) if r != fill.rule() => return false,
+                    Some(_) => {}
+                }
+                let t = compose(group_abs, clip_t);
+                let t = compose(&t, &p.abs_transform());
+                let m = usvg::Transform::from_row(
+                    s * t.sx,
+                    -s * t.ky,
+                    s * t.kx,
+                    -s * t.sy,
+                    s * t.tx,
+                    th - s * t.ty,
+                );
+                let data = match p.data().clone().transform(m) {
+                    Some(d) => d,
+                    None => return false,
+                };
+                if data.segments().next().is_none() {
+                    continue;
+                }
+                emit_path_data(&data, out);
+            }
+            usvg::Node::Group(g) => {
+                if g.should_isolate() {
+                    return false;
+                }
+                if !emit_clip_children(g, clip_t, group_abs, s, th, out, rule) {
+                    return false;
+                }
+            }
+            usvg::Node::Text(t) => {
+                if !emit_clip_children(t.flattened(), clip_t, group_abs, s, th, out, rule) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn emit_path(
