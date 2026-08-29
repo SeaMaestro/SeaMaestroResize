@@ -358,6 +358,13 @@ impl<W: Write> PdfSink<W> {
             }
             resources.push_str(" >> ");
         }
+        if !img_refs.is_empty() {
+            resources.push_str("/XObject <<");
+            for (name, id) in &img_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
         if !font_refs.is_empty() {
             resources.push_str("/Font <<");
             for (name, id) in &font_refs {
@@ -437,8 +444,8 @@ impl<W: Write> PdfSink<W> {
 
         self.begin_obj(cidfont_id)?;
         self.raw(&format!(
-            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /FontMatrix [{} 0 0 {} 0 0] /DW 1000 /CIDToGIDMap /Identity >>\n",
-            base, desc_id, u1000, u1000
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 /CIDToGIDMap /Identity >>\n",
+            base, desc_id
         ))?;
         self.end_obj()?;
 
