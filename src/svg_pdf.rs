@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+
+use fontdb;
+use subsetter;
 
 use resvg::usvg;
 use usvg::tiny_skia_path::PathSegment;
@@ -27,6 +31,7 @@ pub(crate) struct VectorPage {
     pub shadings: Vec<ShadingRes>,
     pub patterns: Vec<PatternRes>,
     pub images: Vec<ImageRes>,
+    pub fonts: Vec<FontRes>,
     _permit: Option<MemPermit<'static>>,
 }
 
@@ -47,6 +52,18 @@ pub(crate) struct ImageRes {
     pub smask: Option<Vec<u8>>,
     pub cmyk_inverted: bool,
     pub icc: Option<Vec<u8>>,
+}
+
+pub(crate) struct FontRes {
+    pub font_id: fontdb::ID,
+    pub name: String,
+    pub subset: Vec<u8>,
+    pub upem: u16,
+    pub bbox: [i16; 4],
+    pub ascent: i16,
+    pub descent: i16,
+    pub cids: BTreeMap<u16, u16>,
+    pub to_unicode: BTreeMap<u16, String>,
 }
 
 struct ResolvedPaint {
@@ -76,6 +93,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
     let mut shadings: Vec<ShadingRes> = Vec::new();
     let mut patterns: Vec<PatternRes> = Vec::new();
     let mut images: Vec<ImageRes> = Vec::new();
+    let mut fonts: Vec<FontRes> = Vec::new();
 
     let root = tree.root();
     if root.should_isolate() {
@@ -90,8 +108,31 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
     budget.acquire(vec_need);
     let mut permit = Some(MemPermit { budget, need: vec_need });
 
+    let fontdb = tree.fontdb();
+    let mut text_glyphs: BTreeMap<fontdb::ID, BTreeMap<u16, String>> = BTreeMap::new();
     for node in root.children() {
-        if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images, 0) {
+        if !collect_texts(node, 0, &mut text_glyphs) {
+            return None;
+        }
+    }
+    for (font_id, texts) in &text_glyphs {
+        if let Some(r) = subset_font(fontdb, *font_id, texts) {
+            let name = format!("F{}", fonts.len());
+            fonts.push(FontRes {
+                font_id: *font_id,
+                name,
+                subset: r.subset,
+                upem: r.upem,
+                bbox: r.bbox,
+                ascent: r.ascent,
+                descent: r.descent,
+                cids: r.cids,
+                to_unicode: r.to_unicode,
+            });
+        }
+    }
+    for node in root.children() {
+        if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images, &mut fonts, fontdb, 0) {
             return None;
         }
     }
@@ -104,6 +145,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         shadings,
         patterns,
         images,
+        fonts,
         _permit: permit.take(),
     })
 }
@@ -119,6 +161,8 @@ fn emit_node(
     shadings: &mut Vec<ShadingRes>,
     patterns: &mut Vec<PatternRes>,
     images: &mut Vec<ImageRes>,
+    fonts: &mut Vec<FontRes>,
+    fontdb: &Arc<fontdb::Database>,
     depth: usize,
 ) -> bool {
     if depth > MAX_SVG_DEPTH {
@@ -159,17 +203,37 @@ fn emit_node(
                     out.push_str("n\n");
                 }
                 for child in g.children() {
-                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth + 1) {
                         return false;
                     }
                 }
                 out.push_str("Q\n");
                 true
             } else if g.should_isolate() {
-                return false;
+                let op = g.opacity().get();
+                let opacity_only = op < 1.0
+                    && !g.isolate()
+                    && g.clip_path().is_none()
+                    && g.mask().is_none()
+                    && g.filters().is_empty()
+                    && g.blend_mode() == usvg::BlendMode::Normal;
+                if !opacity_only {
+                    return false;
+                }
+                let name = format!("GSg{}", ext_gs.len());
+                out.push_str("q\n");
+                out.push_str(&format!("/{name} gs\n"));
+                ext_gs.push((name, op, op));
+                for child in g.children() {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth + 1) {
+                        return false;
+                    }
+                }
+                out.push_str("Q\n");
+                true
             } else {
                 for child in g.children() {
-                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth + 1) {
                         return false;
                     }
                 }
@@ -178,17 +242,7 @@ fn emit_node(
         }
         usvg::Node::Path(p) => emit_path(p, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns),
         usvg::Node::Image(img) => emit_image(img, s, th, grayscale, out, images),
-        usvg::Node::Text(t) => {
-            for child in t.flattened().children() {
-                if !matches!(child, usvg::Node::Path(_)) {
-                    return false;
-                }
-                if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
-                    return false;
-                }
-            }
-            true
-        }
+        usvg::Node::Text(t) => emit_text(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth),
     }
 }
 
@@ -354,6 +408,430 @@ fn emit_path(
         _ => {}
     }
 
+    out.push_str("Q\n");
+    true
+}
+
+struct SubsetResult {
+    subset: Vec<u8>,
+    upem: u16,
+    bbox: [i16; 4],
+    ascent: i16,
+    descent: i16,
+    cids: BTreeMap<u16, u16>,
+    to_unicode: BTreeMap<u16, String>,
+}
+
+fn table_offset(data: &[u8], want: &[u8; 4]) -> Option<usize> {
+    if data.len() < 12 {
+        return None;
+    }
+    let num = u16::from_be_bytes([data[4], data[5]]) as usize;
+    let mut i = 12usize;
+    for _ in 0..num {
+        if i + 16 > data.len() {
+            return None;
+        }
+        if &data[i..i + 4] == want {
+            return Some(u32::from_be_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]) as usize);
+        }
+        i += 16;
+    }
+    None
+}
+
+fn font_tables(data: &[u8]) -> Option<Vec<[u8; 4]>> {
+    if data.len() < 12 {
+        return None;
+    }
+    let num = u16::from_be_bytes([data[4], data[5]]) as usize;
+    let mut tags = Vec::with_capacity(num);
+    let mut i = 12usize;
+    for _ in 0..num {
+        if i + 16 > data.len() {
+            return None;
+        }
+        let mut tag = [0u8; 4];
+        tag.copy_from_slice(&data[i..i + 4]);
+        tags.push(tag);
+        i += 16;
+    }
+    Some(tags)
+}
+
+fn is_color_font(data: &[u8]) -> bool {
+    match font_tables(data) {
+        Some(tags) => tags.iter().any(|t| {
+            t == b"COLR" || t == b"sbix" || t == b"CBDT" || t == b"CBLC" || t == b"SVG "
+        }),
+        None => true,
+    }
+}
+
+fn font_head(data: &[u8]) -> Option<(u16, [i16; 4], i16, i16)> {
+    let head = table_offset(data, b"head")?;
+    let hhea = table_offset(data, b"hhea")?;
+    if head + 44 > data.len() || hhea + 8 > data.len() {
+        return None;
+    }
+    let upem = u16::from_be_bytes([data[head + 18], data[head + 19]]);
+    if upem == 0 {
+        return None;
+    }
+    let bbox = [
+        i16::from_be_bytes([data[head + 36], data[head + 37]]),
+        i16::from_be_bytes([data[head + 38], data[head + 39]]),
+        i16::from_be_bytes([data[head + 40], data[head + 41]]),
+        i16::from_be_bytes([data[head + 42], data[head + 43]]),
+    ];
+    let ascent = i16::from_be_bytes([data[hhea + 4], data[hhea + 5]]);
+    let descent = i16::from_be_bytes([data[hhea + 6], data[hhea + 7]]);
+    Some((upem, bbox, ascent, descent))
+}
+
+fn subset_font(
+    fontdb: &Arc<fontdb::Database>,
+    font_id: fontdb::ID,
+    texts: &BTreeMap<u16, String>,
+) -> Option<SubsetResult> {
+    fontdb.with_face_data(font_id, |data, index| {
+        if is_color_font(data) {
+            return None;
+        }
+        let glyphs: Vec<u16> = texts.keys().copied().collect();
+        let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(&glyphs);
+        let subset = subsetter::subset(data, index, &remapper).ok()?;
+        if subset.len() >= 4 && &subset[0..4] == b"OTTO" {
+            return None;
+        }
+        let (upem, bbox, ascent, descent) = font_head(&subset)?;
+        let mut cids = BTreeMap::new();
+        let mut to_unicode = BTreeMap::new();
+        for (gid, text) in texts {
+            let cid = remapper.get(*gid)?;
+            cids.insert(*gid, cid);
+            let u = if text.is_empty() { "\u{FFFD}".to_string() } else { text.clone() };
+            to_unicode.insert(cid, u);
+        }
+        Some(SubsetResult { subset, upem, bbox, ascent, descent, cids, to_unicode })
+    })?
+}
+
+fn span_native_paint(span: &usvg::layout::Span) -> bool {
+    if let Some(f) = &span.fill {
+        if !matches!(f.paint(), usvg::Paint::Color(_)) {
+            return false;
+        }
+    }
+    if let Some(st) = &span.stroke {
+        if !matches!(st.paint(), usvg::Paint::Color(_)) {
+            return false;
+        }
+    }
+    for dec in [&span.underline, &span.overline, &span.line_through] {
+        if let Some(d) = dec.as_ref() {
+            if let Some(f) = d.fill() {
+                if !matches!(f.paint(), usvg::Paint::Color(_)) {
+                    return false;
+                }
+            }
+            if let Some(st) = d.stroke() {
+                if !matches!(st.paint(), usvg::Paint::Color(_)) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn collect_texts(
+    node: &usvg::Node,
+    depth: usize,
+    acc: &mut BTreeMap<fontdb::ID, BTreeMap<u16, String>>,
+) -> bool {
+    if depth > MAX_SVG_DEPTH {
+        return false;
+    }
+    match node {
+        usvg::Node::Group(g) => {
+            for child in g.children() {
+                if !collect_texts(child, depth + 1, acc) {
+                    return false;
+                }
+            }
+            true
+        }
+        usvg::Node::Text(t) => {
+            let spans = t.layouted();
+            if spans.is_empty() {
+                return true;
+            }
+            let mut eligible = true;
+            for span in spans {
+                if !span.visible {
+                    continue;
+                }
+                if !span_native_paint(span) {
+                    eligible = false;
+                    break;
+                }
+                for pg in &span.positioned_glyphs {
+                    if pg.id.0 > u16::MAX as u32 {
+                        eligible = false;
+                        break;
+                    }
+                }
+                if !eligible {
+                    break;
+                }
+            }
+            if eligible {
+                for span in spans {
+                    if !span.visible {
+                        continue;
+                    }
+                    for pg in &span.positioned_glyphs {
+                        acc.entry(pg.font)
+                            .or_default()
+                            .entry(pg.id.0 as u16)
+                            .or_insert_with(|| pg.text.clone());
+                    }
+                }
+            }
+            true
+        }
+        _ => true,
+    }
+}
+
+pub(crate) fn to_unicode_cmap(map: &BTreeMap<u16, String>) -> Vec<u8> {
+    let mut s = String::new();
+    s.push_str("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
+    s.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
+    s.push_str("/CMapName /Adobe-Identity-UCS def\n");
+    s.push_str("/CMapType 2 def\n");
+    s.push_str("1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+    s.push_str(&format!("{} beginbfchar\n", map.len()));
+    for (cid, text) in map {
+        let mut hex = String::new();
+        for u in text.encode_utf16() {
+            hex.push_str(&format!("{:04X}", u));
+        }
+        if hex.is_empty() {
+            hex.push_str("FFFD");
+        }
+        s.push_str(&format!("<{:04X}> <{}>\n", cid, hex));
+    }
+    s.push_str("endbfchar\n");
+    s.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    s.into_bytes()
+}
+
+fn emit_text_flattened(
+    t: &usvg::Text,
+    s: f32,
+    th: f32,
+    grayscale: bool,
+    out: &mut String,
+    ext_gs: &mut Vec<(String, f32, f32)>,
+    gs_names: &mut BTreeMap<(u16, u16), String>,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
+    images: &mut Vec<ImageRes>,
+    fonts: &mut Vec<FontRes>,
+    fontdb: &Arc<fontdb::Database>,
+    depth: usize,
+) -> bool {
+    let mut stack: Vec<usvg::Node> = t.flattened().children().to_vec();
+    stack.reverse();
+    while let Some(node) = stack.pop() {
+        if let usvg::Node::Group(ref group) = node {
+            let mut children: Vec<usvg::Node> = group.children().to_vec();
+            children.reverse();
+            stack.extend(children);
+            continue;
+        }
+        if !matches!(node, usvg::Node::Path(_)) {
+            return false;
+        }
+        if !emit_node(&node, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth + 1) {
+            return false;
+        }
+    }
+    true
+}
+
+fn emit_text(
+    t: &usvg::Text,
+    s: f32,
+    th: f32,
+    grayscale: bool,
+    out: &mut String,
+    ext_gs: &mut Vec<(String, f32, f32)>,
+    gs_names: &mut BTreeMap<(u16, u16), String>,
+    shadings: &mut Vec<ShadingRes>,
+    patterns: &mut Vec<PatternRes>,
+    images: &mut Vec<ImageRes>,
+    fonts: &mut Vec<FontRes>,
+    fontdb: &Arc<fontdb::Database>,
+    depth: usize,
+) -> bool {
+    if depth > MAX_SVG_DEPTH {
+        return false;
+    }
+    let spans = t.layouted();
+    if spans.is_empty() {
+        return true;
+    }
+
+    for span in spans {
+        if !span.visible {
+            continue;
+        }
+        if !span_native_paint(span) {
+            return emit_text_flattened(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth);
+        }
+    }
+
+    let mut idx_by_font: HashMap<fontdb::ID, usize> = HashMap::new();
+    for span in spans {
+        if !span.visible {
+            continue;
+        }
+        for pg in &span.positioned_glyphs {
+            if pg.id.0 > u16::MAX as u32 {
+                return emit_text_flattened(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth);
+            }
+            if !idx_by_font.contains_key(&pg.font) {
+                match fonts.iter().position(|f| f.font_id == pg.font) {
+                    Some(pos) => {
+                        idx_by_font.insert(pg.font, pos);
+                    }
+                    None => return emit_text_flattened(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth),
+                }
+            }
+        }
+    }
+
+    let m0 = usvg::Transform::default();
+    let abs = t.abs_transform();
+    let abs_scale = ((abs.sx * abs.sx + abs.ky * abs.ky).sqrt() * (abs.kx * abs.kx + abs.sy * abs.sy).sqrt()).sqrt();
+    let stroke_scale = s * abs_scale;
+
+    out.push_str("q\n");
+    for span in spans {
+        if !span.visible || span.positioned_glyphs.is_empty() {
+            continue;
+        }
+
+        let fill_res = span.fill.as_ref().and_then(|f| {
+            resolve_paint(f.paint(), f.opacity().get(), &m0, grayscale, shadings, patterns)
+        });
+        let stroke_res = span.stroke.as_ref().and_then(|st| {
+            resolve_paint(st.paint(), st.opacity().get(), &m0, grayscale, shadings, patterns)
+        });
+
+        let fill_alpha = fill_res.as_ref().map(|r| r.alpha).unwrap_or(1.0);
+        let stroke_alpha = stroke_res.as_ref().map(|r| r.alpha).unwrap_or(1.0);
+        let gs_name = if fill_alpha < 0.999 || stroke_alpha < 0.999 {
+            let key = (alpha_key(fill_alpha), alpha_key(stroke_alpha));
+            if let Some(n) = gs_names.get(&key) {
+                Some(n.clone())
+            } else {
+                let n = format!("GS{}", ext_gs.len());
+                gs_names.insert(key, n.clone());
+                ext_gs.push((n.clone(), fill_alpha, stroke_alpha));
+                Some(n)
+            }
+        } else {
+            None
+        };
+        if let Some(n) = &gs_name {
+            out.push_str(&format!("/{} gs\n", n));
+        }
+
+        let mut passes: Vec<bool> = Vec::new();
+        let fill_first = !matches!(span.paint_order, usvg::PaintOrder::StrokeAndFill);
+        if fill_first {
+            if fill_res.is_some() {
+                passes.push(true);
+            }
+            if stroke_res.is_some() {
+                passes.push(false);
+            }
+        } else {
+            if stroke_res.is_some() {
+                passes.push(false);
+            }
+            if fill_res.is_some() {
+                passes.push(true);
+            }
+        }
+
+        for dec in [&span.underline, &span.overline] {
+            if let Some(d) = dec.as_ref() {
+                if !emit_path(d, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns) {
+                    return false;
+                }
+            }
+        }
+
+        for do_fill in passes {
+            if do_fill {
+                if let Some(fp) = &fill_res {
+                    set_fill(fp, grayscale, out);
+                }
+                out.push_str("BT\n0 Tr\n");
+            } else {
+                if let (Some(sp), Some(st)) = (&stroke_res, span.stroke.as_ref()) {
+                    set_stroke_params(st, stroke_scale, out);
+                    set_stroke_paint(sp, grayscale, out);
+                }
+                out.push_str("BT\n1 Tr\n");
+            }
+            for pg in &span.positioned_glyphs {
+                let pos = match idx_by_font.get(&pg.font) {
+                    Some(p) => *p,
+                    None => return false,
+                };
+                let f = &fonts[pos];
+                let cid = match f.cids.get(&(pg.id.0 as u16)) {
+                    Some(c) => *c,
+                    None => return false,
+                };
+                let sx = pg.font_size() / f.upem as f32;
+                let o = pg.outline_transform();
+                let d = usvg::Transform::from_row(
+                    s * o.sx,
+                    -s * o.ky,
+                    s * o.kx,
+                    -s * o.sy,
+                    s * o.tx,
+                    th - s * o.ty,
+                );
+                let tm = usvg::Transform::from_row(
+                    d.sx / sx,
+                    d.ky / sx,
+                    d.kx / sx,
+                    d.sy / sx,
+                    d.tx,
+                    d.ty,
+                );
+                out.push_str(&format!(
+                    "/{} {} Tf {} {} {} {} {} {} Tm <{:04X}> Tj\n",
+                    f.name, pg.font_size(), tm.sx, tm.ky, tm.kx, tm.sy, tm.tx, tm.ty, cid
+                ));
+            }
+            out.push_str("ET\n");
+        }
+
+        if let Some(d) = &span.line_through {
+            if !emit_path(d, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns) {
+                return false;
+            }
+        }
+    }
     out.push_str("Q\n");
     true
 }

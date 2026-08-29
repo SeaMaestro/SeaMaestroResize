@@ -8,7 +8,7 @@ use image::DynamicImage;
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::encode::encode_pdf_jpeg;
-use crate::svg_pdf::{ImageColorSpace, ShadingRes, VectorPage};
+use crate::svg_pdf::{to_unicode_cmap, FontRes, ImageColorSpace, ShadingRes, VectorPage};
 use crate::Config;
 
 const SRGB_CALRGB: &str = "[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [2.2 2.2 2.2] /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]";
@@ -330,6 +330,12 @@ impl<W: Write> PdfSink<W> {
             self.end_obj()?;
         }
 
+        let mut font_refs: Vec<(String, u32)> = Vec::new();
+        for font in &vp.fonts {
+            let id = self.write_text_font(font)?;
+            font_refs.push((font.name.clone(), id));
+        }
+
         let mut resources = String::from("<< ");
         if !gs_refs.is_empty() {
             resources.push_str("/ExtGState <<");
@@ -352,14 +358,14 @@ impl<W: Write> PdfSink<W> {
             }
             resources.push_str(" >> ");
         }
-        if !img_refs.is_empty() {
-            resources.push_str("/XObject <<");
-            for (name, id) in &img_refs {
+        if !font_refs.is_empty() {
+            resources.push_str("/Font <<");
+            for (name, id) in &font_refs {
                 resources.push_str(&format!(" /{} {} 0 R", name, id));
             }
             resources.push_str(" >> ");
         }
-        resources.push_str("/ColorSpace << /DefaultRGB ");
+        resources.push_str("/ColorSpace << /Cs1 ");
         resources.push_str(SRGB_CALRGB);
         resources.push_str(" >> ");
         resources.push_str(">>");
@@ -381,6 +387,69 @@ impl<W: Write> PdfSink<W> {
         self.bytes(&content_data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()
+    }
+
+    fn write_text_font(&mut self, font: &FontRes) -> Result<u32> {
+        let base = format!("SeaMonkey{}", font.name);
+        let to_unicode_id = self.alloc_id();
+        let fontfile_id = self.alloc_id();
+        let desc_id = self.alloc_id();
+        let cidfont_id = self.alloc_id();
+        let type0_id = self.alloc_id();
+
+        let u1000 = 1000.0 / font.upem as f32;
+        let b = font.bbox;
+        let bbox = format!(
+            "[{} {} {} {}]",
+            b[0] as f32 * u1000,
+            b[1] as f32 * u1000,
+            b[2] as f32 * u1000,
+            b[3] as f32 * u1000
+        );
+        let ascent = font.ascent as f32 * u1000;
+        let descent = font.descent as f32 * u1000;
+        let cap_height = ascent * 0.7;
+
+        let cmap = to_unicode_cmap(&font.to_unicode);
+
+        self.begin_obj(to_unicode_id)?;
+        self.raw(&format!("<< /Length {} >>\nstream\n", cmap.len()))?;
+        self.bytes(&cmap)?;
+        self.raw("\nendstream\n")?;
+        self.end_obj()?;
+
+        self.begin_obj(fontfile_id)?;
+        self.raw(&format!(
+            "<< /Length {} /Length1 {} >>\nstream\n",
+            font.subset.len(),
+            font.subset.len()
+        ))?;
+        self.bytes(&font.subset)?;
+        self.raw("\nendstream\n")?;
+        self.end_obj()?;
+
+        self.begin_obj(desc_id)?;
+        self.raw(&format!(
+            "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>\n",
+            base, bbox, ascent, descent, cap_height, fontfile_id
+        ))?;
+        self.end_obj()?;
+
+        self.begin_obj(cidfont_id)?;
+        self.raw(&format!(
+            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /FontMatrix [{} 0 0 {} 0 0] /DW 1000 /CIDToGIDMap /Identity >>\n",
+            base, desc_id, u1000, u1000
+        ))?;
+        self.end_obj()?;
+
+        self.begin_obj(type0_id)?;
+        self.raw(&format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H /DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>\n",
+            base, cidfont_id, to_unicode_id
+        ))?;
+        self.end_obj()?;
+
+        Ok(type0_id)
     }
 
     fn function2_dict(c0: [f32; 3], c1: [f32; 3]) -> String {
