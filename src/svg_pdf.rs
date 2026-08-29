@@ -801,7 +801,7 @@ fn emit_text(
                     None => return false,
                 };
                 let sx = pg.font_size() / f.upem as f32;
-                let o = pg.outline_transform();
+                let o = abs.pre_concat(pg.outline_transform());
                 let d = usvg::Transform::from_row(
                     s * o.sx,
                     -s * o.ky,
