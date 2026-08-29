@@ -22,6 +22,19 @@ fn document_id() -> String {
     format!("{:032x}", nanos)
 }
 
+fn fmt_num(v: f32) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let s = format!("{:.8}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 pub(crate) enum PdfPage {
     Raster {
         width: u32,
@@ -214,10 +227,10 @@ impl<W: Write> PdfSink<W> {
             gs_refs.push((name.clone(), id));
             let mut dict = String::from("<< /Type /ExtGState");
             if *fa < 0.999 {
-                dict.push_str(&format!(" /ca {}", fa));
+                dict.push_str(&format!(" /ca {}", fmt_num(*fa)));
             }
             if *sa < 0.999 {
-                dict.push_str(&format!(" /CA {}", sa));
+                dict.push_str(&format!(" /CA {}", fmt_num(*sa)));
             }
             dict.push_str(" >>\n");
             self.begin_obj(id)?;
@@ -246,7 +259,7 @@ impl<W: Write> PdfSink<W> {
             self.begin_obj(id)?;
             self.raw(&format!(
                 "<< /Type /Pattern /PatternType 2 /Matrix [{} {} {} {} {} {}] /Shading {} 0 R >>\n",
-                m[0], m[1], m[2], m[3], m[4], m[5], sh_obj_id
+                fmt_num(m[0]), fmt_num(m[1]), fmt_num(m[2]), fmt_num(m[3]), fmt_num(m[4]), fmt_num(m[5]), sh_obj_id
             ))?;
             self.end_obj()?;
         }
@@ -408,10 +421,10 @@ impl<W: Write> PdfSink<W> {
         let b = font.bbox;
         let bbox = format!(
             "[{} {} {} {}]",
-            b[0] as f32 * u1000,
-            b[1] as f32 * u1000,
-            b[2] as f32 * u1000,
-            b[3] as f32 * u1000
+            fmt_num(b[0] as f32 * u1000),
+            fmt_num(b[1] as f32 * u1000),
+            fmt_num(b[2] as f32 * u1000),
+            fmt_num(b[3] as f32 * u1000)
         );
         let ascent = font.ascent as f32 * u1000;
         let descent = font.descent as f32 * u1000;
@@ -438,7 +451,7 @@ impl<W: Write> PdfSink<W> {
         self.begin_obj(desc_id)?;
         self.raw(&format!(
             "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>\n",
-            base, bbox, ascent, descent, cap_height, fontfile_id
+            base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
         ))?;
         self.end_obj()?;
 
@@ -460,7 +473,7 @@ impl<W: Write> PdfSink<W> {
     }
 
     fn function2_dict(c0: [f32; 3], c1: [f32; 3]) -> String {
-        format!("<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n", c0[0], c0[1], c0[2], c1[0], c1[1], c1[2])
+        format!("<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n", fmt_num(c0[0]), fmt_num(c0[1]), fmt_num(c0[2]), fmt_num(c1[0]), fmt_num(c1[1]), fmt_num(c1[2]))
     }
 
     fn write_shading(&mut self, sh: &ShadingRes) -> Result<u32> {
@@ -488,7 +501,7 @@ impl<W: Write> PdfSink<W> {
 
             let mut bounds: Vec<String> = Vec::new();
             for (off, _) in &sh.stops[1..n - 1] {
-                bounds.push(format!("{}", off));
+                bounds.push(fmt_num(*off));
             }
             let mut encode: Vec<String> = Vec::with_capacity((n - 1) * 2);
             for i in 0..(n - 1) * 2 {
@@ -509,9 +522,9 @@ impl<W: Write> PdfSink<W> {
 
         let c = sh.coords;
         let coords_str = if sh.kind == 2 {
-            format!("{} {} {} {}", c[0], c[1], c[2], c[3])
+            format!("{} {} {} {}", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]), fmt_num(c[3]))
         } else {
-            format!("{} {} {} {} {} {}", c[0], c[1], c[2], c[3], c[4], c[5])
+            format!("{} {} {} {} {} {}", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]), fmt_num(c[3]), fmt_num(c[4]), fmt_num(c[5]))
         };
 
         let sh_id = self.alloc_id();

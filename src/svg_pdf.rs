@@ -820,7 +820,15 @@ fn emit_text(
                 );
                 out.push_str(&format!(
                     "/{} {} Tf {} {} {} {} {} {} Tm <{:04X}> Tj\n",
-                    f.name, pg.font_size(), tm.sx, tm.ky, tm.kx, tm.sy, tm.tx, tm.ty, cid
+                    f.name,
+                    fmt_num(pg.font_size()),
+                    fmt_num(tm.sx),
+                    fmt_num(tm.ky),
+                    fmt_num(tm.kx),
+                    fmt_num(tm.sy),
+                    fmt_num(tm.tx),
+                    fmt_num(tm.ty),
+                    cid
                 ));
             }
             out.push_str("ET\n");
@@ -839,8 +847,8 @@ fn emit_text(
 fn set_fill(rp: &ResolvedPaint, gray: bool, out: &mut String) {
     match (&rp.pattern, &rp.color) {
         (Some(name), _) => out.push_str(&format!("/Pattern cs /{} scn\n", name)),
-        (None, Some(c)) if gray => out.push_str(&format!("{} g\n", c[0])),
-        (None, Some(c)) => out.push_str(&format!("{} {} {} rg\n", c[0], c[1], c[2])),
+        (None, Some(c)) if gray => out.push_str(&format!("{} g\n", fmt_num(c[0]))),
+        (None, Some(c)) => out.push_str(&format!("{} {} {} rg\n", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]))),
         (None, None) => {}
     }
 }
@@ -848,8 +856,8 @@ fn set_fill(rp: &ResolvedPaint, gray: bool, out: &mut String) {
 fn set_stroke_paint(rp: &ResolvedPaint, gray: bool, out: &mut String) {
     match (&rp.pattern, &rp.color) {
         (Some(name), _) => out.push_str(&format!("/Pattern CS /{} SCN\n", name)),
-        (None, Some(c)) if gray => out.push_str(&format!("{} G\n", c[0])),
-        (None, Some(c)) => out.push_str(&format!("{} {} {} RG\n", c[0], c[1], c[2])),
+        (None, Some(c)) if gray => out.push_str(&format!("{} G\n", fmt_num(c[0]))),
+        (None, Some(c)) => out.push_str(&format!("{} {} {} RG\n", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]))),
         (None, None) => {}
     }
 }
@@ -982,8 +990,21 @@ fn compose(a: &usvg::Transform, b: &usvg::Transform) -> usvg::Transform {
     )
 }
 
+fn fmt_num(v: f32) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let s = format!("{:.8}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 fn set_stroke_params(st: &usvg::Stroke, scale: f32, out: &mut String) {
-    out.push_str(&format!("{} w\n", st.width().get() * scale));
+    out.push_str(&format!("{} w\n", fmt_num(st.width().get() * scale)));
     out.push_str(match st.linecap() {
         usvg::LineCap::Butt => "0 J\n",
         usvg::LineCap::Round => "1 J\n",
@@ -994,11 +1015,11 @@ fn set_stroke_params(st: &usvg::Stroke, scale: f32, out: &mut String) {
         usvg::LineJoin::Round => "1 j\n",
         usvg::LineJoin::Bevel => "2 j\n",
     });
-    out.push_str(&format!("{} M\n", st.miterlimit().get()));
+    out.push_str(&format!("{} M\n", fmt_num(st.miterlimit().get())));
     if let Some(dash) = st.dasharray() {
         if !dash.is_empty() {
-            let list: Vec<String> = dash.iter().map(|v| format!("{}", v * scale)).collect();
-            out.push_str(&format!("[{}] {} d\n", list.join(" "), st.dashoffset() * scale));
+            let list: Vec<String> = dash.iter().map(|v| fmt_num(v * scale)).collect();
+            out.push_str(&format!("[{}] {} d\n", list.join(" "), fmt_num(st.dashoffset() * scale)));
         }
     }
 }
@@ -1009,12 +1030,12 @@ fn emit_path_data(path: &usvg::tiny_skia_path::Path, out: &mut String) {
     for seg in path.segments() {
         match seg {
             PathSegment::MoveTo(p) => {
-                out.push_str(&format!("{} {} m\n", p.x, p.y));
+                out.push_str(&format!("{} {} m\n", fmt_num(p.x), fmt_num(p.y)));
                 cur = (p.x, p.y);
                 sub_start = cur;
             }
             PathSegment::LineTo(p) => {
-                out.push_str(&format!("{} {} l\n", p.x, p.y));
+                out.push_str(&format!("{} {} l\n", fmt_num(p.x), fmt_num(p.y)));
                 cur = (p.x, p.y);
             }
             PathSegment::QuadTo(c, e) => {
@@ -1022,11 +1043,11 @@ fn emit_path_data(path: &usvg::tiny_skia_path::Path, out: &mut String) {
                 let c1y = cur.1 + 2.0 / 3.0 * (c.y - cur.1);
                 let c2x = e.x + 2.0 / 3.0 * (c.x - e.x);
                 let c2y = e.y + 2.0 / 3.0 * (c.y - e.y);
-                out.push_str(&format!("{} {} {} {} {} {} c\n", c1x, c1y, c2x, c2y, e.x, e.y));
+                out.push_str(&format!("{} {} {} {} {} {} c\n", fmt_num(c1x), fmt_num(c1y), fmt_num(c2x), fmt_num(c2y), fmt_num(e.x), fmt_num(e.y)));
                 cur = (e.x, e.y);
             }
             PathSegment::CubicTo(c1, c2, e) => {
-                out.push_str(&format!("{} {} {} {} {} {} c\n", c1.x, c1.y, c2.x, c2.y, e.x, e.y));
+                out.push_str(&format!("{} {} {} {} {} {} c\n", fmt_num(c1.x), fmt_num(c1.y), fmt_num(c2.x), fmt_num(c2.y), fmt_num(e.x), fmt_num(e.y)));
                 cur = (e.x, e.y);
             }
             PathSegment::Close => {
@@ -1168,8 +1189,8 @@ fn emit_image(
     });
 
     out.push_str("q\n");
-    out.push_str(&format!("{} {} {} {} {} {} cm\n", m.sx, m.ky, m.kx, m.sy, m.tx, m.ty));
-    out.push_str(&format!("{} 0 0 {} 0 {} cm\n", wf, -hf, hf));
+    out.push_str(&format!("{} {} {} {} {} {} cm\n", fmt_num(m.sx), fmt_num(m.ky), fmt_num(m.kx), fmt_num(m.sy), fmt_num(m.tx), fmt_num(m.ty)));
+    out.push_str(&format!("{} 0 0 {} 0 {} cm\n", fmt_num(wf), fmt_num(-hf), fmt_num(hf)));
     out.push_str(&format!("/{} Do\n", name));
     out.push_str("Q\n");
     true
