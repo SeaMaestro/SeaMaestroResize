@@ -18,6 +18,7 @@ pub(crate) struct PatternRes {
     pub shading: String,
 }
 
+use crate::decode::{mem_budget, MAX_SVG_DEPTH, MemPermit, vector_peak_cap, vector_peak_estimate};
 pub(crate) struct VectorPage {
     pub width: u32,
     pub height: u32,
@@ -26,6 +27,7 @@ pub(crate) struct VectorPage {
     pub shadings: Vec<ShadingRes>,
     pub patterns: Vec<PatternRes>,
     pub images: Vec<ImageRes>,
+    _permit: Option<MemPermit<'static>>,
 }
 
 #[derive(Clone, Copy)]
@@ -80,8 +82,16 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         return None;
     }
 
+    let vec_need = vector_peak_estimate(tree, grayscale)?;
+    if vec_need > vector_peak_cap() {
+        return None;
+    }
+    let budget = mem_budget();
+    budget.acquire(vec_need);
+    let mut permit = Some(MemPermit { budget, need: vec_need });
+
     for node in root.children() {
-        if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images) {
+        if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images, 0) {
             return None;
         }
     }
@@ -94,6 +104,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         shadings,
         patterns,
         images,
+        _permit: permit.take(),
     })
 }
 
@@ -108,7 +119,11 @@ fn emit_node(
     shadings: &mut Vec<ShadingRes>,
     patterns: &mut Vec<PatternRes>,
     images: &mut Vec<ImageRes>,
+    depth: usize,
 ) -> bool {
+    if depth > MAX_SVG_DEPTH {
+        return false;
+    }
     match node {
         usvg::Node::Group(g) => {
             if let Some(clip) = g.clip_path() {
@@ -122,7 +137,7 @@ fn emit_node(
                 let group_abs = g.abs_transform();
                 out.push_str("q\n");
                 let mut rule = None;
-                if !emit_clip_children(clip.root(), &clip.transform(), &group_abs, s, th, out, &mut rule) {
+                if !emit_clip_children(clip.root(), &clip.transform(), &group_abs, s, th, out, &mut rule, depth + 1) {
                     return false;
                 }
                 let evenodd = match rule {
@@ -133,7 +148,7 @@ fn emit_node(
                 out.push_str("n\n");
                 if let Some(sub) = clip.clip_path() {
                     let mut sub_rule = None;
-                    if !emit_clip_children(sub.root(), &sub.transform(), &group_abs, s, th, out, &mut sub_rule) {
+                    if !emit_clip_children(sub.root(), &sub.transform(), &group_abs, s, th, out, &mut sub_rule, depth + 1) {
                         return false;
                     }
                     let sub_evenodd = match sub_rule {
@@ -144,7 +159,7 @@ fn emit_node(
                     out.push_str("n\n");
                 }
                 for child in g.children() {
-                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
                         return false;
                     }
                 }
@@ -154,7 +169,7 @@ fn emit_node(
                 return false;
             } else {
                 for child in g.children() {
-                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
+                    if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
                         return false;
                     }
                 }
@@ -168,7 +183,7 @@ fn emit_node(
                 if !matches!(child, usvg::Node::Path(_)) {
                     return false;
                 }
-                if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images) {
+                if !emit_node(child, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, depth + 1) {
                     return false;
                 }
             }
@@ -185,7 +200,11 @@ fn emit_clip_children(
     th: f32,
     out: &mut String,
     rule: &mut Option<usvg::FillRule>,
+    depth: usize,
 ) -> bool {
+    if depth > MAX_SVG_DEPTH {
+        return false;
+    }
     for child in parent.children() {
         match child {
             usvg::Node::Path(p) => {
@@ -224,12 +243,12 @@ fn emit_clip_children(
                 if g.should_isolate() {
                     return false;
                 }
-                if !emit_clip_children(g, clip_t, group_abs, s, th, out, rule) {
+                if !emit_clip_children(g, clip_t, group_abs, s, th, out, rule, depth + 1) {
                     return false;
                 }
             }
             usvg::Node::Text(t) => {
-                if !emit_clip_children(t.flattened(), clip_t, group_abs, s, th, out, rule) {
+                if !emit_clip_children(t.flattened(), clip_t, group_abs, s, th, out, rule, depth + 1) {
                     return false;
                 }
             }

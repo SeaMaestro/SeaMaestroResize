@@ -37,7 +37,19 @@ impl PdfPage {
     pub(crate) fn size_hint(&self) -> usize {
         match self {
             PdfPage::Raster { data, .. } => data.len(),
-            PdfPage::Vector(vp) => vp.content.len(),
+            PdfPage::Vector(vp) => {
+                let mut n = vp.content.len();
+                for img in &vp.images {
+                    n = n.saturating_add(img.data.len());
+                    if let Some(smask) = &img.smask {
+                        n = n.saturating_add(smask.len());
+                    }
+                    if let Some(icc) = &img.icc {
+                        n = n.saturating_add(icc.len());
+                    }
+                }
+                n
+            }
         }
     }
 }

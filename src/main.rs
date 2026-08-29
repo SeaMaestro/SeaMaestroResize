@@ -1085,7 +1085,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     let raw = fs::read(input)
         .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
 
-    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(input)) } else { None };
+    let svg = if looks_like_svg(&raw) {
+        Some(parse_svg(&raw, Some(input))?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
@@ -1379,7 +1381,9 @@ where F: FnOnce(&Path) -> Result<()>
 // ── process_and_write_stdout / encode_to_vec ──────────────────
 
 fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
-    let svg = if looks_like_svg(raw) { parse_svg(raw, None) } else { None };
+    let svg = if looks_like_svg(raw) {
+        Some(parse_svg(raw, None)?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
@@ -1851,7 +1855,9 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
     let raw = fs::read(&entry.file)
         .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
 
-    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(&entry.file)) } else { None };
+    let svg = if looks_like_svg(&raw) {
+        Some(parse_svg(&raw, Some(&entry.file))?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));

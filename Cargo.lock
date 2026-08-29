@@ -11,6 +11,7 @@ dependencies = [
  "crc32fast",
  "fast_image_resize",
  "fastrand",
+ "flate2",
  "fontdb",
  "ico",
  "image",
