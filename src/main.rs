@@ -109,7 +109,7 @@ use fast_image_resize::{IntoImageView, ResizeOptions, Resizer};
 use rayon::prelude::*;
 use unicode_width::UnicodeWidthStr;
 use indicatif::{ProgressBar, ProgressStyle};
-use encode::{encode_bmp, encode_to_vec};
+use encode::{encode_bmp, encode_to_vec, set_avif_threads};
 use decode::{
     decode_image, is_heif, looks_like_svg, mem_budget, parse_svg, probe_image,
     raster_need, MemPermit,
@@ -336,7 +336,6 @@ struct InputEntry {
 
 fn main() -> std::process::ExitCode {
     jxl_oxide::integration::register_image_decoding_hook();
-    libheif_rs::integration::image::register_all_decoding_hooks();
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
@@ -747,6 +746,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     HAD_ERRORS.store(false, Ordering::Relaxed);
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
+    set_avif_threads(total);
 
     if config.merge && total > 1 {
         process_merge(entries, config);

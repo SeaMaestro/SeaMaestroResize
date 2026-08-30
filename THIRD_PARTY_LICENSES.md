@@ -31,6 +31,34 @@ This software is based in part on the work of the Independent JPEG Group.
 - License: BSD 2-Clause
 - Project: https://github.com/xiph/rav1e
 
+## ravif — AVIF encoding
+
+- License: BSD 3-Clause
+- Project: https://github.com/kornelski/ravif
+
+## avif-serialize — AVIF container serialization
+
+- License: BSD 3-Clause
+- Project: https://github.com/kornelski/avif-serialize
+
+## dav1d — AVIF decoding
+
+- License: BSD 2-Clause
+- Project: https://code.videolan.org/videolan/dav1d
+
+The Rust bindings (`dav1d`, `dav1d-sys`) are MIT-licensed; the libdav1d
+decoder linked into the binary is BSD 2-Clause.
+
+## mp4parse — AVIF/HEIF container parsing
+
+- License: Mozilla Public License 2.0 (MPL-2.0)
+- Project: https://github.com/mozilla/mp4parse-rust
+- License text: https://www.mozilla.org/en-US/MPL/2.0/
+
+The source code of the MPL-2.0-licensed files is available at the project
+link above, and the source code of SeaMonkeyResize is available in this
+repository.
+
 ## jxl-oxide — JPEG XL
 
 - License: Apache-2.0

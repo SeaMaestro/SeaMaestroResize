@@ -1,3 +1,63 @@
+## v2.4.1
+
+### AVIF decoding fixed
+
+- AVIF input now decodes via the native dav1d/mp4parse decoder. Previously a
+  global libheif image hook hijacked `ftypavif` and failed with
+  "No decoding plugin installed". The hook is removed; HEIC/HEIF still
+  decodes through the libheif fallback.
+
+### AVIF encoding
+
+- Parallelized across files: thread pool capped at 8, scaled by batch size.
+
+### Docs & licenses
+
+- THIRD_PARTY_LICENSES: added dav1d, mp4parse, ravif, avif-serialize.
+
+## v2.4.0
+
+### Vector PDF engine (SVG → PDF)
+
+- **Vector text** — glyphs are now vector instead of rasterized: outlines, plus
+  native selectable text via TrueType (Type0/CIDFontType2 + ToUnicode +
+  FontFile2) and OTF/CFF (CIDFontType0), with per-document font subsetting.
+  Solid fill/stroke text stays vector; gradient/pattern/decorations/CFF/color
+  fonts fall back to curves.
+- **Embedded raster images** in vector PDF, preserving JPEG ICC profiles;
+  PNG iCCP/gAMA and WebP ICCP passthrough; sRGB color management for text.
+- **Vector clip-path** support.
+- **FlateDecode-compressed** vector/raster content streams → smaller PDFs.
+- **Grayscale vector output** — `--bw` stays fully vector (BT.709 luma,
+  DeviceGray solids/strokes, Flate gray images).
+- **OOM protection** and hostile-SVG depth limits: pre-flight peak estimate,
+  XML depth pre-scan (`MAX_SVG_DEPTH=32`), SVGZ decompressed before scanning.
+- Fixes: XObject resources, dropped illegal FontMatrix, text placement /
+  resource / float-formatting fixes, absolute transforms applied to native
+  glyphs.
+
+### New input formats
+
+- TGA, PNM (PBM/PGM/PPM/PAM), DDS, HDR, EXR, FF (farbfeld).
+
+### Performance
+
+- mimalloc global allocator — SVG→PDF benchmark ~0.341s → ~0.235s.
+
+### Fixes & UI
+
+- Honest banners: `--lossless` reported only for WebP/JXL/PDF (AVIF and JPEG
+  no longer falsely show "Lossless: on"); EXIF banner only for JPEG/PNG/WebP/
+  JXL; progressive banner only for JPEG.
+- Help table now wraps long lines instead of truncating them (all 8
+  languages).
+
+### Docs & infra
+
+- README: supported formats and SVG & PDF behavior notes.
+- THIRD_PARTY_LICENSES: added mimalloc.
+- .gitattributes for cross-platform EOL normalization.
+
 ## v2.3.0
 
 - SVG/SVGZ input (raster via resvg; gradients, filters, masks, clip paths,

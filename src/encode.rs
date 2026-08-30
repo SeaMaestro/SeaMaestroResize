@@ -33,6 +33,29 @@ fn png_embed_exif(png: Vec<u8>, exif: &[u8]) -> Vec<u8> {
 
 use image::imageops::FilterType;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static AVIF_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn set_avif_threads(total_files: usize) {
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let threads = if total_files <= 1 {
+        cpus.min(8)
+    } else {
+        (cpus / total_files).clamp(1, cpus)
+    };
+    AVIF_THREADS.store(threads, Ordering::Relaxed);
+}
+
+fn avif_threads() -> usize {
+    let t = AVIF_THREADS.load(Ordering::Relaxed);
+    if t == 0 {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
+    } else {
+        t
+    }
+}
+
 pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     let exif = exif.and_then(|blob| normalize_exif(blob.to_vec(), img.width(), img.height()));
     let exif = exif.as_deref();
@@ -147,8 +170,8 @@ fn encode_webp_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, ic
         let pixels: &[rgb::RGBA8] = rgb::bytemuck::cast_slice(rgba_img.as_raw().as_slice());
         let enc = ravif::Encoder::new()
             .with_quality(q)
-            .with_speed(6)
-            .with_num_threads(Some(1))
+            .with_speed(8)
+            .with_num_threads(Some(avif_threads()))
             .encode_rgba(ravif::Img::new(pixels, w, h))
             .map_err(|e| anyhow::anyhow!("{}", msg().err_avif.replacen("{}", &e.to_string(), 1)))?;
         Ok(enc.avif_file)
@@ -164,8 +187,8 @@ fn encode_webp_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, ic
         let pixels: &[rgb::RGB8] = rgb::bytemuck::cast_slice(rgb_img.as_raw().as_slice());
         let enc = ravif::Encoder::new()
             .with_quality(q)
-            .with_speed(6)
-            .with_num_threads(Some(1))
+            .with_speed(8)
+            .with_num_threads(Some(avif_threads()))
             .encode_rgb(ravif::Img::new(pixels, w, h))
             .map_err(|e| anyhow::anyhow!("{}", msg().err_avif.replacen("{}", &e.to_string(), 1)))?;
         Ok(enc.avif_file)

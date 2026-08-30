@@ -7,13 +7,13 @@ panic = "unwind"
 
 [package]
 name = "SeaMonkeyResize"
-version = "2.4.0"
+version = "2.4.1"
 edition = "2021"
 
 [dependencies]
 crc32fast = "1"
 clap = { version = "4.6", features = ["derive"] }
-image = "0.25"
+image = { version = "0.25", features = ["avif-native"] }
 rayon = "1.12"
 mozjpeg = "0.10"
 webp = "0.3"
