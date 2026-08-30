@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use std::io::Read;
 use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+use flate2::read::GzDecoder;
 use image::ImageDecoder;
 
 use crate::msg;
@@ -363,7 +365,7 @@ fn png_exif(raw: &[u8]) -> Option<Vec<u8>> {
         i = chunk_end;
     }
     None
-}   
+}
 
 fn webp_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() < 20 || &raw[0..4] != b"RIFF" || &raw[8..12] != b"WEBP" {
@@ -556,19 +558,208 @@ pub(crate) fn raster_need(w: u32, h: u32) -> u64 {
         .clamp(1, runtime_limits().max_alloc)
 }
 
+fn estimate_image_peak(w: u32, h: u32, raw_len: usize) -> Option<u64> {
+    let px = (w as u64).checked_mul(h as u64)?;
+    px.checked_mul(12)?.checked_add(raw_len as u64)
+}
+
+pub(crate) const MAX_SVG_DEPTH: usize = 32;
+
+fn collect_raster_images(group: &usvg::Group, depth: usize, out: &mut Vec<(u32, u32, usize, bool)>) -> Option<()> {
+    if depth > MAX_SVG_DEPTH {
+        return None;
+    }
+    for node in group.children() {
+        collect_node_raster_images(node, depth + 1, out)?;
+    }
+    Some(())
+}
+
+fn collect_node_raster_images(node: &usvg::Node, depth: usize, out: &mut Vec<(u32, u32, usize, bool)>) -> Option<()> {
+    if depth > MAX_SVG_DEPTH {
+        return None;
+    }
+    if let usvg::Node::Image(img) = node {
+        let w = img.size().width().ceil().max(1.0) as u32;
+        let h = img.size().height().ceil().max(1.0) as u32;
+        match img.kind() {
+            usvg::ImageKind::JPEG(raw) => {
+                out.push((w, h, raw.len(), true));
+            }
+            usvg::ImageKind::PNG(raw)
+            | usvg::ImageKind::GIF(raw)
+            | usvg::ImageKind::WEBP(raw) => {
+                out.push((w, h, raw.len(), false));
+            }
+            usvg::ImageKind::SVG(tree) => {
+                collect_raster_images(tree.root(), depth + 1, out)?;
+            }
+        }
+    }
+    if let usvg::Node::Group(g) = node {
+        if let Some(clip) = g.clip_path() {
+            collect_raster_images(clip.root(), depth + 1, out)?;
+            if let Some(sub) = clip.clip_path() {
+                collect_raster_images(sub.root(), depth + 1, out)?;
+            }
+        }
+        if let Some(mask) = g.mask() {
+            collect_raster_images(mask.root(), depth + 1, out)?;
+        }
+        collect_raster_images(g, depth + 1, out)?;
+    }
+    let mut ok = true;
+    node.subroots(|sub| {
+        if ok {
+            if collect_raster_images(sub, depth + 1, out).is_none() {
+                ok = false;
+            }
+        }
+    });
+    if ok { Some(()) } else { None }
+}
+
+pub(crate) fn vector_peak_cap() -> u64 {
+    runtime_limits().max_alloc.saturating_mul(3) / 4
+}
+
+pub(crate) fn vector_peak_estimate(tree: &usvg::Tree, grayscale: bool) -> Option<u64> {
+    let mut images = Vec::new();
+    collect_raster_images(tree.root(), 0, &mut images)?;
+    let mut sum = 0u64;
+    for (w, h, raw_len, is_jpeg) in images {
+        let est = if is_jpeg && !grayscale {
+            u64::try_from(raw_len).ok()?
+        } else {
+            estimate_image_peak(w, h, raw_len)?
+        };
+        sum = sum.checked_add(est)?;
+    }
+    Some(sum)
+}
+
+pub(crate) fn max_raster_image_peak(tree: &usvg::Tree) -> Option<u64> {
+    let mut images = Vec::new();
+    collect_raster_images(tree.root(), 0, &mut images)?;
+    let mut max = 0u64;
+    for (w, h, raw_len, _) in images {
+        let est = estimate_image_peak(w, h, raw_len)?;
+        max = max.max(est);
+    }
+    Some(max)
+}
+
 pub(crate) struct ParsedSvg {
     pub tree: usvg::Tree,
     pub width: u32,
     pub height: u32,
 }
 
-pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> Option<ParsedSvg> {
-    let tree = usvg::Tree::from_data(raw, &svg_options(path)).ok()?;
-    let size = tree.size();
-    if size.width() <= 0.0 || size.height() <= 0.0 {
+fn find_subslice(hay: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+    hay.get(from..)?
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
+}
+
+fn skip_tag(raw: &[u8], mut i: usize) -> Option<usize> {
+    let n = raw.len();
+    let mut quote: Option<u8> = None;
+    while i < n {
+        let b = raw[i];
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+        } else if b == b'"' || b == b'\'' {
+            quote = Some(b);
+        } else if b == b'>' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn skip_open_tag(raw: &[u8], from: usize) -> Option<(usize, bool)> {
+    let close = skip_tag(raw, from)?;
+    let self_closing = close > from + 1 && raw[close - 2] == b'/';
+    Some((close, self_closing))
+}
+
+fn svg_xml_max_depth(raw: &[u8]) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut max = 0usize;
+    let mut i = 0usize;
+    let n = raw.len();
+    while i < n {
+        if raw[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if i + 1 >= n {
+            return None;
+        }
+        match raw[i + 1] {
+            b'?' => {
+                let close = find_subslice(raw, i + 2, b"?>")?;
+                i = close + 2;
+            }
+            b'!' => {
+                if raw[i..].starts_with(b"<!--") {
+                    let close = find_subslice(raw, i + 4, b"-->")?;
+                    i = close + 3;
+                } else if raw[i..].starts_with(b"<![CDATA[") {
+                    let close = find_subslice(raw, i + 9, b"]]>")?;
+                    i = close + 3;
+                } else {
+                    i = skip_tag(raw, i + 2)?;
+                }
+            }
+            b'/' => {
+                i = skip_tag(raw, i + 2)?;
+                depth = depth.checked_sub(1)?;
+            }
+            _ => {
+                let (close, self_closing) = skip_open_tag(raw, i + 1)?;
+                if self_closing {
+                    max = max.max(depth.saturating_add(1));
+                } else {
+                    depth = depth.checked_add(1)?;
+                    max = max.max(depth);
+                }
+                i = close;
+            }
+        }
+    }
+    if depth != 0 {
         return None;
     }
-    Some(ParsedSvg {
+    Some(max)
+}
+
+pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> anyhow::Result<ParsedSvg> {
+    let mut gz_buf = Vec::new();
+    let svg_bytes: &[u8] = if raw.starts_with(&[0x1f, 0x8b]) {
+        GzDecoder::new(raw)
+            .read_to_end(&mut gz_buf)
+            .map_err(|_| anyhow::anyhow!("SVG decompression failed"))?;
+        &gz_buf
+    } else {
+        raw
+    };
+    if let Some(depth) = svg_xml_max_depth(svg_bytes) {
+        if depth > MAX_SVG_DEPTH {
+            anyhow::bail!("SVG nesting too deep (limit {})", MAX_SVG_DEPTH);
+        }
+    }
+    let tree = usvg::Tree::from_data(svg_bytes, &svg_options(path))
+        .map_err(|_| anyhow::anyhow!("SVG parse failed"))?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        anyhow::bail!("SVG has invalid size");
+    }
+    Ok(ParsedSvg {
         tree,
         width: size.width().ceil() as u32,
         height: size.height().ceil() as u32,
@@ -576,7 +767,7 @@ pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> Option<ParsedSvg> {
 }
 
 pub(crate) fn probe_svg_dims(raw: &[u8]) -> Option<(u32, u32)> {
-    parse_svg(raw, None).map(|s| (s.width, s.height))
+    parse_svg(raw, None).ok().map(|s| (s.width, s.height))
 }
 
 pub fn decode_svg(
@@ -596,6 +787,13 @@ pub fn decode_svg(
     let worst = (tw as u64).saturating_mul(th as u64).saturating_mul(4);
     if worst > runtime_limits().max_alloc {
         return Err("SVG target size too large".to_string());
+    }
+    if let Some(peak) = max_raster_image_peak(tree) {
+        if peak > vector_peak_cap() {
+            return Err(format!("embedded SVG image too large: {} bytes peak", peak));
+        }
+    } else {
+        return Err("embedded SVG image size overflow".to_string());
     }
     let mut pixmap = tiny_skia::Pixmap::new(tw, th)
         .ok_or_else(|| "SVG target size too large".to_string())?;

@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMonkeyResize"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 
 [dependencies]
@@ -28,6 +28,7 @@ qoi = "0.4"
 anyhow = "1.0"
 fastrand = "2.5"
 fast_image_resize = { version = "6.1", features = ["image", "rayon"] }
+flate2 = "1.1"
 regex = "1.13"
 unicode-width = "0.2"
 indicatif = "0.18"
@@ -37,8 +38,10 @@ jwalk = "0.8"
 jxl-oxide = { version = "0.12.5", features = ["image"] }
 jxl-encoder = "0.3.1"
 tiff = "0.11"
+mimalloc = "0.1"
 miniz_oxide = "0.8"
 resvg = "0.48.1"
+subsetter = { version = "0.2.6", default-features = false }
 fontdb = { version = "0.24.0", features = ["fs"] }
 
 [target.'cfg(windows)'.build-dependencies]

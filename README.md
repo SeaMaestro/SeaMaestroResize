@@ -45,15 +45,25 @@ the whole workflow.
 
 **Input**
 
-JPEG, PNG, WebP, AVIF, JXL, ICO, TIFF, QOI, BMP, GIF, HEIC/HEIF, SVG, SVGZ,
-and RAW
-(CR2, CR3, CRW, NEF, NRW, ARW, SRF, SR2, DNG, RAF, ORF, PEF, RW2, MRW, MEF,
-ERF, KDC, DCS, DCR, SRW, IIQ, 3FR, MOS, X3F, ARI).
+- Standard: `JPEG`, `PNG`, `GIF`, `WEBP`, `AVIF`, `JXL`, `HEIC/HEIF/HIF`,
+  `TIFF`, `ICO`, `BMP`, `QOI`
+- Vector: `SVG`, `SVGZ`
+- Specialized: `TGA`, `HDR`, `EXR`, `DDS`, `PNM/PBM/PGM/PPM/PAM`,
+  `Farbfeld (FF)`
+- RAW: `CR2`, `CR3`, `CRW`, `NEF`, `NRW`, `ARW`, `SRF`, `SR2`, `DNG`, `RAF`,
+  `ORF`, `PEF`, `RW2`, `MRW`, `MEF`, `ERF`, `KDC`, `DCS`, `DCR`, `SRW`, `IIQ`,
+  `3FR`, `MOS`, `X3F`, `ARI`
 
 **Output**
 
-`webp`, `jpeg`/`jpg`, `avif`, `png`, `ico`, `tiff`/`tif`, `qoi`, `bmp`,
-`gif`, `jxl`, `pdf`.
+`webp` (default), `jpeg`/`jpg`, `avif`, `png`, `jxl`, `ico`, `tiff`/`tif`,
+`qoi`, `bmp`, `gif`, `pdf`.
+
+**Metadata**
+
+- ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`.
+- EXIF is preserved only with `--keep-exif`, and only for `JPEG`, `PNG`,
+  `WEBP`, `JXL`.
 
 ## Build
 
@@ -134,22 +144,31 @@ The merged PDF is written to a temp file first and renamed at the end, so an int
 
 SVG/SVGZ inputs render two ways:
 
-- **Raster** (all non-PDF outputs, and PDF fallback): rendered with resvg at the
-  target size. Gradients, filters, masks, clip paths, patterns, embedded images
-  and text are supported.
+- **Raster** (all non-PDF outputs, and the PDF fallback): rendered with resvg at
+  the target size. Gradients, filters, masks, clip paths, patterns, embedded
+  images and text are supported.
 - **Vector** (`--format pdf` / `--merge`): flat graphics — solid fill/stroke,
-  transforms, opacity and dash — are written as native PDF vector paths, so they
-  stay sharp at any zoom and produce small files.
+  gradients (PDF shadings), tiling patterns, transforms, opacity, dashes and
+  text — are written as native PDF, so they stay sharp at any zoom and produce
+  small files.
 
-If an SVG contains anything the vector writer does not handle yet (gradients,
-patterns, embedded images, text, masks, filters, clip paths, blend modes or
-group opacity), the whole page falls back to raster automatically — correct
-output, just not vector. Today vector output is therefore most useful for flat
-icons, logos, diagrams and simple illustrations.
+The vector engine embeds TrueType and OpenType CFF fonts subsetted to the used
+glyphs (`CIDFontType2` / `CIDFontType0C`), keeping text selectable. If a font
+cannot be subsetted (e.g. color fonts) or text uses a non-solid paint, the text
+is flattened to curves. Embedded JPEGs are passed through as `DCTDecode`; PNGs
+are decoded and re-encoded with `/SMask` for alpha and ICC preserved when
+present.
 
-Notes: `--bw`, `--sharpen` and cover-crop sizes (`WxH`) always rasterize SVG.
-Animations, scripting and other dynamic SVG features are not supported (static
-SVG subset only). 
+If an SVG contains anything the vector writer cannot map to PDF (masks, filters,
+non-normal blend modes, transparent gradient stops, isolated groups), the whole
+page falls back to raster automatically — correct output, just not vector.
+
+Notes:
+- `--sharpen` and cover-crop sizes (`WxH`) always rasterize SVG.
+- `--bw` stays vector: grayscale is applied natively to the PDF vector output.
+- Transparent gradient stops (`stop-opacity < 1`) rasterize the page.
+- Animations, scripting and other dynamic SVG features are not supported
+  (static SVG subset only).
 
 ## EXE rename (drag-and-drop)
 
@@ -205,6 +224,8 @@ jxl-oxide, oxipng, and others.
 HEIC/HEIF support uses libheif, which is licensed under LGPL-3.0.
 When distributing the binary you must comply with LGPL-3.0 — in particular,
 make the libheif source available and allow relinking.
+
+mimalloc (MIT) is used as the global allocator.
 
 ## Author
 

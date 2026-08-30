@@ -8,8 +8,10 @@ use image::DynamicImage;
 use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::encode::encode_pdf_jpeg;
-use crate::svg_pdf::VectorPage;
+use crate::svg_pdf::{to_unicode_cmap, FontRes, ImageColorSpace, ShadingRes, VectorPage};
 use crate::Config;
+
+const SRGB_CALRGB: &str = "[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [2.2 2.2 2.2] /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]";
 
 fn document_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +20,19 @@ fn document_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{:032x}", nanos)
+}
+
+fn fmt_num(v: f32) -> String {
+    if v == 0.0 {
+        return "0".to_string();
+    }
+    let s = format!("{:.8}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s.is_empty() {
+        "0".to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 pub(crate) enum PdfPage {
@@ -35,7 +50,19 @@ impl PdfPage {
     pub(crate) fn size_hint(&self) -> usize {
         match self {
             PdfPage::Raster { data, .. } => data.len(),
-            PdfPage::Vector(vp) => vp.content.len(),
+            PdfPage::Vector(vp) => {
+                let mut n = vp.content.len();
+                for img in &vp.images {
+                    n = n.saturating_add(img.data.len());
+                    if let Some(smask) = &img.smask {
+                        n = n.saturating_add(smask.len());
+                    }
+                    if let Some(icc) = &img.icc {
+                        n = n.saturating_add(icc.len());
+                    }
+                }
+                n
+            }
         }
     }
 }
@@ -165,7 +192,7 @@ impl<W: Write> PdfSink<W> {
         let content_id = self.alloc_id();
         let image_id = self.alloc_id();
 
-        let cs = if gray { "/DeviceGray" } else { "/DeviceRGB" };
+        let cs = if gray { "/DeviceGray" } else { SRGB_CALRGB };
         let filter = if dct { "/DCTDecode" } else { "/FlateDecode" };
 
         self.begin_obj(page_id)?;
@@ -176,9 +203,10 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()?;
 
         let content = format!("q\n{} 0 0 {} 0 0 cm\n/Im Do\nQ\n", width, height);
+        let content_data = compress_to_vec_zlib(content.as_bytes(), 6);
         self.begin_obj(content_id)?;
-        self.raw(&format!("<< /Length {} >>\nstream\n", content.len()))?;
-        self.raw(&content)?;
+        self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
+        self.bytes(&content_data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()?;
 
@@ -199,15 +227,126 @@ impl<W: Write> PdfSink<W> {
             gs_refs.push((name.clone(), id));
             let mut dict = String::from("<< /Type /ExtGState");
             if *fa < 0.999 {
-                dict.push_str(&format!(" /ca {}", fa));
+                dict.push_str(&format!(" /ca {}", fmt_num(*fa)));
             }
             if *sa < 0.999 {
-                dict.push_str(&format!(" /CA {}", sa));
+                dict.push_str(&format!(" /CA {}", fmt_num(*sa)));
             }
             dict.push_str(" >>\n");
             self.begin_obj(id)?;
             self.raw(&dict)?;
             self.end_obj()?;
+        }
+
+        let mut sh_refs: Vec<(String, u32)> = Vec::new();
+        for sh in &vp.shadings {
+            let sh_id = self.write_shading(sh)?;
+            sh_refs.push((sh.name.clone(), sh_id));
+        }
+
+        let mut pat_refs: Vec<(String, u32)> = Vec::new();
+        for pat in &vp.patterns {
+            let sh_obj_id = sh_refs
+                .iter()
+                .find(|(n, _)| n == &pat.shading)
+                .map(|(_, i)| *i)
+                .ok_or_else(|| anyhow::anyhow!("shading '{}' not found", pat.shading))?;
+            let shading = vp.shadings.iter().find(|s| &s.name == &pat.shading).unwrap();
+            let m = shading.matrix;
+
+            let id = self.alloc_id();
+            pat_refs.push((pat.name.clone(), id));
+            self.begin_obj(id)?;
+            self.raw(&format!(
+                "<< /Type /Pattern /PatternType 2 /Matrix [{} {} {} {} {} {}] /Shading {} 0 R >>\n",
+                fmt_num(m[0]), fmt_num(m[1]), fmt_num(m[2]), fmt_num(m[3]), fmt_num(m[4]), fmt_num(m[5]), sh_obj_id
+            ))?;
+            self.end_obj()?;
+        }
+
+        let mut img_refs: Vec<(String, u32)> = Vec::new();
+        for img in &vp.images {
+            let smask_opt_id = if img.smask.is_some() {
+                Some(self.alloc_id())
+            } else {
+                None
+            };
+            let id = self.alloc_id();
+            img_refs.push((img.name.clone(), id));
+
+            let device_cs = match img.colorspace {
+                ImageColorSpace::Gray => "/DeviceGray",
+                ImageColorSpace::Rgb => "/DeviceRGB",
+                ImageColorSpace::Cmyk => "/DeviceCMYK",
+            };
+            let filter = if img.dct { "/DCTDecode" } else { "/FlateDecode" };
+            let icc_opt_id = if img.icc.is_some() {
+                Some(self.alloc_id())
+            } else {
+                None
+            };
+            let cs = match (icc_opt_id, img.colorspace) {
+                (Some(icc_id), _) => format!("[/ICCBased {} 0 R]", icc_id),
+                (None, ImageColorSpace::Rgb) => SRGB_CALRGB.to_string(),
+                (None, ImageColorSpace::Gray) => "/DeviceGray".to_string(),
+                (None, ImageColorSpace::Cmyk) => "/DeviceCMYK".to_string(),
+            };
+
+            if let (Some(smask_data), Some(smask_id)) = (&img.smask, smask_opt_id) {
+                self.begin_obj(smask_id)?;
+                self.raw(&format!(
+                    "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+                    img.width, img.height, smask_data.len()
+                ))?;
+                self.bytes(smask_data)?;
+                self.raw("\nendstream\n")?;
+                self.end_obj()?;
+            }
+
+            if let (Some(icc_data), Some(icc_id)) = (&img.icc, icc_opt_id) {
+                let n = match img.colorspace {
+                    ImageColorSpace::Gray => 1,
+                    ImageColorSpace::Rgb => 3,
+                    ImageColorSpace::Cmyk => 4,
+                };
+                self.begin_obj(icc_id)?;
+                self.raw(&format!(
+                    "<< /N {} /Alternate {} /Length {} >>\nstream\n",
+                    n, device_cs, icc_data.len()
+                ))?;
+                self.bytes(icc_data)?;
+                self.raw("\nendstream\n")?;
+                self.end_obj()?;
+            }
+
+            let mut dict = format!(
+                "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {} ",
+                img.width, img.height, cs
+            );
+            if let ImageColorSpace::Cmyk = img.colorspace {
+                dict.push_str(if img.cmyk_inverted {
+                    "/Decode [1 0 1 0 1 0 1 0] "
+                } else {
+                    "/Decode [0 1 0 1 0 1 0 1] "
+                });
+            }
+            dict.push_str(&format!("/BitsPerComponent 8 /Filter {} /Length {}", filter, img.data.len()));
+            if let Some(smask_id) = smask_opt_id {
+                dict.push_str(&format!(" /SMask {} 0 R", smask_id));
+            }
+            dict.push_str(" >>\nstream\n");
+
+            self.begin_obj(id)?;
+            self.raw(&dict)?;
+            self.bytes(&img.data)?;
+            self.raw("\nendstream\n")?;
+            self.end_obj()?;
+        }
+
+        let mut font_refs: Vec<(String, u32)> = Vec::new();
+        for font in &vp.fonts {
+            let id = self.write_text_font(font)?;
+            font_refs.push((font.name.clone(), id));
         }
 
         let mut resources = String::from("<< ");
@@ -218,6 +357,37 @@ impl<W: Write> PdfSink<W> {
             }
             resources.push_str(" >> ");
         }
+        if !sh_refs.is_empty() {
+            resources.push_str("/Shading <<");
+            for (name, id) in &sh_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !pat_refs.is_empty() {
+            resources.push_str("/Pattern <<");
+            for (name, id) in &pat_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !img_refs.is_empty() {
+            resources.push_str("/XObject <<");
+            for (name, id) in &img_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        if !font_refs.is_empty() {
+            resources.push_str("/Font <<");
+            for (name, id) in &font_refs {
+                resources.push_str(&format!(" /{} {} 0 R", name, id));
+            }
+            resources.push_str(" >> ");
+        }
+        resources.push_str("/ColorSpace << /Cs1 ");
+        resources.push_str(SRGB_CALRGB);
+        resources.push_str(" >> ");
         resources.push_str(">>");
 
         let page_id = self.alloc_id();
@@ -231,14 +401,165 @@ impl<W: Write> PdfSink<W> {
         ))?;
         self.end_obj()?;
 
+        let content_data = compress_to_vec_zlib(&vp.content, 6);
         self.begin_obj(content_id)?;
-        self.raw(&format!("<< /Length {} >>\nstream\n", vp.content.len()))?;
-        self.bytes(&vp.content)?;
+        self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
+        self.bytes(&content_data)?;
         self.raw("\nendstream\n")?;
         self.end_obj()
     }
 
-    pub(crate) fn finish(&mut self, _page_count: usize) -> Result<u64> {
+    fn write_text_font(&mut self, font: &FontRes) -> Result<u32> {
+        let base = format!("SeaMonkey{}", font.name);
+        let to_unicode_id = self.alloc_id();
+        let fontfile_id = self.alloc_id();
+        let desc_id = self.alloc_id();
+        let cidfont_id = self.alloc_id();
+        let type0_id = self.alloc_id();
+
+        let u1000 = 1000.0 / font.upem as f32;
+        let b = font.bbox;
+        let bbox = format!(
+            "[{} {} {} {}]",
+            fmt_num(b[0] as f32 * u1000),
+            fmt_num(b[1] as f32 * u1000),
+            fmt_num(b[2] as f32 * u1000),
+            fmt_num(b[3] as f32 * u1000)
+        );
+        let ascent = font.ascent as f32 * u1000;
+        let descent = font.descent as f32 * u1000;
+        let cap_height = ascent * 0.7;
+
+        let cmap = to_unicode_cmap(&font.to_unicode);
+
+        self.begin_obj(to_unicode_id)?;
+        self.raw(&format!("<< /Length {} >>\nstream\n", cmap.len()))?;
+        self.bytes(&cmap)?;
+        self.raw("\nendstream\n")?;
+        self.end_obj()?;
+
+        self.begin_obj(fontfile_id)?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Length {} /Subtype /CIDFontType0C >>\nstream\n",
+                font.subset.len()
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Length {} /Length1 {} >>\nstream\n",
+                font.subset.len(),
+                font.subset.len()
+            ))?;
+        }
+        self.bytes(&font.subset)?;
+        self.raw("\nendstream\n")?;
+        self.end_obj()?;
+
+        self.begin_obj(desc_id)?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile3 {} 0 R >>\n",
+                base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>\n",
+                base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
+            ))?;
+        }
+        self.end_obj()?;
+
+        self.begin_obj(cidfont_id)?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 >>\n",
+                base, desc_id
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 /CIDToGIDMap /Identity >>\n",
+                base, desc_id
+            ))?;
+        }
+        self.end_obj()?;
+
+        self.begin_obj(type0_id)?;
+        self.raw(&format!(
+            "<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H /DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>\n",
+            base, cidfont_id, to_unicode_id
+        ))?;
+        self.end_obj()?;
+
+        Ok(type0_id)
+    }
+
+    fn function2_dict(c0: [f32; 3], c1: [f32; 3]) -> String {
+        format!("<< /FunctionType 2 /Domain [0 1] /C0 [{} {} {}] /C1 [{} {} {}] /N 1 >>\n", fmt_num(c0[0]), fmt_num(c0[1]), fmt_num(c0[2]), fmt_num(c1[0]), fmt_num(c1[1]), fmt_num(c1[2]))
+    }
+
+    fn write_shading(&mut self, sh: &ShadingRes) -> Result<u32> {
+        let n = sh.stops.len();
+
+        let func_ref = if n == 2 {
+            let func_id = self.alloc_id();
+            let (_, c0) = sh.stops[0];
+            let (_, c1) = sh.stops[1];
+            self.begin_obj(func_id)?;
+            self.raw(&Self::function2_dict(c0, c1))?;
+            self.end_obj()?;
+            format!("{} 0 R", func_id)
+        } else {
+            let mut sub_refs: Vec<String> = Vec::with_capacity(n - 1);
+            for i in 0..n - 1 {
+                let (_, c0) = sh.stops[i];
+                let (_, c1) = sh.stops[i + 1];
+                let sub_id = self.alloc_id();
+                self.begin_obj(sub_id)?;
+                self.raw(&Self::function2_dict(c0, c1))?;
+                self.end_obj()?;
+                sub_refs.push(format!("{} 0 R", sub_id));
+            }
+
+            let mut bounds: Vec<String> = Vec::new();
+            for (off, _) in &sh.stops[1..n - 1] {
+                bounds.push(fmt_num(*off));
+            }
+            let mut encode: Vec<String> = Vec::with_capacity((n - 1) * 2);
+            for i in 0..(n - 1) * 2 {
+                encode.push(if i % 2 == 0 { "0".to_string() } else { "1".to_string() });
+            }
+
+            let stitch_id = self.alloc_id();
+            self.begin_obj(stitch_id)?;
+            self.raw(&format!(
+                "<< /FunctionType 3 /Domain [0 1] /Functions [{}] /Bounds [{}] /Encode [{}] >>\n",
+                sub_refs.join(" "),
+                bounds.join(" "),
+                encode.join(" ")
+            ))?;
+            self.end_obj()?;
+            format!("{} 0 R", stitch_id)
+        };
+
+        let c = sh.coords;
+        let coords_str = if sh.kind == 2 {
+            format!("{} {} {} {}", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]), fmt_num(c[3]))
+        } else {
+            format!("{} {} {} {} {} {}", fmt_num(c[0]), fmt_num(c[1]), fmt_num(c[2]), fmt_num(c[3]), fmt_num(c[4]), fmt_num(c[5]))
+        };
+
+        let sh_id = self.alloc_id();
+        self.begin_obj(sh_id)?;
+        self.raw(&format!(
+            "<< /ShadingType {} /ColorSpace {} /Coords [{}] /Function {} /Extend [true true] >>\n",
+            sh.kind, SRGB_CALRGB, coords_str, func_ref
+        ))?;
+        self.end_obj()?;
+
+        Ok(sh_id)
+    }
+
+pub(crate) fn finish(&mut self, _page_count: usize) -> Result<u64> {
         let kids: Vec<String> = self.page_ids.iter().map(|id| format!("{} 0 R", id)).collect();
         self.begin_obj(2)?;
         self.raw(&format!(

@@ -117,6 +117,9 @@ use decode::{
 use rename::try_apply_single;
 use help::{boxed, pad_right, print_help_table};
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 static LANG: OnceLock<lang::Lang> = OnceLock::new();
 
 fn set_lang(l: lang::Lang) {
@@ -198,7 +201,7 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     name = "SeaMonkeyResize",
     version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
-    after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
+    after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ TGA PNM PBM PGM PPM PAM DDS HDR EXR FF HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
     seamonkey --size 800 --format webp --quality 80 photo.jpg\n    \
@@ -524,6 +527,8 @@ fn collect_input_files(paths: &[String]) -> Vec<InputEntry> {
         "dcs","dcr","srw","iiq",
         "3fr","mos","x3f","ari",
         "svg","svgz",
+        "tga","pnm","pbm","pgm","ppm","pam",
+        "dds","hdr","exr","ff",
     ];
     let mut result = Vec::new();
     for raw in paths {
@@ -1021,7 +1026,8 @@ fn process_files(entries: &[InputEntry], config: &Config) {
 // ── build_suffix ──────────────────────────────────────────────
 
 fn is_lossless_mode(config: &Config) -> bool {
-    config.lossless && config.format != ImageFormat::Jpeg
+    config.lossless
+        && matches!(config.format, ImageFormat::WebP | ImageFormat::Jxl | ImageFormat::Pdf)
 }
 
 fn build_suffix(config: &Config) -> String {
@@ -1085,7 +1091,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     let raw = fs::read(input)
         .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
 
-    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(input)) } else { None };
+    let svg = if looks_like_svg(&raw) {
+        Some(parse_svg(&raw, Some(input))?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
@@ -1100,9 +1108,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
     }
 
-    if !config.grayscale && !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
+    if !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 if let Some(parent) = out_path.parent() {
                     if !parent.as_os_str().is_empty() {
                         fs::create_dir_all(parent)
@@ -1379,7 +1387,9 @@ where F: FnOnce(&Path) -> Result<()>
 // ── process_and_write_stdout / encode_to_vec ──────────────────
 
 fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
-    let svg = if looks_like_svg(raw) { parse_svg(raw, None) } else { None };
+    let svg = if looks_like_svg(raw) {
+        Some(parse_svg(raw, None)?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
@@ -1473,14 +1483,16 @@ fn banner(config: &Config) {
     if is_lossless_mode(config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_lossless, pad_right(m.on, 45));
     }
-    if config.progressive {
+    if config.progressive && config.format == ImageFormat::Jpeg {
         eprintln!("  ║  {:<13}{}  ║", m.label_progressive, pad_right(m.on, 45));
     }
     eprintln!("  ║  {:<13}{}  ║", m.label_grayscale, pad_right(gray_str, 45));
     if config.merge {
         eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
     }
-    if config.keep_exif {
+    if config.keep_exif
+        && matches!(config.format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Jxl)
+    {
         eprintln!("  ║  {:<13}{}  ║", m.label_exif, pad_right(m.on, 45));
     }
     if config.sharpen {
@@ -1851,14 +1863,16 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
     let raw = fs::read(&entry.file)
         .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
 
-    let svg = if looks_like_svg(&raw) { parse_svg(&raw, Some(&entry.file)) } else { None };
+    let svg = if looks_like_svg(&raw) {
+        Some(parse_svg(&raw, Some(&entry.file))?)
+    } else { None };
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.grayscale && !config.sharpen {
+    if !config.sharpen {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 return Ok(crate::pdf::PdfPage::Vector(vp));
             }
         }
