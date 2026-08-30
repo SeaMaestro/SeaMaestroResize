@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMonkeyResize"
-version = "2.3.2"
+version = "2.4.0"
 edition = "2021"
 
 [dependencies]
@@ -38,6 +38,7 @@ jwalk = "0.8"
 jxl-oxide = { version = "0.12.5", features = ["image"] }
 jxl-encoder = "0.3.1"
 tiff = "0.11"
+mimalloc = "0.1"
 miniz_oxide = "0.8"
 resvg = "0.48.1"
 subsetter = { version = "0.2.6", default-features = false }

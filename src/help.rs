@@ -53,6 +53,86 @@ fn two_col(label: &str, value: &str, label_w: usize) -> String {
     format!("{}{}│ {}", label, " ".repeat(pad), value)
 }
 
+fn wrap_value(value: &str, width: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut line_w = 0usize;
+    let mut word = String::new();
+    let mut word_w = 0usize;
+    let mut sep = String::new();
+    let mut sep_w = 0usize;
+
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == ' ' {
+            sep.push(' ');
+            sep_w += 1;
+            continue;
+        }
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        word.push(ch);
+        word_w += cw;
+        if chars.peek().map_or(true, |c| *c == ' ') {
+            if line_w > 0 && line_w + sep_w + word_w > width {
+                out.push(std::mem::take(&mut line));
+                line_w = 0;
+            }
+            if line_w > 0 {
+                line.push_str(&sep);
+                line_w += sep_w;
+            }
+            line.push_str(&word);
+            line_w += word_w;
+            word.clear();
+            word_w = 0;
+            sep.clear();
+            sep_w = 0;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let lead = text.len() - text.trim_start_matches(' ').len();
+    let lead_w = UnicodeWidthStr::width(&text[..lead]);
+    let rest = &text[lead..];
+    let avail = width.saturating_sub(lead_w);
+    let mut chunks = wrap_value(rest, avail);
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    let mut out = Vec::with_capacity(chunks.len());
+    for (idx, chunk) in chunks.into_iter().enumerate() {
+        if idx == 0 {
+            out.push(format!("{}{}", &text[..lead], chunk));
+        } else {
+            out.push(format!("{}{}", " ".repeat(lead_w), chunk));
+        }
+    }
+    out
+}
+
+fn print_pair_wrapped(label: &str, value: &str, label_w: usize, width: usize) {
+    let value_w = width.saturating_sub(label_w + 2);
+    let chunks = wrap_value(value, value_w);
+    if chunks.is_empty() {
+        eprintln!("  ║  {}  ║", pad_right(&two_col(label, "", label_w), width));
+        return;
+    }
+    let first_prefix = format!("{}{}│ ", label, " ".repeat(label_w.saturating_sub(label.width())));
+    let cont_prefix = format!("{}│ ", " ".repeat(label_w));
+    eprintln!("  ║  {}{}  ║", first_prefix, pad_right(&chunks[0], value_w));
+    for chunk in chunks.iter().skip(1) {
+        eprintln!("  ║  {}{}  ║", cont_prefix, pad_right(chunk, value_w));
+    }
+}
+
 pub(crate) fn print_help_table() {
     let m = msg();
     let top = "═".repeat(84);
@@ -67,7 +147,9 @@ pub(crate) fn print_help_table() {
                 if !first {
                     eprintln!("  ╠{}╣", mid);
                 }
-                eprintln!("  ║  {}  ║", fit_cell(t, W));
+                for line in wrap_line(t, W) {
+                    eprintln!("  ║  {}  ║", pad_right(&line, W));
+                }
                 if first {
                     eprintln!("  ╠{}╣", mid);
                     first = false;
@@ -75,7 +157,9 @@ pub(crate) fn print_help_table() {
                 i += 1;
             }
             HelpRow::Text(t) => {
-                eprintln!("  ║  {}  ║", fit_cell(t, W));
+                for line in wrap_line(t, W) {
+                    eprintln!("  ║  {}  ║", pad_right(&line, W));
+                }
                 i += 1;
             }
             HelpRow::Pair(..) => {
@@ -91,7 +175,7 @@ pub(crate) fn print_help_table() {
                 }
                 for j in start..i {
                     if let HelpRow::Pair(l, v) = &m.help_table[j] {
-                        eprintln!("  ║  {}  ║", fit_cell(&two_col(l, v, label_w), W));
+                        print_pair_wrapped(l, v, label_w, W);
                     }
                 }
             }

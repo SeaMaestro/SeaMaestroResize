@@ -41,6 +41,13 @@ This software is based in part on the work of the Independent JPEG Group.
 - License: BSD 3-Clause
 - Project: https://github.com/etemesi254/zune-image
 
+## mimalloc — memory allocator
+
+- License: MIT
+- Project: https://github.com/microsoft/mimalloc
+
+Copyright (c) Microsoft Corporation, Daan Leijen. Licensed under the MIT License.
+
 ## Other Rust crates
 
 The remaining Rust dependencies are licensed under MIT, Apache-2.0, or
