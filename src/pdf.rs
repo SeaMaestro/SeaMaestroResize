@@ -439,27 +439,48 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()?;
 
         self.begin_obj(fontfile_id)?;
-        self.raw(&format!(
-            "<< /Length {} /Length1 {} >>\nstream\n",
-            font.subset.len(),
-            font.subset.len()
-        ))?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Length {} /Subtype /CIDFontType0C >>\nstream\n",
+                font.subset.len()
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Length {} /Length1 {} >>\nstream\n",
+                font.subset.len(),
+                font.subset.len()
+            ))?;
+        }
         self.bytes(&font.subset)?;
         self.raw("\nendstream\n")?;
         self.end_obj()?;
 
         self.begin_obj(desc_id)?;
-        self.raw(&format!(
-            "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>\n",
-            base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
-        ))?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile3 {} 0 R >>\n",
+                base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Type /FontDescriptor /FontName /{} /Flags 32 /FontBBox {} /ItalicAngle 0 /Ascent {} /Descent {} /CapHeight {} /StemV 80 /FontFile2 {} 0 R >>\n",
+                base, bbox, fmt_num(ascent), fmt_num(descent), fmt_num(cap_height), fontfile_id
+            ))?;
+        }
         self.end_obj()?;
 
         self.begin_obj(cidfont_id)?;
-        self.raw(&format!(
-            "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 /CIDToGIDMap /Identity >>\n",
-            base, desc_id
-        ))?;
+        if font.is_cff {
+            self.raw(&format!(
+                "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 >>\n",
+                base, desc_id
+            ))?;
+        } else {
+            self.raw(&format!(
+                "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor {} 0 R /DW 1000 /CIDToGIDMap /Identity >>\n",
+                base, desc_id
+            ))?;
+        }
         self.end_obj()?;
 
         self.begin_obj(type0_id)?;

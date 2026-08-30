@@ -58,6 +58,7 @@ pub(crate) struct FontRes {
     pub font_id: fontdb::ID,
     pub name: String,
     pub subset: Vec<u8>,
+    pub is_cff: bool,
     pub upem: u16,
     pub bbox: [i16; 4],
     pub ascent: i16,
@@ -122,6 +123,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
                 font_id: *font_id,
                 name,
                 subset: r.subset,
+                is_cff: r.is_cff,
                 upem: r.upem,
                 bbox: r.bbox,
                 ascent: r.ascent,
@@ -414,6 +416,7 @@ fn emit_path(
 
 struct SubsetResult {
     subset: Vec<u8>,
+    is_cff: bool,
     upem: u16,
     bbox: [i16; 4],
     ascent: i16,
@@ -489,6 +492,30 @@ fn font_head(data: &[u8]) -> Option<(u16, [i16; 4], i16, i16)> {
     Some((upem, bbox, ascent, descent))
 }
 
+fn extract_cff_table(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 12 {
+        return None;
+    }
+    let num = u16::from_be_bytes([data[4], data[5]]) as usize;
+    let mut i = 12usize;
+    for _ in 0..num {
+        if i + 16 > data.len() {
+            return None;
+        }
+        if &data[i..i + 4] == b"CFF " {
+            let off = u32::from_be_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]) as usize;
+            let len = u32::from_be_bytes([data[i + 12], data[i + 13], data[i + 14], data[i + 15]]) as usize;
+            let end = off.checked_add(len)?;
+            if end > data.len() {
+                return None;
+            }
+            return Some(data[off..end].to_vec());
+        }
+        i += 16;
+    }
+    None
+}
+
 fn subset_font(
     fontdb: &Arc<fontdb::Database>,
     font_id: fontdb::ID,
@@ -501,10 +528,13 @@ fn subset_font(
         let glyphs: Vec<u16> = texts.keys().copied().collect();
         let remapper = subsetter::GlyphRemapper::new_from_glyphs_sorted(&glyphs);
         let subset = subsetter::subset(data, index, &remapper).ok()?;
-        if subset.len() >= 4 && &subset[0..4] == b"OTTO" {
-            return None;
-        }
+        let is_cff = subset.len() >= 4 && &subset[0..4] == b"OTTO";
         let (upem, bbox, ascent, descent) = font_head(&subset)?;
+        let subset = if is_cff {
+            extract_cff_table(&subset)?
+        } else {
+            subset
+        };
         let mut cids = BTreeMap::new();
         let mut to_unicode = BTreeMap::new();
         for (gid, text) in texts {
@@ -513,7 +543,7 @@ fn subset_font(
             let u = if text.is_empty() { "\u{FFFD}".to_string() } else { text.clone() };
             to_unicode.insert(cid, u);
         }
-        Some(SubsetResult { subset, upem, bbox, ascent, descent, cids, to_unicode })
+        Some(SubsetResult { subset, is_cff, upem, bbox, ascent, descent, cids, to_unicode })
     })?
 }
 
