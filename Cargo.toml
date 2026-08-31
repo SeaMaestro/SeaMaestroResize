@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMonkeyResize"
-version = "2.4.2"
+version = "2.4.3"
 edition = "2021"
 
 [dependencies]
