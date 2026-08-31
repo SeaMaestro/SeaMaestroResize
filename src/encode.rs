@@ -42,7 +42,7 @@ pub(crate) fn set_avif_threads(total_files: usize) {
     let threads = if total_files <= 1 {
         cpus.min(8)
     } else {
-        (cpus / total_files).clamp(1, cpus)
+        1
     };
     AVIF_THREADS.store(threads, Ordering::Relaxed);
 }

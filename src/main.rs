@@ -899,77 +899,103 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         final_tasks.push((input.clone(), final_path));
     }
 
-    let results: Vec<(PathBuf, Result<PathBuf, String>, usize)> = final_tasks
-        .par_iter().enumerate()
-        .map(|(_idx, (input, final_path))| {
-            let result = run_safely(|| process_image(input, config, final_path));
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let max_workers = cpus;
+    let task_idx = AtomicUsize::new(0);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let task_idx = &task_idx;
+    let final_tasks = &final_tasks;
+    let progress = &progress;
+    let stat_in = &stat_in;
+    let stat_out = &stat_out;
+    let pb = &pb;
 
-            let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Some(ref pb) = pb {
-                pb.inc(1);
-            }
+    std::thread::scope(|s| {
+        for _ in 0..max_workers {
+            let tx = tx.clone();
+            s.spawn(move || {
+                loop {
+                    let idx = task_idx.fetch_add(1, Ordering::Relaxed);
+                    if idx >= final_tasks.len() { break; }
+                    let (input, final_path) = &final_tasks[idx];
 
-            let (in_meta, out_meta) = match &result {
-                Ok(out_path) => (fs::metadata(input).ok(), fs::metadata(out_path).ok()),
-                Err(_) => (None, None),
-            };
-            let in_size = in_meta.as_ref().map(|m| m.len()).unwrap_or(1);
-            let out_size = out_meta.as_ref().map(|m| m.len()).unwrap_or(1);
+                    let result = run_safely(|| process_image(input, config, final_path));
 
-            let formatted = match &result {
-                Ok(out_path) => {
-                    let pct = (out_size as f64 / in_size as f64) * 100.0;
-                    let remark = if pct < 20.0 { m.remark_great }
-                    else if pct < 50.0 { m.remark_good }
-                    else if pct < 80.0 { m.remark_ok }
-                    else if pct < 100.0 { m.remark_bail }
-                    else { m.remark_gain };
-                    let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
-                    let diff_str = if out_size < in_size {
-                        m.diff_down
-                            .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
-                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                    } else {
-                        m.diff_up
-                            .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
-                            .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                    let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    if let Some(ref pb) = pb {
+                        pb.inc(1);
+                    }
+
+                    let (in_meta, out_meta) = match &result {
+                        Ok(out_path) => (fs::metadata(input).ok(), fs::metadata(out_path).ok()),
+                        Err(_) => (None, None),
                     };
-                    m.file_line
-                        .replacen("{}", &current.to_string(), 1)
-                        .replacen("{}", &total.to_string(), 1)
-                        .replacen("{}", &short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
-                        .replacen("{}", &short_name(&out_path.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
-                        .replacen("{}", &human_size(in_size), 1)
-                        .replacen("{}", &human_size(out_size), 1)
-                        .replacen("{}", &diff_str, 1)
-                        .replacen("{}", remark, 1)
+                    let in_size = in_meta.as_ref().map(|m| m.len()).unwrap_or(1);
+                    let out_size = out_meta.as_ref().map(|m| m.len()).unwrap_or(1);
+
+                    let formatted = match &result {
+                        Ok(out_path) => {
+                            let pct = (out_size as f64 / in_size as f64) * 100.0;
+                            let remark = if pct < 20.0 { m.remark_great }
+                            else if pct < 50.0 { m.remark_good }
+                            else if pct < 80.0 { m.remark_ok }
+                            else if pct < 100.0 { m.remark_bail }
+                            else { m.remark_gain };
+                            let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                            let diff_str = if out_size < in_size {
+                                m.diff_down
+                                    .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                                    .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                            } else {
+                                m.diff_up
+                                    .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                                    .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                            };
+                            m.file_line
+                                .replacen("{}", &current.to_string(), 1)
+                                .replacen("{}", &total.to_string(), 1)
+                                .replacen("{}", &short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
+                                .replacen("{}", &short_name(&out_path.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
+                                .replacen("{}", &human_size(in_size), 1)
+                                .replacen("{}", &human_size(out_size), 1)
+                                .replacen("{}", &diff_str, 1)
+                                .replacen("{}", remark, 1)
+                        }
+                        Err(_) => m.file_error
+                            .replacen("{}", &current.to_string(), 1)
+                            .replacen("{}", &total.to_string(), 1)
+                            .replacen("{}", &short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28), 1),
+                    };
+
+                    match pb {
+                        Some(pb) => pb.println(formatted),
+                        None => eprintln!("{}", formatted),
+                    }
+
+                    if config.shanty {
+                        let shanty = format!("  {}", next_shanty());
+                        match pb {
+                            Some(pb) => pb.println(shanty),
+                            None => eprintln!("{}", shanty),
+                        }
+                    }
+
+                    if let (Some(in_meta), Some(out_meta)) = (&in_meta, &out_meta) {
+                        stat_in.fetch_add(in_meta.len(), Ordering::Relaxed);
+                        stat_out.fetch_add(out_meta.len(), Ordering::Relaxed);
+                    }
+
+                    let out_tuple = (input.clone(), result.map(|o| o.clone()).map_err(|e| format!("{}", e)), current);
+                    let _ = tx.send((idx, out_tuple));
                 }
-                Err(_) => m.file_error
-                    .replacen("{}", &current.to_string(), 1)
-                    .replacen("{}", &total.to_string(), 1)
-                    .replacen("{}", &short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28), 1),
-            };
+            });
+        }
+        drop(tx);
+    });
 
-            match &pb {
-                Some(pb) => pb.println(formatted),
-                None => eprintln!("{}", formatted),
-            }
-
-            if config.shanty {
-                let shanty = format!("  {}", next_shanty());
-                match &pb {
-                    Some(pb) => pb.println(shanty),
-                    None => eprintln!("{}", shanty),
-                }
-            }
-
-            if let (Some(in_meta), Some(out_meta)) = (&in_meta, &out_meta) {
-                stat_in.fetch_add(in_meta.len(), Ordering::Relaxed);
-                stat_out.fetch_add(out_meta.len(), Ordering::Relaxed);
-            }
-
-            (input.clone(), result.map(|o| o.clone()).map_err(|e| format!("{}", e)), current)
-        }).collect();
+    let mut unordered_results: Vec<_> = rx.into_iter().collect();
+    unordered_results.sort_by_key(|(i, _)| *i);
+    let results: Vec<(PathBuf, Result<PathBuf, String>, usize)> = unordered_results.into_iter().map(|(_, r)| r).collect();  
 
     if let Some(pb) = pb {
         pb.finish_and_clear();
@@ -1126,7 +1152,14 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
 
     let need = match svg_render {
         Some(((tw, th), _)) => raster_need(tw, th),
-        None => probe_image(&raw),
+        None => {
+            let base = probe_image(&raw);
+            if config.format == ImageFormat::Avif && config.target_size.is_none() {
+                base.saturating_mul(16).saturating_add(512 * 1024 * 1024)
+            } else {
+                base
+            }
+        }
     };
     let budget = mem_budget();
     budget.acquire(need);
@@ -1878,10 +1911,13 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         }
     }
 
-    let need = match svg_render {
+    let mut need = match svg_render {
         Some(((tw, th), _)) => raster_need(tw, th),
         None => probe_image(&raw),
     };
+    if config.format == ImageFormat::Avif {
+        need = need.saturating_mul(16).saturating_add(512 * 1024 * 1024);
+    }
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
