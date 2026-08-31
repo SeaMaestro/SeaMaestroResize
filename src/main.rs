@@ -993,9 +993,8 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         drop(tx);
     });
 
-    let mut unordered_results: Vec<_> = rx.into_iter().collect();
-    unordered_results.sort_by_key(|(i, _)| *i);
-    let results: Vec<(PathBuf, Result<PathBuf, String>, usize)> = unordered_results.into_iter().map(|(_, r)| r).collect();  
+    let mut results: Vec<_> = rx.into_iter().collect();
+    results.sort_by_key(|(i, _)| *i); 
 
     if let Some(pb) = pb {
         pb.finish_and_clear();
@@ -1005,7 +1004,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let out_total = stat_out.load(Ordering::Relaxed);
     let mut errors = 0usize;
 
-    for (input, result, _seq) in &results {
+    for (_, (input, result, _)) in &results {
         let fl = input.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
         if let Some(idx) = easter_index(&fl) {
             eprintln!("  {}", m.easter[idx]);
@@ -1736,69 +1735,89 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     while offset < total {
         let end = (offset + chunk).min(total);
         let slice = &ordered[offset..end];
-        let results: Vec<(usize, Result<crate::pdf::PdfPage, String>)> = slice
-            .par_iter()
-            .enumerate()
-            .map(|(local, entry)| {
-                let idx = offset + local;
-                let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
-                let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
-                let res = run_safely(|| process_one_to_pdf(entry, config)).map_err(|e| format!("{:#}", e));
+        let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+        let chunk_workers = cpus.min(slice.len());
+        let task_idx = AtomicUsize::new(0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let task_idx = &task_idx;
+        let progress = &progress;
+        let stat_in = &stat_in;
+        let pb = &pb;
+        let out_name = out_name.as_str();
 
-                let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
-                if let Some(ref pb) = pb {
-                    pb.inc(1);
-                }
+        std::thread::scope(|s| {
+            for _ in 0..chunk_workers {
+                let tx = tx.clone();
+                s.spawn(move || {
+                    loop {
+                        let local = task_idx.fetch_add(1, Ordering::Relaxed);
+                        if local >= slice.len() { break; }
+                        let entry = slice[local];
+                        let idx = offset + local;
+                        let name = entry.file.file_name().unwrap_or_default().to_string_lossy();
+                        let in_size = fs::metadata(&entry.file).map(|mt| mt.len()).unwrap_or(1);
+                        let res = run_safely(|| process_one_to_pdf(entry, config)).map_err(|e| format!("{:#}", e));
 
-                match &res {
-                    Ok(page) => {
-                        let out_size = page.size_hint() as u64;
-                        let pct = (out_size as f64 / in_size as f64) * 100.0;
-                        let remark = if pct < 20.0 { m.remark_great }
-                            else if pct < 50.0 { m.remark_good }
-                            else if pct < 80.0 { m.remark_ok }
-                            else if pct < 100.0 { m.remark_bail }
-                            else { m.remark_gain };
-                        let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
-                        let diff_str = if out_size < in_size {
-                            m.diff_down
-                                .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
-                                .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                        } else {
-                            m.diff_up
-                                .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
-                                .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
-                        };
-                        let line = m.file_line
-                            .replacen("{}", &current.to_string(), 1)
-                            .replacen("{}", &total.to_string(), 1)
-                            .replacen("{}", &short_name(&name, 28), 1)
-                            .replacen("{}", &short_name(&out_name, 28), 1)
-                            .replacen("{}", &human_size(in_size), 1)
-                            .replacen("{}", &human_size(out_size), 1)
-                            .replacen("{}", &diff_str, 1)
-                            .replacen("{}", remark, 1);
-                        match &pb {
-                            Some(pb) => pb.println(line),
-                            None => eprintln!("{}", line),
+                        let current = progress.fetch_add(1, Ordering::Relaxed) + 1;
+                        if let Some(ref pb) = pb {
+                            pb.inc(1);
                         }
-                        stat_in.fetch_add(in_size, Ordering::Relaxed);
-                    }
-                    Err(_) => {
-                        let line = m.file_error
-                            .replacen("{}", &current.to_string(), 1)
-                            .replacen("{}", &total.to_string(), 1)
-                            .replacen("{}", &short_name(&name, 28), 1);
-                        match &pb {
-                            Some(pb) => pb.println(line),
-                            None => eprintln!("{}", line),
-                        }
-                    }
-                }
 
-                (idx, res)
-            })
-            .collect();
+                        match &res {
+                            Ok(page) => {
+                                let out_size = page.size_hint() as u64;
+                                let pct = (out_size as f64 / in_size as f64) * 100.0;
+                                let remark = if pct < 20.0 { m.remark_great }
+                                    else if pct < 50.0 { m.remark_good }
+                                    else if pct < 80.0 { m.remark_ok }
+                                    else if pct < 100.0 { m.remark_bail }
+                                    else { m.remark_gain };
+                                let change_pct = ((in_size as f64 - out_size as f64) / in_size as f64 * 100.0).abs();
+                                let diff_str = if out_size < in_size {
+                                    m.diff_down
+                                        .replacen("{}", &human_size(in_size.saturating_sub(out_size)), 1)
+                                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                                } else {
+                                    m.diff_up
+                                        .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
+                                        .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
+                                };
+                                let line = m.file_line
+                                    .replacen("{}", &current.to_string(), 1)
+                                    .replacen("{}", &total.to_string(), 1)
+                                    .replacen("{}", &short_name(&name, 28), 1)
+                                    .replacen("{}", &short_name(out_name, 28), 1)
+                                    .replacen("{}", &human_size(in_size), 1)
+                                    .replacen("{}", &human_size(out_size), 1)
+                                    .replacen("{}", &diff_str, 1)
+                                    .replacen("{}", remark, 1);
+                                match pb {
+                                    Some(pb) => pb.println(line),
+                                    None => eprintln!("{}", line),
+                                }
+                                stat_in.fetch_add(in_size, Ordering::Relaxed);
+                            }
+                            Err(_) => {
+                                let line = m.file_error
+                                    .replacen("{}", &current.to_string(), 1)
+                                    .replacen("{}", &total.to_string(), 1)
+                                    .replacen("{}", &short_name(&name, 28), 1);
+                                match pb {
+                                    Some(pb) => pb.println(line),
+                                    None => eprintln!("{}", line),
+                                }
+                            }
+                        }
+
+                        let _ = tx.send((idx, res));
+                    }
+                });
+            }
+            drop(tx);
+        });
+
+        let mut results: Vec<(usize, Result<crate::pdf::PdfPage, String>)> = rx.into_iter().collect();
+        results.sort_by_key(|(i, _)| *i);
 
         for (idx, res) in results {
             match res {

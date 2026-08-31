@@ -115,7 +115,7 @@ fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP" {
         return webp_dims(raw);
     }
-    if raw.len() >= 8 && &raw[4..8] == b"JXL " {
+    if (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A]) {
         if let Ok(image) = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(raw)) {
             return Some((image.width(), image.height()));
         }
@@ -409,7 +409,7 @@ fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() >= 12 && &raw[0..4] == b"RIFF" && &raw[8..12] == b"WEBP" {
         return webp_exif(raw);
     }
-    if raw.len() >= 8 && &raw[4..8] == b"JXL " {
+    if (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A]) {
         return jxl_exif(raw);
     }
     None

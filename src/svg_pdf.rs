@@ -32,7 +32,6 @@ pub(crate) struct VectorPage {
     pub patterns: Vec<PatternRes>,
     pub images: Vec<ImageRes>,
     pub fonts: Vec<FontRes>,
-    _permit: Option<MemPermit<'static>>,
 }
 
 #[derive(Clone, Copy)]
@@ -107,7 +106,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
     }
     let budget = mem_budget();
     budget.acquire(vec_need);
-    let mut permit = Some(MemPermit { budget, need: vec_need });
+    let _permit = MemPermit { budget, need: vec_need };
 
     let fontdb = tree.fontdb();
     let mut text_glyphs: BTreeMap<fontdb::ID, BTreeMap<u16, String>> = BTreeMap::new();
@@ -148,7 +147,6 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         patterns,
         images,
         fonts,
-        _permit: permit.take(),
     })
 }
 
