@@ -76,16 +76,7 @@ pub(crate) fn mem_budget() -> &'static MemBudget {
     })
 }
 
-pub(crate) fn probe_image(raw: &[u8]) -> u64 {
-    let max = runtime_limits().max_alloc;
-    let (w, h) = probe_dims(raw).unwrap_or((32768, 32768));
-    (w as u64)
-        .saturating_mul(h as u64)
-        .saturating_mul(4)
-        .clamp(1, max)
-}
-
-fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
+pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if looks_like_svg(raw) {
         return probe_svg_dims(raw);
     }
@@ -895,7 +886,7 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
 
 // ── RAW helpers ───────────────────────────────────────────────
 
-fn is_raw_bytes(raw: &[u8]) -> bool {
+pub(crate) fn is_raw_bytes(raw: &[u8]) -> bool {
     if raw.len() >= 4 && (&raw[0..4] == b"II*\0" || &raw[0..4] == b"MM\0*") {
         return true;
     }

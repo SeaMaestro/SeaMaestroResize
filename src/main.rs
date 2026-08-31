@@ -111,8 +111,8 @@ use unicode_width::UnicodeWidthStr;
 use indicatif::{ProgressBar, ProgressStyle};
 use encode::{encode_bmp, encode_to_vec, set_avif_threads};
 use decode::{
-    decode_image, is_heif, looks_like_svg, mem_budget, parse_svg, probe_image,
-    raster_need, MemPermit,
+    decode_image, is_heif, is_raw_bytes, looks_like_svg, mem_budget, parse_svg,
+    probe_dims, raster_need, MemPermit,
 };
 use rename::try_apply_single;
 use help::{boxed, pad_right, print_help_table};
@@ -1112,6 +1112,46 @@ fn compute_output_path(
 
 // ── process_image ─────────────────────────────────────────────
 
+fn compute_need(raw: &[u8], svg: Option<&crate::decode::ParsedSvg>, config: &Config) -> u64 {
+    let is_svg = svg.is_some();
+    let (orig_w, orig_h) = if let Some(s) = svg {
+        (s.width, s.height)
+    } else {
+        probe_dims(raw).unwrap_or((32768, 32768))
+    };
+    let ((tw, th), _) = svg_target_dims((orig_w, orig_h), config.target_size.as_ref());
+    let orig_raster = raster_need(orig_w, orig_h);
+    let target_raster = raster_need(tw, th);
+    let decode_raster = if is_svg { target_raster } else { orig_raster };
+
+    let (in_mult, in_oh): (u64, u64) = if is_svg {
+        (1, 16)
+    } else if (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A]) {
+        (8, 256)
+    } else if is_heif(raw) || (raw.len() >= 12 && (&raw[4..12] == b"ftypavif" || &raw[4..12] == b"ftypavis")) {
+        (4, 128)
+    } else if is_raw_bytes(raw) {
+        (6, 128)
+    } else if raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP" {
+        (3, 64)
+    } else if raw.len() >= 24 && raw.starts_with(b"\x89PNG\r\n\x1a\n") {
+        (3, 64)
+    } else {
+        (1, 16)
+    };
+
+    let (out_mult, out_oh): (u64, u64) = match config.format {
+        ImageFormat::Avif => (4, 128),
+        ImageFormat::Jxl => (16, 512),
+        ImageFormat::WebP | ImageFormat::Png | ImageFormat::Pdf => (3, 64),
+        _ => (1, 16),
+    };
+
+    let decode_need = decode_raster.saturating_mul(in_mult).saturating_add(in_oh * 1024 * 1024);
+    let encode_need = target_raster.saturating_mul(out_mult).saturating_add(out_oh * 1024 * 1024);
+    decode_need.max(encode_need).saturating_add(raw.len() as u64)
+}
+
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
     let raw = fs::read(input)
         .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
@@ -1149,17 +1189,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         }
     }
 
-    let need = match svg_render {
-        Some(((tw, th), _)) => raster_need(tw, th),
-        None => {
-            let base = probe_image(&raw);
-            if config.format == ImageFormat::Avif && config.target_size.is_none() {
-                base.saturating_mul(16).saturating_add(512 * 1024 * 1024)
-            } else {
-                base
-            }
-        }
-    };
+    let need = compute_need(&raw, svg.as_ref(), config);
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
@@ -1930,13 +1960,7 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         }
     }
 
-    let mut need = match svg_render {
-        Some(((tw, th), _)) => raster_need(tw, th),
-        None => probe_image(&raw),
-    };
-    if config.format == ImageFormat::Avif {
-        need = need.saturating_mul(16).saturating_add(512 * 1024 * 1024);
-    }
+    let need = compute_need(&raw, svg.as_ref(), config);
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
