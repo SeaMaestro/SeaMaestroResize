@@ -2,6 +2,8 @@
   "name": "seamaestroresize",
   "version-string": "2.4.4",
   "dependencies": [
+    "dav1d",
+    "pkgconf",
     {
       "name": "libheif",
       "default-features": false,

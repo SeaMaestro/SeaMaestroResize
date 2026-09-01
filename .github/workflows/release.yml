@@ -11,6 +11,10 @@ permissions:
 env:
   VCPKG_ROOT: C:\vcpkg
   VCPKG_DEFAULT_TRIPLET: x64-windows-static
+  VCPKG_INSTALLED_ROOT: ${{ github.workspace }}\vcpkg_installed
+  VCPKGRS_TRIPLET: x64-windows-static
+  PKG_CONFIG: pkgconf
+  PKG_CONFIG_PATH: ${{ github.workspace }}\vcpkg_installed\x64-windows-static\lib\pkgconfig
   RUSTFLAGS: "-C target-feature=+crt-static"
 
 jobs:
@@ -28,13 +32,17 @@ jobs:
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
-          path: C:\vcpkg\installed
+          path: vcpkg_installed
           key: vcpkg-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
             vcpkg-${{ runner.os }}-x64-windows-static-
 
       - name: Install vcpkg dependencies
-        run: vcpkg install --triplet x64-windows-static
+        run: vcpkg install --triplet x64-windows-static --x-install-root="${{ github.workspace }}\vcpkg_installed"
+
+      - name: Add pkgconf to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "${{ github.workspace }}\vcpkg_installed\x64-windows-static\tools\pkgconf"
 
       - name: Build
         run: cargo build --release
