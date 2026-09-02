@@ -10,10 +10,9 @@ permissions:
 env:
   VCPKG_ROOT: C:\vcpkg
   VCPKG_DEFAULT_TRIPLET: x64-windows-static
-  VCPKG_INSTALLED_ROOT: ${{ github.workspace }}\vcpkg_installed
   VCPKGRS_TRIPLET: x64-windows-static
   PKG_CONFIG: pkgconf
-  PKG_CONFIG_PATH: ${{ github.workspace }}\vcpkg_installed\x64-windows-static\lib\pkgconfig
+  PKG_CONFIG_PATH: C:\vcpkg\installed\x64-windows-static\lib\pkgconfig
   RUSTFLAGS: "-C target-feature=+crt-static"
 
 jobs:
@@ -36,17 +35,21 @@ jobs:
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
-          path: vcpkg_installed
-          key: vcpkg-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+          path: C:\vcpkg\installed
+          key: vcpkg-installed-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-${{ runner.os }}-x64-windows-static-
+            vcpkg-installed-${{ runner.os }}-x64-windows-static-
 
       - name: Install vcpkg dependencies
-        run: vcpkg install --triplet x64-windows-static --x-install-root="${{ github.workspace }}\vcpkg_installed"
+        run: vcpkg install --triplet x64-windows-static
+
+      - name: Ensure vcpkg status updates dir
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force "C:\vcpkg\installed\vcpkg\updates" | Out-Null
 
       - name: Add pkgconf to PATH
         shell: pwsh
-        run: Add-Content -Path $env:GITHUB_PATH -Value "${{ github.workspace }}\vcpkg_installed\x64-windows-static\tools\pkgconf"
+        run: Add-Content -Path $env:GITHUB_PATH -Value "C:\vcpkg\installed\x64-windows-static\tools\pkgconf"
 
       - name: Check
         run: cargo check --all-targets

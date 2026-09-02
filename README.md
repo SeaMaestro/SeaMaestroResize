@@ -71,10 +71,27 @@ Requirements:
 
 - Rust (MSVC toolchain on Windows)
 - Windows 10/11
-- Optional: [vcpkg](https://github.com/microsoft/vcpkg) for HEIC/HEIF
-  (set `VCPKG_ROOT`)
+- [vcpkg](https://github.com/microsoft/vcpkg) (manifest deps: HEIC/HEIF,
+  AVIF, pkgconf)
+- [NASM](https://www.nasm.us/) 2.14+ on `PATH` (rav1e AVIF encoder)
 
 ```powershell
+# NASM (if not already installed)
+winget install --id NASM.NASM -e
+
+$vcpkg = "C:\path\to\vcpkg"
+$env:VCPKG_ROOT = $vcpkg
+$env:VCPKG_DEFAULT_TRIPLET = "x64-windows-static"
+$env:VCPKGRS_TRIPLET = "x64-windows-static"
+$env:PKG_CONFIG = "pkgconf"
+$env:PKG_CONFIG_PATH = "$vcpkg\installed\x64-windows-static\lib\pkgconfig"
+
+# Build manifest dependencies (static triplet)
+& "$vcpkg\vcpkg.exe" install --triplet x64-windows-static
+
+# pkgconf from the vcpkg manifest must be discoverable
+$env:Path = "$vcpkg\installed\x64-windows-static\tools\pkgconf;$env:Path"
+
 cargo build --release
 ```
 
