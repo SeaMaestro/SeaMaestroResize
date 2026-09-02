@@ -41,7 +41,7 @@ jobs:
             vcpkg-installed-${{ runner.os }}-x64-windows-static-
 
       - name: Install vcpkg dependencies
-        run: vcpkg install --triplet x64-windows-static
+        run: vcpkg install --triplet x64-windows-static --x-install-root="C:\vcpkg\installed"
 
       - name: Ensure vcpkg status updates dir
         shell: pwsh
