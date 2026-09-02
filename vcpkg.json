@@ -1,0 +1,11 @@
+{
+  "name": "seamaestroresize",
+  "version-string": "2.4.4",
+  "dependencies": [
+    {
+      "name": "libheif",
+      "default-features": false,
+      "features": ["aom"]
+    }
+  ]
+}
