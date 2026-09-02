@@ -1,3 +1,72 @@
+## SeaMaestroResize v2.4.4
+
+## 🔱 Rebranding & UI
+
+**New Name** — The project has been officially renamed from
+**SeaMonkeyResize** to **SeaMaestroResize**, reflecting its role as a
+multi-format image orchestrator. The repository now lives at
+`github.com/SeaMaestro/SeaMaestroResize`.
+
+**Nautical Aesthetic** — The console output is cleared of the old
+monkey/banana mascot. It now uses the trident (🔱) and anchor (⚓), and the
+old "banana break" jokes are replaced with nautical "shore leave" and
+"dropping anchor" messages across all 8 supported languages.
+
+**Clean Artifacts** — The GitHub Release asset now downloads as a clean
+`SeaMaestroResize.exe` (the versioned `SeaMaestroResize_v2.4.4.exe` remains
+the display label), making it easier to grab and immediately rename with your
+desired configuration.
+
+## ⚙️ Core & Build System
+
+**CI Stabilization (GitHub Actions)** — The Windows-2022 build pipeline has
+been overhauled; the heavy C-library compilation crashes are resolved.
+
+**AVIF & AV1 Support** — Added NASM to the runner, fixing rav1e (AVIF
+encoder) assembly compilation. Restored dav1d decoder linking via `pkgconf`
+in `vcpkg.json`. AVIF reading and writing are now fully operational in
+release builds.
+
+**libheif-sys Fix** — Resolved the critical build bug (`os error 3`) caused
+by vcpkg-rs failing to locate the package tree. The pipeline now installs to
+the default vcpkg root for reliable dependency resolution.
+
+**Size Optimization** — Changed the Rust compiler opt-level to `"s"`, further
+shrinking the static `.exe`. The native codec stack (rav1e/dav1d/libheif/aom)
+keeps its C/asm SIMD throughput, and the resize path runs on
+`fast_image_resize`'s SIMD-optimized Rust kernels, so real-world performance
+is effectively unchanged.
+
+**Smoke Test** — Added a post-build smoke test to the release pipeline.
+
+## 🐛 Bug Fixes
+
+**EXE Rename Language Suffix** — Fixed parsing of multi-token executable
+names that carry a language code (e.g. `SeaMaestroResize1920jpgq85_DE.exe`).
+The language and all glued settings now apply correctly instead of being
+skipped.
+
+## 📝 Documentation & Licenses
+
+**Build Docs** — The README now lists explicit source-build requirements:
+Rust MSVC toolchain, vcpkg manifest dependencies, and NASM, plus the
+static-CRT setup.
+
+**Upscale** — The README documents the Lanczos3 filter used for crisp raster
+enlargements.
+
+**SVG & PDF** — The README now details the vector rendering pipeline for
+SVG/SVGZ: native PDF primitives (paths, gradients, text) keep output sharp at
+any zoom, with automatic raster fallback for unsupported features.
+
+**License Compliance** — `THIRD_PARTY_LICENSES.md` now documents `libde265`
+(LGPL-3.0), `aom` (BSD-2-Clause), and `resvg`/`usvg` (MPL-2.0).
+
+---
+
+Captain's log: The ship is fully rigged, the hold is secure, and the Kraken
+sleeps. 🌊
+
 ## v2.4.3
 
 ### Fixes
