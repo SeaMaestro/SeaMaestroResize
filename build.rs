@@ -14,16 +14,16 @@ fn windows_resources() {
         res.set_icon("icon.ico");
     }
 
-    res.set("FileDescription", "SeaMonkey Multiformat Image Resizer");
-    res.set("ProductName", "SeaMonkey Image Resizer");
-    res.set("InternalName", "SeaMonkeyResize");
-    res.set("OriginalFilename", "SeaMonkeyResize.exe");
+    res.set("FileDescription", "SeaMaestro Multiformat Image Resizer");
+    res.set("ProductName", "SeaMaestro Image Resizer");
+    res.set("InternalName", "SeaMaestroResize");
+    res.set("OriginalFilename", "SeaMaestroResize.exe");
     res.set("CompanyName", "Independent Developer — Capt. Volodymyr Gumanyuk");
     let version = format!("{}.0", env!("CARGO_PKG_VERSION"));
     res.set("FileVersion", &version);
     res.set("ProductVersion", &version);
     res.set("LegalCopyright", "Copyright (c) Captain Volodymyr Gumanyuk");
-    res.set("Comments", "Multiformat batch/group image resizer tool. Email: captvg@proton.me");
+    res.set("Comments", "Multiformat batch/group image resizer tool. Email: seamaestro@proton.me");
 
     res.set_manifest(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

@@ -1,23 +1,23 @@
-# SeaMonkeyResize
+# SeaMaestroResize
 
 ⚓ Multiformat batch image resizer and converter for Windows.
 A single static executable — no installer, no external DLLs, no MSVC runtime.
 Download, run, done.
 
-> Relax, SeaMonkey is doing the heavy lifting...
+> Relax, SeaMaestro is doing the heavy lifting...
 
 ## The idea
 
-No installer, no config files, no dependencies. Copy `SeaMonkeyResize.exe`
+No installer, no config files, no dependencies. Copy `SeaMaestroResize.exe`
 anywhere, rename it to bake in your settings, and drop photos onto it. That's
 the whole workflow.
 
 - Drop **one photo** → it's resized next to the original, in the same folder.
-- Drop **several photos** → they land in a `SeaMonkeyResized` folder next to them.
+- Drop **several photos** → they land in a `SeaMaestroResized` folder next to them.
 - Drop a **folder with subfolders** → the whole tree is rebuilt under
-  `SeaMonkeyResized`, preserving the folder structure (each subfolder keeps its
+  `SeaMaestroResized`, preserving the folder structure (each subfolder keeps its
   name with a `_Resized` suffix).
-- Drop onto a **merge-renamed exe** → one `SeaMonkeyMerged{settings}.pdf`.
+- Drop onto a **merge-renamed exe** → one `SeaMaestroMerged{settings}.pdf`.
 
 ## Features
 
@@ -87,12 +87,12 @@ enable static CRT on a fresh clone, create a local `.cargo/config.toml`
 rustflags = ["-C", "target-feature=+crt-static"]
 ```
 
-Output: `target/release/SeaMonkeyResize.exe`
+Output: `target/release/SeaMaestroResize.exe`
 
 ## Usage
 
 ```text
-SeaMonkeyResize [OPTIONS] <FILES...>
+SeaMaestroResize [OPTIONS] <FILES...>
 ```
 
 ## CLI options
@@ -117,23 +117,23 @@ SeaMonkeyResize [OPTIONS] <FILES...>
 ## Examples
 
 ```powershell
-seamonkey --size 800 --format webp --quality 80 photo.jpg
-seamonkey --size 1024x768 --format jpeg --progressive *.jpg
-seamonkey --size 50pct --format avif photo.heic
-seamonkey --size 300 --format png --bw --output result.png photo.jpg
-seamonkey --format pdf photo.jpg
-seamonkey --merge vacation_folder
-cat photo.jpg | seamonkey --format webp > out.webp
-seamonkey --format pdf logo.svg
+seamaestro --size 800 --format webp --quality 80 photo.jpg
+seamaestro --size 1024x768 --format jpeg --progressive *.jpg
+seamaestro --size 50pct --format avif photo.heic
+seamaestro --size 300 --format png --bw --output result.png photo.jpg
+seamaestro --format pdf photo.jpg
+seamaestro --merge vacation_folder
+cat photo.jpg | seamaestro --format webp > out.webp
+seamaestro --format pdf logo.svg
 ```
 
 ## PDF & merge
 
 ```text
-SeaMonkeyResize --format pdf photo.jpg             → photo_q85.pdf
-SeaMonkeyResize --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
-SeaMonkeyResize --merge vacation_folder            → SeaMonkeyMerged_q85.pdf
-SeaMonkeyResize --merge --lossless --bw folder     → SeaMonkeyMerged_bw.pdf
+SeaMaestroResize --format pdf photo.jpg             → photo_q85.pdf
+SeaMaestroResize --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
+SeaMaestroResize --merge vacation_folder            → SeaMaestroMerged_q85.pdf
+SeaMaestroResize --merge --lossless --bw folder     → SeaMaestroMerged_bw.pdf
 ```
 
 Single PDF keeps the normal output name, e.g. `photo_q85.pdf`.
@@ -194,10 +194,10 @@ Rename the executable to bake in settings. Tokens may be separated by `_`,
 
 Examples:
 
-`SeaMonkeyResize_q80_w800_webp.exe` — quality 80, 800px wide, WebP
-`SeaMonkeyResize1920jpgq85_DE.exe` — 1920px wide, JPEG, quality 85, German language
-`SeaMonkeyResize_w300_h300_png_bw.exe` — 300×300 cover crop, PNG, grayscale
-`SeaMonkeyResize_merge.exe` — merge dropped files/folder into one PDF
+`SeaMaestroResize_q80_w800_webp.exe` — quality 80, 800px wide, WebP
+`SeaMaestroResize1920jpgq85_DE.exe` — 1920px wide, JPEG, quality 85, German language
+`SeaMaestroResize_w300_h300_png_bw.exe` — 300×300 cover crop, PNG, grayscale
+`SeaMaestroResize_merge.exe` — merge dropped files/folder into one PDF
 
 ## EXIF behavior
 
@@ -213,7 +213,7 @@ dimensions to the resized size. AVIF EXIF write is not supported.
 
 ## License
 
-SeaMonkeyResize is licensed under the MIT License.
+SeaMaestroResize is licensed under the MIT License.
 
 ## Third-party codecs
 
@@ -229,4 +229,4 @@ mimalloc (MIT) is used as the global allocator.
 
 ## Author
 
-Captain Volodymyr Gumanyuk — captvg@proton.me
+Captain Volodymyr Gumanyuk — seamaestro@proton.me

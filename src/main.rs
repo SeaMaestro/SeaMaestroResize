@@ -198,22 +198,22 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 #[derive(Parser)]
 #[command(
-    name = "SeaMonkeyResize",
+    name = "SeaMaestroResize",
     version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
     after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ TGA PNM PBM PGM PPM PAM DDS HDR EXR FF HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
-    seamonkey --size 800 --format webp --quality 80 photo.jpg\n    \
-    seamonkey --size 1024x768 --format jpeg --progressive *.jpg\n    \
-    seamonkey --size 50pct --format avif photo.heic\n    \
-    seamonkey --size 300 --format png --bw --output result.png photo.jpg\n    \
-    seamonkey --merge vacation_folder\n    \
-    cat photo.jpg | seamonkey --format webp > out.webp\n\n  \
+    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    \
+    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    \
+    seamaestro --size 50pct --format avif photo.heic\n    \
+    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    \
+    seamaestro --merge vacation_folder\n    \
+    cat photo.jpg | seamaestro --format webp > out.webp\n\n  \
     EXE RENAME EXAMPLES (Windows):\n    \
-    SeaMonkeyResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
-    SeaMonkeyResize1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    \
-    SeaMonkeyResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale"
+    SeaMaestroResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
+    SeaMaestroResize1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    \
+    SeaMaestroResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale"
 )]
 struct Cli {
     #[arg(long, help_heading = "RESIZE", verbatim_doc_comment)]
@@ -473,7 +473,7 @@ fn run() -> Result<Config> {
         .unwrap_or_default()
         .to_string_lossy();
 
-    if !stem.to_lowercase().contains("seamonkeyresize") {
+    if !stem.to_lowercase().contains("seamaestroresize") {
         #[cfg(target_os = "windows")] {
             eprintln!("{}", boxed(msg().rename_windows));
         }
@@ -771,7 +771,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let unified_base: Option<PathBuf> = if multi_root && !any_removable {
         let roots: Vec<&PathBuf> = grouped.keys().collect();
         let common = find_common_parent(roots);
-        Some(common.join("SeaMonkeyResized"))
+        Some(common.join("SeaMaestroResized"))
     } else {
         None
     };
@@ -797,17 +797,17 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     for (root, files) in &grouped {
         let out_dir = if any_removable {
             if single_file_mode {
-                unique_output_dir(&exe_dir.join("SeaMonkeyResized"))
+                unique_output_dir(&exe_dir.join("SeaMaestroResized"))
             } else {
                 let is_loose = entries.iter().filter(|e| &e.root == root).all(|e| e.direct_file);
                 if is_loose {
-                    unique_output_dir(&exe_dir.join("SeaMonkeyResized"))
+                    unique_output_dir(&exe_dir.join("SeaMaestroResized"))
                 } else {
                     let root_name = root.file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                         .to_string_lossy();
                     unique_output_dir_reserved(
-                        &exe_dir.join("SeaMonkeyResized").join(format!("{}_Resized", root_name)),
+                        &exe_dir.join("SeaMaestroResized").join(format!("{}_Resized", root_name)),
                         &mut used_out_dirs,
                     )
                 }
@@ -815,10 +815,10 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         } else if single_file_mode {
             root.clone()
         } else if loose_files {
-            unique_output_dir(&root.join("SeaMonkeyResized"))
+            unique_output_dir(&root.join("SeaMaestroResized"))
         } else if flat_single_folder {
             let parent = root.parent().unwrap_or(root);
-            unique_output_dir(&parent.join("SeaMonkeyResized"))
+            unique_output_dir(&parent.join("SeaMaestroResized"))
         } else if let Some(ref base) = unified_base {
             let root_name = root.file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
@@ -832,7 +832,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
             let root_name = root.file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                 .to_string_lossy();
-            unique_output_dir(&parent.join("SeaMonkeyResized").join(format!("{}_Resized", root_name)))
+            unique_output_dir(&parent.join("SeaMaestroResized").join(format!("{}_Resized", root_name)))
         };
 
         for (file, rel) in files {
@@ -2005,25 +2005,25 @@ fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
         let root = grouped.keys().next().unwrap().clone();
         let is_loose = entries.iter().all(|e| e.direct_file);
         if is_loose {
-            return unique_output_dir(&root.join("SeaMonkeyResized"));
+            return unique_output_dir(&root.join("SeaMaestroResized"));
         }
         let parent = root.parent().unwrap_or(&root).to_path_buf();
-        return unique_output_dir(&parent.join("SeaMonkeyResized"));
+        return unique_output_dir(&parent.join("SeaMaestroResized"));
     }
     let roots: Vec<&PathBuf> = grouped.keys().collect();
     let common = find_common_parent(roots);
-    unique_output_dir(&common.join("SeaMonkeyResized"))
+    unique_output_dir(&common.join("SeaMaestroResized"))
 }
 
 fn unique_pdf_file(dir: &Path, config: &Config) -> PathBuf {
     let suffix = build_suffix(config);
-    let base = dir.join(format!("SeaMonkeyMerged{}.pdf", suffix));
+    let base = dir.join(format!("SeaMaestroMerged{}.pdf", suffix));
     if !base.exists() { return base; }
     let (y, mo, d, h, mi, s) = local_now();
     let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
-    let candidate = dir.join(format!("SeaMonkeyMerged{}_{}.pdf", suffix, stamp));
+    let candidate = dir.join(format!("SeaMaestroMerged{}_{}.pdf", suffix, stamp));
     if candidate.exists() {
-        return dir.join(format!("SeaMonkeyMerged{}_{}_{}.pdf", suffix, stamp, fastrand::u32(100..999)));
+        return dir.join(format!("SeaMaestroMerged{}_{}_{}.pdf", suffix, stamp, fastrand::u32(100..999)));
     }
     candidate
 }

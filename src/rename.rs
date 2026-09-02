@@ -139,8 +139,8 @@ impl Config {
             .map(|s| s.to_lowercase())
             .filter_map(|s| {
                 let s = s
-                    .strip_prefix("seamonkeyresize")
-                    .or_else(|| s.strip_prefix("seamonkey"))
+                    .strip_prefix("seamaestroresize")
+                    .or_else(|| s.strip_prefix("seamaestro"))
                     .or_else(|| s.strip_prefix("resize"))
                     .unwrap_or(&s);
                 if s.is_empty() { None } else { Some(s.to_string()) }

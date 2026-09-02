@@ -410,7 +410,7 @@ impl<W: Write> PdfSink<W> {
     }
 
     fn write_text_font(&mut self, font: &FontRes) -> Result<u32> {
-        let base = format!("SeaMonkey{}", font.name);
+        let base = format!("SeaMaestro{}", font.name);
         let to_unicode_id = self.alloc_id();
         let fontfile_id = self.alloc_id();
         let desc_id = self.alloc_id();
