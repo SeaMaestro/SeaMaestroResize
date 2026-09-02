@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use regex::Regex;
 
-use crate::{Config, ImageFormat, Size};
+use crate::{lang::Lang, Config, ImageFormat, Size};
 
 pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
     let t = token.to_lowercase();
@@ -114,6 +114,7 @@ impl Config {
             .to_string_lossy();
 
         let mut config = Config {
+            lang: Lang::En,
             target_size: None,
             quality: 85,
             format: ImageFormat::WebP,
@@ -166,6 +167,12 @@ fn decompose_and_apply(config: &mut Config, token: &str) -> bool {
     while !remaining.is_empty() {
         match try_match_at_start(remaining) {
             Some((matched, rest)) => {
+                if let Some(l) = Lang::from_code(matched) {
+                    config.lang = l;
+                    remaining = rest;
+                    applied = true;
+                    continue;
+                }
                 if !try_apply_single(config, matched) {
                     return false;
                 }
@@ -199,6 +206,12 @@ fn get_bare_re() -> &'static Regex {
 
 const KEYWORDS_ORDERED: &[&str] = &[
     "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "exif", "merge",
+];
+
+const LANG_KEYWORDS_ORDERED: &[&str] = &[
+    "ukrainian", "english", "russian", "spanish", "tagalog", "german", "french", "greek",
+    "eng", "rus", "ger", "spa", "fre", "fil",
+    "de", "ru", "uk", "ua", "es", "fr", "el", "gr", "en", "tl",
 ];
 
 fn try_match_at_start(s: &str) -> Option<(&str, &str)> {
@@ -243,6 +256,12 @@ fn try_match_at_start(s: &str) -> Option<(&str, &str)> {
     }
 
     for kw in KEYWORDS_ORDERED {
+        if lower.starts_with(kw) {
+            return Some((&s[..kw.len()], &s[kw.len()..]));
+        }
+    }
+
+    for kw in LANG_KEYWORDS_ORDERED {
         if lower.starts_with(kw) {
             return Some((&s[..kw.len()], &s[kw.len()..]));
         }

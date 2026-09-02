@@ -99,7 +99,7 @@ use std::io::IsTerminal;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, RwLock};
 use std::process;
 use std::io::Write;
 use std::collections::{HashMap, HashSet};
@@ -120,14 +120,14 @@ use help::{boxed, pad_right, print_help_table};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-static LANG: OnceLock<lang::Lang> = OnceLock::new();
+static LANG: RwLock<lang::Lang> = RwLock::new(lang::Lang::En);
 
 fn set_lang(l: lang::Lang) {
-    let _ = LANG.set(l);
+    *LANG.write().unwrap() = l;
 }
 
 pub(crate) fn msg() -> &'static lang::Messages {
-    lang::messages(*LANG.get().unwrap_or(&lang::Lang::En))
+    lang::messages(*LANG.read().unwrap())
 }
 
 fn detect_cli_lang(args: &[String]) -> Option<lang::Lang> {
@@ -250,6 +250,7 @@ struct Cli {
 
 #[allow(dead_code)]
 pub(crate) struct Config {
+    pub(crate) lang: lang::Lang,
     target_size: Option<Size>,
     pub(crate) quality: u8,
     pub(crate) format: ImageFormat,
@@ -388,6 +389,7 @@ fn run() -> Result<Config> {
             }
         }
         let mut config = Config {
+            lang: detected,
             target_size: None,
             quality: cli.quality,
             format: cli.format,
@@ -479,6 +481,7 @@ fn run() -> Result<Config> {
             eprintln!("{}", boxed(msg().rename_linux));
         }
         return Ok(Config {
+            lang: lang::Lang::En,
             target_size: None, quality: 85, format: ImageFormat::WebP,
             grayscale: false, lossless: false, progressive: false,
             sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false,
@@ -486,6 +489,7 @@ fn run() -> Result<Config> {
     }
 
     let mut config = Config::from_exe_name()?;
+    set_lang(config.lang);
     if config.merge {
         config.format = ImageFormat::Pdf;
     }
@@ -1455,6 +1459,11 @@ fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
     let svg_render = svg
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
+
+    let need = compute_need(raw, svg.as_ref(), config);
+    let budget = mem_budget();
+    budget.acquire(need);
+    let _permit = MemPermit { budget, need };
 
     let (img, icc, exif) = decode_image(
         raw,
