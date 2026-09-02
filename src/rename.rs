@@ -269,3 +269,47 @@ fn try_match_at_start(s: &str) -> Option<(&str, &str)> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> Config {
+        Config {
+            lang: Lang::En,
+            target_size: None,
+            quality: 85,
+            format: ImageFormat::WebP,
+            grayscale: false,
+            lossless: false,
+            progressive: false,
+            sharpen: false,
+            no_pause: false,
+            output: None,
+            shanty: false,
+            keep_exif: false,
+            merge: false,
+        }
+    }
+
+    #[test]
+    fn suffix_lang_attached_to_base() {
+        let mut c = config();
+        assert!(decompose_and_apply(&mut c, "de1920jpgq85"));
+        assert!(matches!(c.lang, Lang::De));
+    }
+
+    #[test]
+    fn suffix_lang_glued() {
+        let mut c = config();
+        assert!(decompose_and_apply(&mut c, "de1920jpgq85"));
+        assert!(matches!(c.lang, Lang::De));
+    }
+
+    #[test]
+    fn suffix_lang_uppercase() {
+        let mut c = config();
+        assert!(decompose_and_apply(&mut c, "DE1920jpgq85"));
+        assert!(matches!(c.lang, Lang::De));
+    }
+}
