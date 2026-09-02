@@ -235,6 +235,19 @@ dimensions to the resized size. AVIF EXIF write is not supported.
 
 SeaMaestroResize is licensed under the MIT License.
 
+## Code signing policy
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+Release binaries are built from this repository by GitHub Actions on
+GitHub-hosted runners and signed through SignPath after manual approval.
+
+- **Committers and reviewers**: [Volodymyr Gumanyuk](https://github.com/SeaMaestro)
+- **Approvers**: [Volodymyr Gumanyuk](https://github.com/SeaMaestro)
+- **Privacy policy**: This program will not transfer any information to other
+  networked systems unless specifically requested by the user or the person
+  installing or operating it.
+
 ## Third-party codecs
 
 This project links several codec libraries, each under its own license
