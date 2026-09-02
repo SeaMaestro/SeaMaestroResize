@@ -55,19 +55,17 @@ jobs:
 
       - name: Stage asset
         shell: pwsh
-        run: |
-          $ver = "${{ github.ref_name }}"
-          Copy-Item "target\release\SeaMaestroResize.exe" "SeaMaestroResize_$ver.exe"
+        run: Copy-Item "target\release\SeaMaestroResize.exe" "SeaMaestroResize.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: SeaMaestroResize_${{ github.ref_name }}
-          path: SeaMaestroResize_*.exe
+          path: SeaMaestroResize.exe
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           name: SeaMaestroResize ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
-          files: SeaMaestroResize_*.exe
+          files: SeaMaestroResize.exe
