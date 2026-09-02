@@ -473,7 +473,7 @@ fn run() -> Result<Config> {
         .unwrap_or_default()
         .to_string_lossy();
 
-    if !stem.to_lowercase().contains("seamaestroresize") {
+    if !stem.contains("SeaMaestroResize") {
         #[cfg(target_os = "windows")] {
             eprintln!("{}", boxed(msg().rename_windows));
         }
