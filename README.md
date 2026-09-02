@@ -24,6 +24,9 @@ the whole workflow.
 - **Batch & parallel** processing with recursive directory scan (Rayon).
 - **Resize modes**: long edge (`800`), exact width (`w800`), exact height
   (`h600`), cover crop (`800x600`), percentage (`50pct`).
+  - **High-quality upscale**: Lanczos3 resampling keeps raster enlargements crisp,
+  and SVG/SVGZ are rasterized at the target size, so vector sources scale to
+  any size without pixelation.
 - **Convert** between WebP, JPEG, AVIF, JXL, PNG, ICO, TIFF, QOI, BMP, GIF,
   PDF.
 - **PDF output** — `--format pdf` writes one PDF per input; `--merge` combines
