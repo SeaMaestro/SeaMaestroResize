@@ -62,3 +62,11 @@ jobs:
 
       - name: Build release
         run: cargo build --release
+
+      - name: Upload release binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: SeaMaestroResize-unsigned
+          path: target/release/SeaMaestroResize.exe
+          archive: false
+          if-no-files-found: error

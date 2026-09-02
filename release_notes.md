@@ -62,6 +62,8 @@ any zoom, with automatic raster fallback for unsupported features.
 **License Compliance** — `THIRD_PARTY_LICENSES.md` now documents `libde265`
 (LGPL-3.0), `aom` (BSD-2-Clause), and `resvg`/`usvg` (MPL-2.0).
 
+Code signing policy: https://github.com/SeaMaestro/SeaMaestroResize#code-signing-policy
+
 ---
 
 Captain's log: The ship is fully rigged, the hold is secure, and the Kraken
