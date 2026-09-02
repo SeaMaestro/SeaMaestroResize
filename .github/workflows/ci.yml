@@ -22,6 +22,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install NASM
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
