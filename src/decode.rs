@@ -408,6 +408,138 @@ fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
 
 // ── decode_image ──────────────────────────────────────────────
 
+pub(crate) fn is_jxl(raw: &[u8]) -> bool {
+    (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A])
+}
+
+pub(crate) struct JxlPrepared {
+    image: jxl_oxide::JxlImage,
+}
+
+impl JxlPrepared {
+    pub(crate) fn prepare(raw: &[u8]) -> Option<Self> {
+        if !is_jxl(raw) {
+            return None;
+        }
+
+        use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+
+        let mut image = JxlImage::builder()
+            .alloc_tracker(AllocTracker::with_limit(runtime_limits().max_alloc as usize))
+            .read(std::io::Cursor::new(raw))
+            .ok()?;
+
+        if image.width() > 32768 || image.height() > 32768 {
+            return None;
+        }
+
+        if image.pixel_format().has_black() {
+            image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
+        }
+
+        Some(Self { image })
+    }
+
+    pub(crate) fn dims(&self) -> (u32, u32) {
+        (self.image.width(), self.image.height())
+    }
+
+    pub(crate) fn decode(self) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
+        use jxl_oxide::AuxBoxData;
+
+        let exif = match self.image.aux_boxes().first_exif() {
+            Ok(AuxBoxData::Data(r)) => {
+                let off = r.tiff_header_offset() as usize;
+                r.payload().get(off..).map(|b| b.to_vec())
+            }
+            _ => None,
+        };
+
+        let icc = Some(self.image.rendered_icc());
+
+        let render = self
+            .image
+            .render_frame(0)
+            .map_err(|e| anyhow::anyhow!("JXL render failed: {}", e))?;
+
+        let mut stream = render.stream();
+        let w = stream.width();
+        let h = stream.height();
+        let c = stream.channels() as usize;
+        let count = (w as usize) * (h as usize) * c;
+
+        let grayscale = self.image.pixel_format().is_grayscale();
+        let alpha = self.image.pixel_format().has_alpha();
+        let bit_depth = self.image.image_header().metadata.bit_depth;
+        let is_float = matches!(
+            bit_depth,
+            jxl_oxide::image::BitDepth::FloatSample { .. }
+                | jxl_oxide::image::BitDepth::IntegerSample { bits_per_sample: 17.. }
+        );
+        let need_16bit = bit_depth.bits_per_sample() > 8;
+
+        let img = if is_float && !grayscale {
+            let mut buf = vec![0f32; count];
+            stream.write_to_buffer(&mut buf);
+            if alpha {
+                image::DynamicImage::ImageRgba32F(
+                    image::Rgba32FImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                )
+            } else {
+                image::DynamicImage::ImageRgb32F(
+                    image::Rgb32FImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                )
+            }
+        } else if need_16bit {
+            let mut buf = vec![0u16; count];
+            stream.write_to_buffer(&mut buf);
+            match (grayscale, alpha) {
+                (false, false) => image::DynamicImage::ImageRgb16(
+                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (false, true) => image::DynamicImage::ImageRgba16(
+                    image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (true, false) => image::DynamicImage::ImageLuma16(
+                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (true, true) => image::DynamicImage::ImageLumaA16(
+                    image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+            }
+        } else {
+            let mut buf = vec![0u8; count];
+            stream.write_to_buffer(&mut buf);
+            match (grayscale, alpha) {
+                (false, false) => image::DynamicImage::ImageRgb8(
+                    image::RgbImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (false, true) => image::DynamicImage::ImageRgba8(
+                    image::RgbaImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (true, false) => image::DynamicImage::ImageLuma8(
+                    image::GrayImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+                (true, true) => image::DynamicImage::ImageLumaA8(
+                    image::GrayAlphaImage::from_raw(w, h, buf)
+                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
+                ),
+            }
+        };
+
+        Ok((img, icc, exif))
+    }
+}
+
 pub(crate) fn decode_image(
     raw: &[u8],
     path: Option<&Path>,

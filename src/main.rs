@@ -112,7 +112,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use encode::{encode_bmp, encode_to_vec, set_avif_threads};
 use decode::{
     decode_image, is_heif, is_raw_bytes, looks_like_svg, mem_budget, parse_svg,
-    probe_dims, raster_need, MemPermit,
+    probe_dims, raster_need, JxlPrepared, MemPermit,
 };
 use rename::try_apply_single;
 use help::{boxed, pad_right, print_help_table};
@@ -1123,6 +1123,10 @@ fn compute_need(raw: &[u8], svg: Option<&crate::decode::ParsedSvg>, config: &Con
     } else {
         probe_dims(raw).unwrap_or((32768, 32768))
     };
+    compute_need_inner(raw, orig_w, orig_h, is_svg, config)
+}
+
+fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, is_svg: bool, config: &Config) -> u64 {
     let ((tw, th), _) = svg_target_dims((orig_w, orig_h), config.target_size.as_ref());
     let orig_raster = raster_need(orig_w, orig_h);
     let target_raster = raster_need(tw, th);
@@ -1193,18 +1197,28 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         }
     }
 
-    let need = compute_need(&raw, svg.as_ref(), config);
+    let jxl = JxlPrepared::prepare(&raw);
+    let need = if let Some(j) = &jxl {
+        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
+    } else {
+        compute_need(&raw, svg.as_ref(), config)
+    };
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
 
-    let (mut img, icc, exif) = decode_image(
-        &raw,
-        Some(input),
-        svg_render.map(|((w, h), _)| (w, h)),
-        svg.as_ref().map(|s| &s.tree),
-    )
-    .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?;
+    let (mut img, icc, exif) = match jxl {
+        Some(j) => j
+            .decode()
+            .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?,
+        None => decode_image(
+            &raw,
+            Some(input),
+            svg_render.map(|((w, h), _)| (w, h)),
+            svg.as_ref().map(|s| &s.tree),
+        )
+        .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?,
+    };
     if !looks_like_svg(&raw) && !is_heif(&raw) {
         img = auto_orient(img, &raw);
     }
@@ -1460,18 +1474,28 @@ fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    let need = compute_need(raw, svg.as_ref(), config);
+    let jxl = JxlPrepared::prepare(raw);
+    let need = if let Some(j) = &jxl {
+        compute_need_inner(raw, j.dims().0, j.dims().1, false, config)
+    } else {
+        compute_need(raw, svg.as_ref(), config)
+    };
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
 
-    let (img, icc, exif) = decode_image(
-        raw,
-        None,
-        svg_render.map(|((w, h), _)| (w, h)),
-        svg.as_ref().map(|s| &s.tree),
-    )
-    .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?;
+    let (img, icc, exif) = match jxl {
+        Some(j) => j
+            .decode()
+            .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?,
+        None => decode_image(
+            raw,
+            None,
+            svg_render.map(|((w, h), _)| (w, h)),
+            svg.as_ref().map(|s| &s.tree),
+        )
+        .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?,
+    };
     let img = if !looks_like_svg(raw) && !is_heif(raw) { auto_orient(img, raw) } else { img };
     let img = if config.grayscale { img.grayscale() } else { img };
     let img = if let Some(ref size) = config.target_size {
@@ -1969,18 +1993,28 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         }
     }
 
-    let need = compute_need(&raw, svg.as_ref(), config);
+    let jxl = JxlPrepared::prepare(&raw);
+    let need = if let Some(j) = &jxl {
+        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
+    } else {
+        compute_need(&raw, svg.as_ref(), config)
+    };
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
 
-    let (img, _icc, _exif) = decode_image(
-        &raw,
-        None,
-        svg_render.map(|((w, h), _)| (w, h)),
-        svg.as_ref().map(|s| &s.tree),
-    )
-    .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let (img, _icc, _exif) = match jxl {
+        Some(j) => j
+            .decode()
+            .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
+        None => decode_image(
+            &raw,
+            None,
+            svg_render.map(|((w, h), _)| (w, h)),
+            svg.as_ref().map(|s| &s.tree),
+        )
+        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
+    };
     let img = if !looks_like_svg(&raw) && !is_heif(&raw) { auto_orient(img, &raw) } else { img };
     let img = if config.grayscale { img.grayscale() } else { img };
     let img = if let Some(ref size) = config.target_size {
