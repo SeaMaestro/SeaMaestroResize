@@ -236,10 +236,9 @@ SeaMaestroResize is licensed under the MIT License.
 
 ## Code signing policy
 
-Free code signing provided by SignPath.io, certificate by SignPath Foundation.
-
-Release binaries are built from this repository by GitHub Actions on
-GitHub-hosted runners and signed through SignPath after manual approval.
+Release binaries are currently unsigned. Each release is built locally and
+scanned with VirusTotal before upload; Windows SmartScreen may show an
+"Unknown publisher" warning on first run.
 
 - **Committers and reviewers**: [Volodymyr Gumanyuk](https://github.com/SeaMaestro)
 - **Approvers**: [Volodymyr Gumanyuk](https://github.com/SeaMaestro)

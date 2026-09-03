@@ -1,3 +1,29 @@
+## SeaMaestroResize v2.4.5
+
+## ⚡ Performance
+
+**JXL single parse** — JPEG XL files are now parsed once for dimensions,
+EXIF and decoding, instead of multiple full parses per file. This removes
+redundant work from the JXL pipeline.
+
+## 🐛 Bug Fixes
+
+**EXE rename casing** — rename mode now matches the exact `SeaMaestroResize`
+casing when detecting baked-in settings.
+
+## 📝 Documentation
+
+**Format list** — PDF is no longer listed as a "convert between" format;
+PDF is output-only.
+
+## 🔓 Signing
+
+This release is **unsigned**. The binary is built locally and scanned with
+VirusTotal before upload, so Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+---
+
 ## SeaMaestroResize v2.4.4
 
 ## 🔱 Rebranding & UI
