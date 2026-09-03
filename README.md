@@ -27,8 +27,7 @@ the whole workflow.
   - **High-quality upscale**: Lanczos3 resampling keeps raster enlargements crisp,
   and SVG/SVGZ are rasterized at the target size, so vector sources scale to
   any size without pixelation.
-- **Convert** between WebP, JPEG, AVIF, JXL, PNG, ICO, TIFF, QOI, BMP, GIF,
-  PDF.
+- **Convert** between WebP, JPEG, AVIF, JXL, PNG, ICO, TIFF, QOI, BMP, GIF.
 - **PDF output** — `--format pdf` writes one PDF per input; `--merge` combines
   inputs into one sorted multi-page PDF. The merge streams to a temp file and
   uses chunked parallel page generation, so memory stays constant.
