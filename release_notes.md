@@ -18,9 +18,13 @@ PDF is output-only.
 
 ## 🔓 Signing
 
-This release is **unsigned**. The binary is built locally and scanned with
-VirusTotal before upload, so Windows SmartScreen may show an "Unknown
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
+
+**VirusTotal** — clean: 0/70 security vendors flagged the file.
+
+- SHA-256: `63a8e2226869668be5677787b70e13399f2cd2ac7f2afd5efb1dc01ac828a543`
+- Size: 35.36 MB (PE executable, 64-bit)
 
 ---
 
