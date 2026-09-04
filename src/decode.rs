@@ -390,7 +390,7 @@ fn jxl_exif(raw: &[u8]) -> Option<Vec<u8>> {
     Some(raw_exif.payload().get(off..)?.to_vec())
 }
 
-fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() >= 3 && raw[0] == 0xFF && raw[1] == 0xD8 && raw[2] == 0xFF {
         return jpeg_exif(raw);
     }

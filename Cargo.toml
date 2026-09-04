@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestroResize"
-version = "2.4.5"
+version = "2.4.6"
 edition = "2021"
 
 [dependencies]
@@ -16,6 +16,8 @@ clap = { version = "4.6", features = ["derive"] }
 image = { version = "0.25", features = ["avif-native"] }
 rayon = "1.12"
 mozjpeg = "0.10"
+mozjpeg-sys = { version = "2.2", features = ["icc_io"] }
+libc = "0.2"
 webp = "0.3"
 ravif = "0.13"
 oxipng = "10.2"

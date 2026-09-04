@@ -117,7 +117,7 @@ impl Config {
             lang: Lang::En,
             target_size: None,
             quality: 85,
-            format: ImageFormat::WebP,
+            format: ImageFormat::Jpeg,
             grayscale: false,
             lossless: false,
             progressive: false,
@@ -195,7 +195,7 @@ fn get_q_re() -> &'static Regex {
     Q_RE.get_or_init(|| Regex::new(r"^q(\d{1,3})").unwrap())
 }
 fn get_pct_re() -> &'static Regex {
-    PCT_RE.get_or_init(|| Regex::new(r"^(\d{1,3})(?:p|pct|%)").unwrap())
+    PCT_RE.get_or_init(|| Regex::new(r"^(\d{1,3})(?:pct|p|%)").unwrap())
 }
 fn get_dims_re() -> &'static Regex {
     DIMS_RE.get_or_init(|| Regex::new(r"^(\d{1,5})x(\d{1,5})").unwrap())
@@ -279,7 +279,7 @@ mod tests {
             lang: Lang::En,
             target_size: None,
             quality: 85,
-            format: ImageFormat::WebP,
+            format: ImageFormat::Jpeg,
             grayscale: false,
             lossless: false,
             progressive: false,

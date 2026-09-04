@@ -1,3 +1,55 @@
+## SeaMaestroResize v2.4.6
+
+## ⚡ Performance
+
+**JPEG scaled-IDCT fast-path** — JPEG→JPEG downscaling now decodes through
+libjpeg's scaled IDCT (1/2, 1/4, 1/8) instead of decoding the full image and
+then resizing it. Arbitrary scales use the nearest N/8 step plus a final
+Lanczos pass. This removes the full-decode + resize overhead from JPEG
+downscales.
+
+## 🐛 Bug Fixes
+
+**Double downscale** — `--size 50pct` (and other JPEG downscales) no longer
+applied the scale twice, producing a quarter instead of a half. The fast-path
+now resizes to the exact target dimensions.
+
+**Scanline panic** — fixed a panic in the JPEG fast-path when
+`jpeg_read_scanlines` returned fewer rows than expected (libjpeg reads in MCU
+blocks). Rows are now read in a loop until the full output height is reached.
+
+**`50pct` parsing** — fixed the percent-regex alternation order so `50pct`,
+`50p` and `50%` all parse correctly; previously `50pct` was rejected as an
+invalid size.
+
+**EXIF orientation** — the JPEG fast-path now accounts for EXIF orientation
+5–8 by computing target dimensions from the logical (rotated) size, so
+portrait phone photos stay portrait.
+
+## ✨ Improvements
+
+**ICC preserved** — the JPEG fast-path now reads and re-embeds the ICC color
+profile (`jpeg_save_markers` + `jpeg_read_icc_profile`).
+
+**Silent fallback** — a corrupt or unsupported JPEG now falls back to the
+normal decode path without printing a panic trace to the console.
+
+**Banner** — the header now shows the version, the support email and the
+GitHub link (🖂 and ⎇ markers) across all 8 languages. Nautical remark icons
+are now consistent with the other languages (📦 / 💦).
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+**VirusTotal** — clean: 0/71 security vendors flagged the file.
+
+- SHA-256: `1c77c748b42fca11d27297a228a61044cb5f1120e32226c8af7076725d8f439f`
+- Size: 35.50 MB (PE executable, 64-bit)
+
+---
+
 ## SeaMaestroResize v2.4.5
 
 ## ⚡ Performance

@@ -24,6 +24,9 @@ the whole workflow.
 - **Batch & parallel** processing with recursive directory scan (Rayon).
 - **Resize modes**: long edge (`800`), exact width (`w800`), exact height
   (`h600`), cover crop (`800x600`), percentage (`50pct`).
+  - **Fast JPEG downscale**: JPEG→JPEG downscaling uses a scaled-IDCT fast path
+    (no full decode), so percentage/width/height downscales of JPEG run faster,
+    with the ICC profile preserved.
   - **High-quality upscale**: Lanczos3 resampling keeps raster enlargements crisp,
   and SVG/SVGZ are rasterized at the target size, so vector sources scale to
   any size without pixelation.

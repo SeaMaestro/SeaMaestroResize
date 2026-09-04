@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "SeaMaestroResize"
-version = "2.4.5"
+version = "2.4.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -20,10 +20,12 @@ dependencies = [
  "jxl-encoder",
  "jxl-oxide",
  "kamadak-exif",
+ "libc",
  "libheif-rs",
  "mimalloc",
  "miniz_oxide",
  "mozjpeg",
+ "mozjpeg-sys",
  "oxipng",
  "qoi",
  "ravif",

@@ -87,6 +87,7 @@ mod lang;
 mod metadata;
 mod encode;
 mod decode;
+mod jpeg_dct;
 mod rename;
 mod help;
 mod pdf;
@@ -220,7 +221,7 @@ struct Cli {
     size: Option<String>,
     #[arg(long, default_value_t = 85, help_heading = "RESIZE")]
     quality: u8,
-    #[arg(long, value_enum, default_value_t = ImageFormat::WebP, help_heading = "RESIZE")]
+    #[arg(long, value_enum, default_value_t = ImageFormat::Jpeg, help_heading = "RESIZE")]
     format: ImageFormat,
     #[arg(long, help_heading = "RESIZE")]
     bw: bool,
@@ -336,6 +337,16 @@ struct InputEntry {
 // ── main / run ────────────────────────────────────────────────
 
 fn main() -> std::process::ExitCode {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Some(s) = info.payload().downcast_ref::<&str>() {
+            if *s == "jpeg_fatal_error" {
+                return;
+            }
+        }
+        default_hook(info);
+    }));
+
     jxl_oxide::integration::register_image_decoding_hook();
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -482,7 +493,7 @@ fn run() -> Result<Config> {
         }
         return Ok(Config {
             lang: lang::Lang::En,
-            target_size: None, quality: 85, format: ImageFormat::WebP,
+            target_size: None, quality: 85, format: ImageFormat::Jpeg,
             grayscale: false, lossless: false, progressive: false,
             sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false,
         });
@@ -1160,6 +1171,53 @@ fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, is_svg: bool, config
     decode_need.max(encode_need).saturating_add(raw.len() as u64)
 }
 
+fn exif_orientation(raw: &[u8]) -> Option<u32> {
+    let reader = exif::Reader::new();
+    let exif = reader.read_from_container(&mut std::io::Cursor::new(raw)).ok()?;
+    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)?
+        .value
+        .get_uint(0)
+}
+
+fn try_dct_downscale(raw: &[u8], config: &Config) -> Option<Vec<u8>> {
+    if config.format != ImageFormat::Jpeg || config.grayscale || config.sharpen || config.progressive {
+        return None;
+    }
+    if raw.len() < 3 || raw[0] != 0xFF || raw[1] != 0xD8 || raw[2] != 0xFF {
+        return None;
+    }
+    let (ow, oh) = probe_dims(raw)?;
+    let is_rotated = matches!(exif_orientation(raw), Some(5..=8));
+    let (logical_w, logical_h) = if is_rotated { (oh, ow) } else { (ow, oh) };
+    let ((tw, th), exact) = svg_target_dims((logical_w, logical_h), config.target_size.as_ref());
+    if !exact {
+        return None;
+    }
+    if tw >= logical_w || th >= logical_h {
+        return None;
+    }
+    let s = (tw as f64 / logical_w as f64).max(th as f64 / logical_h as f64);
+    let n = (s * 8.0).ceil() as u32;
+    if n == 0 || n >= 8 {
+        return None;
+    }
+
+    let need = compute_need_inner(raw, ow, oh, false, config);
+    let budget = mem_budget();
+    budget.acquire(need);
+    let _permit = MemPermit { budget, need };
+
+    let (img, icc) = crate::jpeg_dct::decode_scaled_jpeg(raw, n, 8)?;
+    let img = auto_orient(img, raw);
+    let img = if img.width() == tw && img.height() == th {
+        img
+    } else {
+        resize_dynamic(img, tw, th, ResizeOptions::new())
+    };
+    let exif = if config.keep_exif { crate::decode::extract_exif(raw) } else { None };
+    encode_to_vec(&img, config, icc.as_deref(), exif.as_deref()).ok()
+}
+
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
     let raw = fs::read(input)
         .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
@@ -1179,6 +1237,17 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
 
     if path_key(&out_path) == path_key(input) {
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
+    }
+
+    if let Some(bytes) = try_dct_downscale(&raw, config) {
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
+            }
+        }
+        atomic_write(&out_path, &bytes)?;
+        return Ok(out_path);
     }
 
     if !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
@@ -1568,7 +1637,9 @@ fn banner(config: &Config) {
     eprintln!("  ╔{}╗", top);
     eprintln!("  ║  {}{}  ║", pad_right(m.banner_title, 58), "");
     eprintln!("  ║  {}{}  ║", pad_right(m.banner_tagline, 58), "");
-    eprintln!("  ║  {}{}  ║", pad_right(m.banner_by, 58), "");
+    eprintln!("  ║  {}  ║", pad_right(&format!("{} Version: {}", m.banner_by, env!("CARGO_PKG_VERSION")), 58));
+    eprintln!("  ║  {}  ║", pad_right("🖂  seamaestro@proton.me", 58));
+    eprintln!("  ║  {}  ║", pad_right("⎇  https://github.com/SeaMaestro/SeaMaestroResize", 58));
     eprintln!("  ╠{}╣", "─".repeat(62));
     eprintln!("  ║  {:<13}{}  ║", m.label_size, pad_right(&size_str, 45));
     eprintln!("  ║  {:<13}{}  ║", m.label_format, pad_right(&fmt_str, 45));
