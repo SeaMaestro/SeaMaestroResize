@@ -76,11 +76,6 @@ jobs:
           "$hash  SeaMaestroResize.exe" | Out-File -FilePath checksums.txt -Encoding ascii
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            target/release/SeaMaestroResize.exe#SeaMaestroResize_${{ github.ref_name }}.exe
-            checksums.txt
-          body_path: release_notes.md
+        run: gh release create "${{ github.ref_name }}" --title "SeaMaestroResize ${{ github.ref_name }}" --notes-file release_notes.md "target/release/SeaMaestroResize.exe#SeaMaestroResize_${{ github.ref_name }}.exe" "checksums.txt"
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
