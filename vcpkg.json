@@ -1,6 +1,6 @@
 {
   "name": "seamaestroresize",
-  "version-string": "2.4.4",
+  "version-string": "2.4.8",
   "dependencies": [
     "dav1d",
     "pkgconf",
@@ -8,6 +8,12 @@
       "name": "libheif",
       "default-features": false,
       "features": ["aom"]
-    }
+    },
+    {
+      "name": "libavif",
+      "default-features": false,
+      "features": ["svt", "dav1d"]
+    },
+    "libjxl"
   ]
 }
