@@ -5,6 +5,7 @@
 *.log
 /vendor/*
 !/vendor/libz-ng-sys/
+!/vendor/libavif-sys/
 /releases/
 /.cargo/config.toml
 vector_tests/

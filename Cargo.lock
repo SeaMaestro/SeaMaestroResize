@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "SeaMaestroResize"
-version = "2.4.8"
+version = "2.4.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -20,6 +20,7 @@ dependencies = [
  "jxl-encoder",
  "jxl-oxide",
  "kamadak-exif",
+ "libavif-sys",
  "libc",
  "libheif-rs",
  "mimalloc",
@@ -1432,6 +1433,14 @@ name = "lebe"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
+
+[[package]]
+name = "libavif-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "vcpkg",
+]
 
 [[package]]
 name = "libc"

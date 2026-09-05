@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestroResize"
-version = "2.4.8"
+version = "2.4.9"
 edition = "2021"
 
 [dependencies]
@@ -18,6 +18,7 @@ rayon = "1.12"
 mozjpeg = "0.10"
 mozjpeg-sys = { version = "2.2", features = ["icc_io"] }
 libc = "0.2"
+libavif-sys = { path = "vendor/libavif-sys" }
 webp = "0.3"
 ravif = "0.13"
 oxipng = "10.2"
