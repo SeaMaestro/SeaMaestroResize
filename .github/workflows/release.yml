@@ -25,6 +25,9 @@ jobs:
       - name: Install NASM
         uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b
 
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
