@@ -564,13 +564,13 @@ pub(crate) fn decode_image(
             return Ok((img, None, exif));
         }
     }
-    if let Ok((img, icc)) = decode_with_limits(raw) {
-        return Ok((img, icc, exif));
-    }
     if is_heif(raw) {
         if let Ok(img) = decode_heif_manual(raw, path) {
             return Ok((img, None, exif));
         }
+    }
+    if let Ok((img, icc)) = decode_with_limits(raw) {
+        return Ok((img, icc, exif));
     }
     if let Some(p) = path {
         if let Ok(img) = decode_raw(p) {
