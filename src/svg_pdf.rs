@@ -23,6 +23,7 @@ pub(crate) struct PatternRes {
 }
 
 use crate::decode::{mem_budget, MAX_SVG_DEPTH, MemPermit, vector_peak_cap, vector_peak_estimate};
+use crate::util::fmt_num;
 pub(crate) struct VectorPage {
     pub width: u32,
     pub height: u32,
@@ -1016,19 +1017,6 @@ fn compose(a: &usvg::Transform, b: &usvg::Transform) -> usvg::Transform {
         a.sx * b.tx + a.kx * b.ty + a.tx,
         a.ky * b.tx + a.sy * b.ty + a.ty,
     )
-}
-
-fn fmt_num(v: f32) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    let s = format!("{:.8}", v);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
 }
 
 fn set_stroke_params(st: &usvg::Stroke, scale: f32, out: &mut String) {

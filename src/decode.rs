@@ -8,6 +8,7 @@ use image::ImageDecoder;
 
 use crate::msg;
 use crate::usable_ram;
+use crate::util::{read16, read32};
 
 use resvg::{tiny_skia, usvg};
 
@@ -166,30 +167,20 @@ fn webp_dims(raw: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-fn rd16(b: &[u8], off: usize, little: bool) -> Option<u16> {
-    let s = b.get(off..off + 2)?;
-    Some(if little { u16::from_le_bytes([s[0], s[1]]) } else { u16::from_be_bytes([s[0], s[1]]) })
-}
-
-fn rd32(b: &[u8], off: usize, little: bool) -> Option<u32> {
-    let s = b.get(off..off + 4)?;
-    Some(if little { u32::from_le_bytes([s[0], s[1], s[2], s[3]]) } else { u32::from_be_bytes([s[0], s[1], s[2], s[3]]) })
-}
-
 fn tiff_dims(raw: &[u8]) -> Option<(u32, u32)> {
     let little = raw.starts_with(b"II*\0");
-    let ifd0 = rd32(raw, 4, little)? as usize;
-    let n = rd16(raw, ifd0, little)? as usize;
+    let ifd0 = read32(raw, 4, little)? as usize;
+    let n = read16(raw, ifd0, little)? as usize;
     let mut w = None;
     let mut h = None;
     for i in 0..n {
         let e = ifd0 + 2 + i * 12;
         if e + 12 > raw.len() { break; }
-        let tag = rd16(raw, e, little)?;
-        let typ = rd16(raw, e + 2, little)?;
+        let tag = read16(raw, e, little)?;
+        let typ = read16(raw, e + 2, little)?;
         let val = match typ {
-            3 => rd16(raw, e + 8, little)? as u32,
-            4 => rd32(raw, e + 8, little)?,
+            3 => read16(raw, e + 8, little)? as u32,
+            4 => read32(raw, e + 8, little)?,
             _ => continue,
         };
         if tag == 0x0100 { w = Some(val); }

@@ -10,6 +10,7 @@ use miniz_oxide::deflate::compress_to_vec_zlib;
 use crate::encode::encode_pdf_jpeg;
 use crate::svg_pdf::{to_unicode_cmap, FontRes, ImageColorSpace, ShadingRes, VectorPage};
 use crate::Config;
+use crate::util::fmt_num;
 
 const SRGB_CALRGB: &str = "[/CalRGB << /WhitePoint [0.9505 1 1.089] /Gamma [2.2 2.2 2.2] /Matrix [0.4124 0.2126 0.0193 0.3576 0.7152 0.1192 0.1805 0.0722 0.9505] >>]";
 
@@ -20,19 +21,6 @@ fn document_id() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{:032x}", nanos)
-}
-
-fn fmt_num(v: f32) -> String {
-    if v == 0.0 {
-        return "0".to_string();
-    }
-    let s = format!("{:.8}", v);
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() {
-        "0".to_string()
-    } else {
-        s.to_string()
-    }
 }
 
 pub(crate) enum PdfPage {

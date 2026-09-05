@@ -1,5 +1,7 @@
 use anyhow::Result;
 
+use crate::util::{read16, read32};
+
 pub(crate) fn webp_embed_metadata(webp: Vec<u8>, icc: Option<&[u8]>, exif: Option<&[u8]>, w: u32, h: u32, has_alpha: bool) -> Result<Vec<u8>> {
     let has_icc = icc.map_or(false, |p| !p.is_empty());
     let has_exif = exif.map_or(false, |e| !e.is_empty());
@@ -85,18 +87,6 @@ pub(crate) fn encode_tiff_icc(
         }
     }
     Ok(buf.into_inner())
-}
-
-fn read16(b: &[u8], off: usize, little: bool) -> Option<u16> {
-    let s = b.get(off..off + 2)?;
-    let a = [s[0], s[1]];
-    Some(if little { u16::from_le_bytes(a) } else { u16::from_be_bytes(a) })
-}
-
-fn read32(b: &[u8], off: usize, little: bool) -> Option<u32> {
-    let s = b.get(off..off + 4)?;
-    let a = [s[0], s[1], s[2], s[3]];
-    Some(if little { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) })
 }
 
 fn write16(b: &mut [u8], off: usize, v: u16, little: bool) {

@@ -124,6 +124,7 @@ mod decode;
 mod jpeg_dct;
 mod rename;
 mod help;
+mod util;
 mod pdf;
 mod svg_pdf;
 
@@ -1279,9 +1280,18 @@ fn try_dct_downscale(raw: &[u8], config: &Config) -> Option<Vec<u8>> {
     encode_to_vec(&img, config, icc.as_deref(), exif.as_deref()).ok()
 }
 
+const MAX_INPUT_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+
+fn read_input(path: &Path) -> Result<Vec<u8>> {
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if len > MAX_INPUT_SIZE {
+        anyhow::bail!("{}", msg().err_too_large.replacen("{}", &path.display().to_string(), 1));
+    }
+    fs::read(path).with_context(|| msg().err_read.replacen("{}", &path.display().to_string(), 1))
+}
+
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
-    let raw = fs::read(input)
-        .with_context(|| msg().err_read.replacen("{}", &input.display().to_string(), 1))?;
+    let raw = read_input(input)?;
 
     let svg = if looks_like_svg(&raw) {
         Some(parse_svg(&raw, Some(input))?)
@@ -1567,18 +1577,7 @@ fn temp_path(out: &Path) -> PathBuf {
 }
 
 fn atomic_write(out: &Path, bytes: &[u8]) -> Result<()> {
-    let out_buf = fs_path(out);
-    let out = out_buf.as_path();
-    let tmp = temp_path(out);
-    if let Err(e) = fs::write(&tmp, bytes) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    if let Err(e) = fs::rename(&tmp, out) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e.into());
-    }
-    Ok(())
+    atomic_write_with(out, |tmp| Ok(fs::write(tmp, bytes)?))
 }
 
 fn atomic_write_with<F>(out: &Path, write: F) -> Result<()>
@@ -2093,8 +2092,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 }
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
-    let raw = fs::read(&entry.file)
-        .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
+    let raw = read_input(&entry.file)?;
 
     let svg = if looks_like_svg(&raw) {
         Some(parse_svg(&raw, Some(&entry.file))?)
@@ -2292,6 +2290,12 @@ fn merge_group_to_pdf(
                 Err(e) => {
                     HAD_ERRORS.store(true, Ordering::Relaxed);
                     let name = ordered[idx].file.file_name().unwrap_or_default().to_string_lossy();
+                    let line = format!("  MAYDAY! {} — {}", name, e);
+                    if let Some(pb) = pb {
+                        pb.println(line);
+                    } else {
+                        eprintln!("{}", line);
+                    }
                     error_list.push((name.to_string(), e));
                 }
             }
