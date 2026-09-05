@@ -48,7 +48,12 @@ jobs:
 
       - name: Ensure vcpkg status updates dir
         shell: pwsh
-        run: New-Item -ItemType Directory -Force "C:\vcpkg\installed\vcpkg\updates" | Out-Null
+        run: |
+          $dir = "C:\vcpkg\installed\vcpkg\updates"
+          [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+          if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            throw "Failed to create vcpkg updates dir: $dir"
+          }
 
       - name: Add pkgconf to PATH
         shell: pwsh
