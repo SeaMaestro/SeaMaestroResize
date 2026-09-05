@@ -35,6 +35,9 @@ the whole workflow.
 - **PDF output** — `--format pdf` writes one PDF per input; `--merge` writes
   one PDF per folder and rebuilds the tree with **Path Compression**. Pages are
   sorted, generated chunked and in parallel, so memory stays constant.
+- **Multi-drive & USB routing** — inputs are grouped by drive/network prefix,
+  each disk keeps its own output; removable USB drives are never written back
+  (output lands next to the program).
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
 - **Grayscale** (`--bw`) and **sharpen** (`--sharpen`).
 - **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF.

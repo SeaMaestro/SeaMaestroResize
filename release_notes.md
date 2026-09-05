@@ -8,11 +8,21 @@ is dropped, branches with several children stay as real subfolders, and
 single-child paths fold into the PDF name (`Trip`/`Day1` →
 `Trip_Day1_q85.pdf`). Loose files at the root land at the output root.
 
+**Disk & network pooling** — inputs are split into independent pools by
+drive/network prefix before processing. Each pool writes next to its own
+source (`D:\`, `E:\`, `\\server\share` each stay on their own disk), and
+removable USB drives are never written back — their output lands next to the
+program instead.
+
 **Long paths & name cap** — output paths beyond 260 characters now work on
 Windows via the `\\?\` verbatim prefix, so deep source folders no longer fail
 with "path too long". Over-long merged PDF names are capped to ~120 characters
 with a `first_..._last_<hash>` pattern, keeping them readable and under the
 NTFS 255-character file-name limit.
+
+**Safety & UX** — oversized input files are rejected before loading into
+memory (no more OOM on a stray multi-GB file), and errors print instantly
+during processing instead of only at the end.
 
 ## 🔓 Signing
 
