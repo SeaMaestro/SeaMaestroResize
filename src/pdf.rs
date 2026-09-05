@@ -5,7 +5,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use image::DynamicImage;
-use miniz_oxide::deflate::compress_to_vec_zlib;
 
 use crate::encode::encode_pdf_jpeg;
 use crate::svg_pdf::{to_unicode_cmap, FontRes, ImageColorSpace, ShadingRes, VectorPage};
@@ -84,7 +83,7 @@ pub(crate) fn make_page(img: &DynamicImage, config: &Config) -> Result<PdfPage> 
         } else {
             img.to_rgb8().into_raw()
         };
-        let data = compress_to_vec_zlib(&raw, 6);
+        let data = crate::util::deflate_zlib(&raw, 6);
         Ok(PdfPage::Raster { width: w, height: h, gray, dct: false, data })
     } else {
         let data = encode_pdf_jpeg(img, config.quality)?;
@@ -191,7 +190,7 @@ impl<W: Write> PdfSink<W> {
         self.end_obj()?;
 
         let content = format!("q\n{} 0 0 {} 0 0 cm\n/Im Do\nQ\n", width, height);
-        let content_data = compress_to_vec_zlib(content.as_bytes(), 6);
+        let content_data = crate::util::deflate_zlib(content.as_bytes(), 6);
         self.begin_obj(content_id)?;
         self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
         self.bytes(&content_data)?;
@@ -389,7 +388,7 @@ impl<W: Write> PdfSink<W> {
         ))?;
         self.end_obj()?;
 
-        let content_data = compress_to_vec_zlib(&vp.content, 6);
+        let content_data = crate::util::deflate_zlib(&vp.content, 6);
         self.begin_obj(content_id)?;
         self.raw(&format!("<< /Filter /FlateDecode /Length {} >>\nstream\n", content_data.len()))?;
         self.bytes(&content_data)?;

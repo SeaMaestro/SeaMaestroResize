@@ -1362,7 +1362,7 @@ fn png_meta(raw: &[u8]) -> Option<PngMeta> {
             if meta.icc.is_none() {
                 if let Some(nul) = payload.iter().position(|&b| b == 0) {
                     if nul + 1 < payload.len() && payload[nul + 1] == 0 {
-                        meta.icc = miniz_oxide::inflate::decompress_to_vec_zlib(&payload[nul + 2..]).ok();
+                        meta.icc = crate::util::inflate_zlib(&payload[nul + 2..]).ok();
                     }
                 }
             }
@@ -1447,9 +1447,9 @@ fn decode_image_rgba(raw: &[u8], lut: Option<&[u8; 256]>) -> Option<(Vec<u8>, Op
             has_alpha = true;
         }
     }
-    let rgb = miniz_oxide::deflate::compress_to_vec_zlib(&rgb, 6);
+    let rgb = crate::util::deflate_zlib(&rgb, 6);
     let smask = if has_alpha {
-        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+        Some(crate::util::deflate_zlib(&alpha, 6))
     } else {
         None
     };
@@ -1469,9 +1469,9 @@ fn decode_image_gray_raw(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
             has_alpha = true;
         }
     }
-    let gray = miniz_oxide::deflate::compress_to_vec_zlib(&gray, 6);
+    let gray = crate::util::deflate_zlib(&gray, 6);
     let smask = if has_alpha {
-        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+        Some(crate::util::deflate_zlib(&alpha, 6))
     } else {
         None
     };
@@ -1492,9 +1492,9 @@ fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
             has_alpha = true;
         }
     }
-    let gray = miniz_oxide::deflate::compress_to_vec_zlib(&gray, 6);
+    let gray = crate::util::deflate_zlib(&gray, 6);
     let smask = if has_alpha {
-        Some(miniz_oxide::deflate::compress_to_vec_zlib(&alpha, 6))
+        Some(crate::util::deflate_zlib(&alpha, 6))
     } else {
         None
     };
