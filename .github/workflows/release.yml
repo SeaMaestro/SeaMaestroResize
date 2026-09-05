@@ -64,10 +64,18 @@ jobs:
           archive: false
           if-no-files-found: error
 
+      - name: Compute SHA-256
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "target/release/SeaMaestroResize.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  SeaMaestroResize.exe" | Out-File -FilePath checksums.txt -Encoding ascii
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/SeaMaestroResize.exe
+          files: |
+            target/release/SeaMaestroResize.exe#SeaMaestroResize_${{ github.ref_name }}.exe
+            checksums.txt
           body_path: release_notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

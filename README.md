@@ -82,7 +82,7 @@ Requirements:
 - Windows 10/11
 - [vcpkg](https://github.com/microsoft/vcpkg) (manifest deps: HEIC/HEIF,
   AVIF, pkgconf)
-- [NASM](https://www.nasm.us/) 2.14+ on `PATH` (rav1e AVIF encoder)
+- [NASM](https://www.nasm.us/) 2.14+ on `PATH` (dav1d/aom AV1 assembly)
 
 ```powershell
 # NASM (if not already installed)
