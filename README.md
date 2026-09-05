@@ -18,7 +18,7 @@ the whole workflow.
   `SeaMaestroResized`, preserving the folder structure (each subfolder keeps its
   name with a `_Resized` suffix).
 - Drop onto a **merge-renamed exe** → one PDF per folder, rebuilding the tree
-  under a `*_Merged` folder with **Path Compression**.
+  under a `SeaMaestro_Merged` folder with **Path Compression**.
 
 ## Features
 

@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   VCPKG_ROOT: C:\vcpkg
@@ -56,12 +56,18 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      - name: Stage asset
-        shell: pwsh
-        run: Copy-Item "target\release\SeaMaestroResize.exe" "SeaMaestroResize.exe"
-
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: SeaMaestroResize_${{ github.ref_name }}
-          path: SeaMaestroResize.exe
+          path: target/release/SeaMaestroResize.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/SeaMaestroResize.exe
+          body_path: release_notes.md
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,3 +1,50 @@
+## SeaMaestroResize v2.4.8
+
+## ⚡ Performance
+
+**Fast DCT decode for cover-crop** — the scaled-IDCT fast path now also runs
+for `WxH` cover-crop sizes. The cover bounding box is computed up front, so a
+heavy JPEG is decoded at the exact downscaled resolution and cropped from that
+buffer — no full-res decode just to crop.
+
+**HEIF fast routing** — HEIC/HEIF inputs are routed straight to libheif,
+skipping the generic decoder's format-guess pass (which can't read HEIF
+anyway), so iPhone photos decode with one wasted step removed.
+
+**zlib-ng compression** — the compression backend moved from miniz_oxide to
+zlib-ng (via flate2): faster, SIMD-accelerated zlib, linked with the static
+CRT so the executable stays fully self-contained.
+
+**Zero-loss JPEG→PDF** — baseline JPEGs written to PDF keep their original DCT
+coefficients (DCTDecode) instead of being re-encoded, so `--format pdf
+--lossless` is lossless for JPEG sources.
+
+## 🐛 Bug Fixes
+
+**Crop shortcut** — fixed a latent bug where cover-crop at exact scales (0.5,
+0.25…) could return the uncropped intermediate instead of the final `WxH` box.
+
+**mozjpeg panics** — libjpeg error-exit panics are now silenced (no console
+trace).
+
+## ✨ Improvements
+
+**`--merge` output folder** — merged PDFs now land in a `SeaMaestro_Merged`
+folder (previously named after the common parent); the help text now reads
+"one PDF per folder, preserving directory structure" in all 8 languages.
+
+**Cleaner code** — mozjpeg encode paths deduplicated into one helper; PNG EXIF
+embedding computes its CRC incrementally (no temporary buffer).
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+**VirusTotal** — TBD
+
+---
+
 ## SeaMaestroResize v2.4.7
 
 ## ✨ Improvements

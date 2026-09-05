@@ -96,6 +96,12 @@ repository.
 - License: BSD 3-Clause
 - Project: https://github.com/etemesi254/zune-image
 
+## zlib-ng — zlib compression
+
+- License: zlib License
+- Project: https://github.com/zlib-ng/zlib-ng
+- License text: https://github.com/zlib-ng/zlib-ng/blob/develop/LICENSE.md
+
 ## mimalloc — memory allocator
 
 - License: MIT
