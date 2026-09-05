@@ -22,10 +22,10 @@ fn png_embed_exif(png: Vec<u8>, exif: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(exif.len() as u32).to_be_bytes());
     out.extend_from_slice(b"eXIf");
     out.extend_from_slice(exif);
-    let mut crc_input = Vec::with_capacity(4 + exif.len());
-    crc_input.extend_from_slice(b"eXIf");
-    crc_input.extend_from_slice(exif);
-    out.extend_from_slice(&crc32fast::hash(&crc_input).to_be_bytes());
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(b"eXIf");
+    hasher.update(exif);
+    out.extend_from_slice(&hasher.finalize().to_be_bytes());
     out.extend_from_slice(&png[33..]);
     out
 }
@@ -77,6 +77,44 @@ pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Opt
     Ok(())
 }
 
+fn run_mozjpeg(
+    color_space: mozjpeg::ColorSpace,
+    w: usize,
+    h: usize,
+    raw: &[u8],
+    channels: usize,
+    quality: u8,
+    progressive: bool,
+    chroma: Option<((u8, u8), (u8, u8))>,
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
+) -> Result<Vec<u8>> {
+    let mut comp = mozjpeg::Compress::new(color_space);
+    comp.set_size(w, h);
+    if progressive {
+        comp.set_progressive_mode();
+    }
+    comp.set_quality(quality.clamp(1, 100) as f32);
+    if let Some((cb, cr)) = chroma {
+        comp.set_chroma_sampling_pixel_sizes(cb, cr);
+    }
+    let mut comp = comp.start_compress(Vec::new())?;
+    if let Some(profile) = icc {
+        if !profile.is_empty() {
+            comp.write_icc_profile(profile);
+        }
+    }
+    if let Some(blob) = exif {
+        write_jpeg_exif(&mut comp, blob);
+    }
+    for line in 0..h {
+        let start = line * w * channels;
+        let end = (line + 1) * w * channels;
+        comp.write_scanlines(&raw[start..end])?;
+    }
+    Ok(comp.finish()?)
+}
+
 fn encode_jpeg_to_vec(img: &image::DynamicImage, quality: u8, progressive: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     if let Some(gray) = img.as_luma8() {
         return encode_jpeg_gray(gray, quality, progressive, icc, exif);
@@ -84,44 +122,15 @@ fn encode_jpeg_to_vec(img: &image::DynamicImage, quality: u8, progressive: bool,
     let rgb = img.to_rgb8();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let raw = rgb.into_raw();
-    let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
-    comp.set_size(w, h);
-    if progressive { comp.set_progressive_mode(); }
-    comp.set_quality(quality.clamp(1, 100) as f32);
-    let mut comp = comp.start_compress(Vec::new())?;
-    if let Some(profile) = icc {
-        if !profile.is_empty() {
-            comp.write_icc_profile(profile);
-        }
-    }
-    if let Some(blob) = exif {
-        write_jpeg_exif(&mut comp, blob);
-    }
-    for line in 0..h {
-        comp.write_scanlines(&raw[line * w * 3..(line + 1) * w * 3])?;
-    }
-    Ok(comp.finish()?)
-}fn encode_jpeg_gray(gray: &image::GrayImage, quality: u8, progressive: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
+    run_mozjpeg(mozjpeg::ColorSpace::JCS_RGB, w, h, &raw, 3, quality, progressive, None, icc, exif)
+}
+
+fn encode_jpeg_gray(gray: &image::GrayImage, quality: u8, progressive: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     let (w, h) = (gray.width() as usize, gray.height() as usize);
-    let raw: &[u8] = gray.as_raw();
-    let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_GRAYSCALE);
-    comp.set_size(w, h);
-    if progressive { comp.set_progressive_mode(); }
-    comp.set_quality(quality.clamp(1, 100) as f32);
-    let mut comp = comp.start_compress(Vec::new())?;
-    if let Some(profile) = icc {
-        if !profile.is_empty() {
-            comp.write_icc_profile(profile);
-        }
-    }
-    if let Some(blob) = exif {
-        write_jpeg_exif(&mut comp, blob);
-    }
-    for line in 0..h {
-        comp.write_scanlines(&raw[line * w..(line + 1) * w])?;
-    }
-    Ok(comp.finish()?)
-}fn webp_encode(enc: webp::Encoder<'_>, quality: f32, lossless: bool) -> Result<webp::WebPMemory> {
+    run_mozjpeg(mozjpeg::ColorSpace::JCS_GRAYSCALE, w, h, gray.as_raw(), 1, quality, progressive, None, icc, exif)
+}
+
+fn webp_encode(enc: webp::Encoder<'_>, quality: f32, lossless: bool) -> Result<webp::WebPMemory> {
     if lossless {
         Ok(enc.encode_lossless())
     } else {
@@ -311,13 +320,5 @@ pub(crate) fn encode_pdf_jpeg(img: &image::DynamicImage, quality: u8) -> Result<
     let rgb = img.to_rgb8();
     let (w, h) = (rgb.width() as usize, rgb.height() as usize);
     let raw = rgb.into_raw();
-    let mut comp = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_RGB);
-    comp.set_size(w, h);
-    comp.set_quality(quality.clamp(1, 100) as f32);
-    comp.set_chroma_sampling_pixel_sizes((2, 2), (2, 2));
-    let mut comp = comp.start_compress(Vec::new())?;
-    for line in 0..h {
-        comp.write_scanlines(&raw[line * w * 3..(line + 1) * w * 3])?;
-    }
-    Ok(comp.finish()?)
+    run_mozjpeg(mozjpeg::ColorSpace::JCS_RGB, w, h, &raw, 3, quality, false, Some(((2, 2), (2, 2))), None, None)
 }

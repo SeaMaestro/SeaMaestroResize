@@ -274,7 +274,7 @@ struct Cli {
     shanty: bool,
     #[arg(long, help_heading = "MISC")]
     keep_exif: bool,
-    #[arg(long, help = "Combine all images into a single PDF (implies --format pdf)", help_heading = "MISC")]
+    #[arg(long, help = "Merge images into PDF documents preserving directory structure (implies --format pdf)", help_heading = "MISC")]
     merge: bool,
     #[arg(long, help = "Language code: en, ru, uk, de, es, fr, el, fil", help_heading = "MISC")]
     lang: Option<String>,
@@ -1222,7 +1222,7 @@ fn preflight(raw: &[u8], config: &Config, is_svg: bool, native: (u32, u32)) -> P
         native
     };
     let ((tw, th), exact) = svg_target_dims(logical, config.target_size.as_ref());
-    let dct_n = if !is_svg && is_jpeg_bytes(raw) && exact && (tw < logical.0 || th < logical.1) {
+    let dct_n = if !is_svg && is_jpeg_bytes(raw) && (tw < logical.0 || th < logical.1) {
         let s = (tw as f64 / logical.0 as f64).max(th as f64 / logical.1 as f64);
         let n = (s * 8.0).ceil() as u32;
         if n > 0 && n < 8 { Some(n) } else { None }
@@ -1348,7 +1348,7 @@ fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orie
             Stage::AutoOrient => if orient { auto_orient(img, raw) } else { img },
             Stage::Grayscale => img.grayscale(),
             Stage::Resize => {
-                if img.width() == preflight.target.0 && img.height() == preflight.target.1 {
+                if preflight.exact && img.width() == preflight.target.0 && img.height() == preflight.target.1 {
                     img
                 } else if preflight.exact {
                     resize_to(img, preflight.target)
@@ -2393,17 +2393,12 @@ fn merge_output_dir(entries: &[InputEntry]) -> (PathBuf, PathBuf) {
     }
     let any_removable = roots.iter().any(|r| is_on_removable_drive(*r));
     let common = find_common_parent(roots);
-    let base_name = common
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new("SeaMaestro"))
-        .to_string_lossy()
-        .to_string();
     let parent = common.parent().unwrap_or(&common).to_path_buf();
 
     let out_dir = if any_removable {
-        unique_output_dir(&exe_dir().join(format!("{}_Merged", base_name)))
+        unique_output_dir(&exe_dir().join("SeaMaestro_Merged"))
     } else {
-        unique_output_dir(&parent.join(format!("{}_Merged", base_name)))
+        unique_output_dir(&parent.join("SeaMaestro_Merged"))
     };
     (out_dir, common)
 }
