@@ -379,6 +379,9 @@ fn main() -> std::process::ExitCode {
                 return;
             }
         }
+        if info.payload().downcast_ref::<String>().is_some() {
+            return;
+        }
         default_hook(info);
     }));
 
