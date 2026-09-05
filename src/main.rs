@@ -1197,21 +1197,84 @@ fn compute_output_path(
 
 // ── process_image ─────────────────────────────────────────────
 
-fn compute_need(raw: &[u8], svg: Option<&crate::decode::ParsedSvg>, config: &Config) -> u64 {
-    let is_svg = svg.is_some();
-    let (orig_w, orig_h) = if let Some(s) = svg {
-        (s.width, s.height)
-    } else {
-        probe_dims(raw).unwrap_or((32768, 32768))
-    };
-    compute_need_inner(raw, orig_w, orig_h, is_svg, config)
+// ── Pipeline ───────────────────────────────────────────────────
+
+fn is_jpeg_bytes(raw: &[u8]) -> bool {
+    raw.len() >= 3 && raw[0] == 0xFF && raw[1] == 0xD8 && raw[2] == 0xFF
 }
 
-fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, is_svg: bool, config: &Config) -> u64 {
+#[derive(Clone, Copy)]
+struct Preflight {
+    target: (u32, u32),
+    exact: bool,
+    dct_n: Option<u32>,
+}
+
+fn preflight(raw: &[u8], config: &Config, is_svg: bool, native: (u32, u32)) -> Preflight {
+    let logical = if is_svg {
+        native
+    } else if matches!(exif_orientation(raw), Some(5..=8)) {
+        (native.1, native.0)
+    } else {
+        native
+    };
+    let ((tw, th), exact) = svg_target_dims(logical, config.target_size.as_ref());
+    let dct_n = if !is_svg && is_jpeg_bytes(raw) && exact && (tw < logical.0 || th < logical.1) {
+        let s = (tw as f64 / logical.0 as f64).max(th as f64 / logical.1 as f64);
+        let n = (s * 8.0).ceil() as u32;
+        if n > 0 && n < 8 { Some(n) } else { None }
+    } else {
+        None
+    };
+    Preflight { target: (tw, th), exact, dct_n }
+}
+
+fn downscale_depth(img: image::DynamicImage, config: &Config) -> image::DynamicImage {
+    if config.format == ImageFormat::Png {
+        return img;
+    }
+    match img.color() {
+        image::ColorType::L16 => image::DynamicImage::ImageLuma8(img.to_luma8()),
+        image::ColorType::La16 => image::DynamicImage::ImageLumaA8(img.to_luma_alpha8()),
+        image::ColorType::Rgb16 | image::ColorType::Rgb32F => image::DynamicImage::ImageRgb8(img.to_rgb8()),
+        image::ColorType::Rgba16 | image::ColorType::Rgba32F => image::DynamicImage::ImageRgba8(img.to_rgba8()),
+        _ => img,
+    }
+}
+
+struct Decoded {
+    img: image::DynamicImage,
+    icc: Option<Vec<u8>>,
+    exif: Option<Vec<u8>>,
+}
+
+fn smart_decode(
+    raw: &[u8],
+    config: &Config,
+    path: Option<&Path>,
+    svg: Option<&crate::decode::ParsedSvg>,
+    svg_render: Option<((u32, u32), bool)>,
+    preflight: &Preflight,
+    jxl: Option<JxlPrepared>,
+) -> Result<Decoded> {
+    if let Some(n) = preflight.dct_n {
+        let (img, icc) = crate::jpeg_dct::decode_scaled_jpeg(raw, n, 8)
+            .ok_or_else(|| anyhow::anyhow!("{}", msg().err_decode))?;
+        let exif = if config.keep_exif { crate::decode::extract_exif(raw) } else { None };
+        return Ok(Decoded { img, icc, exif });
+    }
+    if let Some(j) = jxl {
+        let (img, icc, exif) = j.decode()?;
+        return Ok(Decoded { img, icc, exif });
+    }
+    let (img, icc, exif) = decode_image(raw, path, svg_render.map(|((w, h), _)| (w, h)), svg.map(|s| &s.tree))?;
+    Ok(Decoded { img, icc, exif })
+}
+
+fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decode_h: u32, is_svg: bool, config: &Config) -> u64 {
     let ((tw, th), _) = svg_target_dims((orig_w, orig_h), config.target_size.as_ref());
-    let orig_raster = raster_need(orig_w, orig_h);
+    let decode_raster = if is_svg { raster_need(tw, th) } else { raster_need(decode_w, decode_h) };
     let target_raster = raster_need(tw, th);
-    let decode_raster = if is_svg { target_raster } else { orig_raster };
 
     let (in_mult, in_oh): (u64, u64) = if is_svg {
         (1, 16)
@@ -1249,43 +1312,138 @@ fn exif_orientation(raw: &[u8]) -> Option<u32> {
         .get_uint(0)
 }
 
-fn try_dct_downscale(raw: &[u8], config: &Config) -> Option<Vec<u8>> {
-    if config.format != ImageFormat::Jpeg || config.grayscale || config.sharpen || config.progressive {
-        return None;
-    }
-    if raw.len() < 3 || raw[0] != 0xFF || raw[1] != 0xD8 || raw[2] != 0xFF {
-        return None;
-    }
-    let (ow, oh) = probe_dims(raw)?;
-    let is_rotated = matches!(exif_orientation(raw), Some(5..=8));
-    let (logical_w, logical_h) = if is_rotated { (oh, ow) } else { (ow, oh) };
-    let ((tw, th), exact) = svg_target_dims((logical_w, logical_h), config.target_size.as_ref());
-    if !exact {
-        return None;
-    }
-    if tw >= logical_w || th >= logical_h {
-        return None;
-    }
-    let s = (tw as f64 / logical_w as f64).max(th as f64 / logical_h as f64);
-    let n = (s * 8.0).ceil() as u32;
-    if n == 0 || n >= 8 {
-        return None;
-    }
+enum Stage {
+    DepthDownscale,
+    AutoOrient,
+    Grayscale,
+    Resize,
+    Sharpen,
+}
 
-    let need = compute_need_inner(raw, ow, oh, false, config);
+fn build_stages(config: &Config) -> Vec<Stage> {
+    let mut stages = Vec::new();
+    stages.push(Stage::DepthDownscale);
+    stages.push(Stage::AutoOrient);
+    if config.grayscale { stages.push(Stage::Grayscale); }
+    if config.target_size.is_some() { stages.push(Stage::Resize); }
+    if config.sharpen { stages.push(Stage::Sharpen); }
+    stages
+}
+
+fn resize_to(img: image::DynamicImage, target: (u32, u32)) -> image::DynamicImage {
+    if img.width() == target.0 && img.height() == target.1 {
+        img
+    } else {
+        resize_dynamic(img, target.0, target.1, ResizeOptions::new())
+    }
+}
+
+fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orient: bool, config: &Config, preflight: &Preflight) -> image::DynamicImage {
+    for stage in stages {
+        img = match stage {
+            Stage::DepthDownscale => downscale_depth(img, config),
+            Stage::AutoOrient => if orient { auto_orient(img, raw) } else { img },
+            Stage::Grayscale => img.grayscale(),
+            Stage::Resize => {
+                if img.width() == preflight.target.0 && img.height() == preflight.target.1 {
+                    img
+                } else if preflight.exact {
+                    resize_to(img, preflight.target)
+                } else {
+                    apply_resize(img, config.target_size.as_ref().unwrap())
+                }
+            }
+            Stage::Sharpen => sharpen_par(img, 3),
+        };
+    }
+    img
+}
+
+fn ensure_dir(out: &Path) -> Result<()> {
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(&fs_path(parent))
+                .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
+        }
+    }
+    Ok(())
+}
+
+fn jpeg_sof_info(raw: &[u8]) -> Option<(u32, u32, bool)> {
+    if raw.len() < 4 || raw[0] != 0xFF || raw[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 4 <= raw.len() {
+        if raw[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = raw[i + 1];
+        match marker {
+            0xC0 => {
+                if i + 10 > raw.len() { return None; }
+                let precision = raw[i + 4];
+                let height = ((raw[i + 5] as u32) << 8) | raw[i + 6] as u32;
+                let width = ((raw[i + 7] as u32) << 8) | raw[i + 8] as u32;
+                let components = raw[i + 9];
+                if precision != 8 || (components != 1 && components != 3) {
+                    return None;
+                }
+                return Some((width, height, components == 1));
+            }
+            0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF => return None,
+            0x01 | 0xD0..=0xD9 => i += 2,
+            _ => {
+                let len = ((raw[i + 2] as usize) << 8) | raw[i + 3] as usize;
+                i += 2 + len;
+            }
+        }
+    }
+    None
+}
+
+fn passthrough_jpeg_pdf(raw: &[u8], config: &Config) -> Option<crate::pdf::PdfPage> {
+    if config.target_size.is_some() || config.grayscale || config.sharpen {
+        return None;
+    }
+    if !config.lossless && config.quality != 100 {
+        return None;
+    }
+    let (width, height, gray) = jpeg_sof_info(raw)?;
+    Some(crate::pdf::PdfPage::Raster { width, height, gray, dct: true, data: raw.to_vec() })
+}
+
+fn run_pipeline(
+    raw: &[u8],
+    config: &Config,
+    path: Option<&Path>,
+    svg: Option<&crate::decode::ParsedSvg>,
+    svg_render: Option<((u32, u32), bool)>,
+) -> Result<Decoded> {
+    let jxl = JxlPrepared::prepare(raw);
+    let native = if let Some(s) = svg {
+        (s.width, s.height)
+    } else if let Some(j) = &jxl {
+        j.dims()
+    } else {
+        probe_dims(raw).unwrap_or((32768, 32768))
+    };
+    let is_svg = svg.is_some();
+    let preflight = preflight(raw, config, is_svg, native);
+    let decode_dims = match preflight.dct_n {
+        Some(n) => ((native.0 * n / 8).max(1), (native.1 * n / 8).max(1)),
+        None => native,
+    };
+    let need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config);
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
-
-    let (img, icc) = crate::jpeg_dct::decode_scaled_jpeg(raw, n, 8)?;
-    let img = auto_orient(img, raw);
-    let img = if img.width() == tw && img.height() == th {
-        img
-    } else {
-        resize_dynamic(img, tw, th, ResizeOptions::new())
-    };
-    let exif = if config.keep_exif { crate::decode::extract_exif(raw) } else { None };
-    encode_to_vec(&img, config, icc.as_deref(), exif.as_deref()).ok()
+    let mut decoded = smart_decode(raw, config, path, svg, svg_render, &preflight, jxl)?;
+    let orient = !is_svg && !is_heif(raw);
+    let stages = build_stages(config);
+    decoded.img = apply_stages(decoded.img, &stages, raw, orient, config, &preflight);
+    Ok(decoded)
 }
 
 const MAX_INPUT_SIZE: u64 = 2 * 1024 * 1024 * 1024;
@@ -1301,6 +1459,15 @@ fn read_input(path: &Path) -> Result<Vec<u8>> {
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
     let raw = read_input(input)?;
 
+    let out_path = if let Some(ref out) = config.output {
+        PathBuf::from(out)
+    } else {
+        final_path.to_path_buf()
+    };
+    if path_key(&out_path) == path_key(input) {
+        anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
+    }
+
     let svg = if looks_like_svg(&raw) {
         Some(parse_svg(&raw, Some(input))?)
     } else { None };
@@ -1308,36 +1475,10 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    let out_path = if let Some(ref out) = config.output {
-        PathBuf::from(out)
-    } else {
-        final_path.to_path_buf()
-    };
-
-    if path_key(&out_path) == path_key(input) {
-        anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
-    }
-
-    if let Some(bytes) = try_dct_downscale(&raw, config) {
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(&fs_path(parent))
-                    .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
-            }
-        }
-        atomic_write(&out_path, &bytes)?;
-        return Ok(out_path);
-    }
-
     if !config.sharpen && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
-                if let Some(parent) = out_path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(&fs_path(parent))
-                            .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
-                    }
-                }
+                ensure_dir(&out_path)?;
                 let bytes = crate::pdf::page_pdf(crate::pdf::PdfPage::Vector(vp))?;
                 atomic_write(&out_path, &bytes)?;
                 return Ok(out_path);
@@ -1345,51 +1486,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         }
     }
 
-    let jxl = JxlPrepared::prepare(&raw);
-    let need = if let Some(j) = &jxl {
-        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
-    } else {
-        compute_need(&raw, svg.as_ref(), config)
-    };
-    let budget = mem_budget();
-    budget.acquire(need);
-    let _permit = MemPermit { budget, need };
-
-    let (mut img, icc, exif) = match jxl {
-        Some(j) => j
-            .decode()
-            .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?,
-        None => decode_image(
-            &raw,
-            Some(input),
-            svg_render.map(|((w, h), _)| (w, h)),
-            svg.as_ref().map(|s| &s.tree),
-        )
-        .with_context(|| msg().err_decode.replacen("{}", &input.display().to_string(), 1))?,
-    };
-    if !looks_like_svg(&raw) && !is_heif(&raw) {
-        img = auto_orient(img, &raw);
-    }
-
-    if config.grayscale { img = img.grayscale(); }
-    if let Some(ref size) = config.target_size {
-        let skip_resize = matches!(svg_render, Some((_, true)));
-        if !skip_resize {
-            img = apply_resize(img, size);
-        }
-    }
-    if config.sharpen {
-        img = sharpen_par(img, 3);
-    }
-
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(&fs_path(parent))
-                .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
-        }
-    }
-
-    save_image(&img, &out_path, config, icc.as_deref(), exif.as_deref())?;
+    let decoded = run_pipeline(&raw, config, Some(input), svg.as_ref(), svg_render)?;
+    ensure_dir(&out_path)?;
+    save_image(&decoded.img, &out_path, config, decoded.icc.as_deref(), decoded.exif.as_deref())?;
     Ok(out_path)
 }
 
@@ -1615,41 +1714,9 @@ fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    let jxl = JxlPrepared::prepare(raw);
-    let need = if let Some(j) = &jxl {
-        compute_need_inner(raw, j.dims().0, j.dims().1, false, config)
-    } else {
-        compute_need(raw, svg.as_ref(), config)
-    };
-    let budget = mem_budget();
-    budget.acquire(need);
-    let _permit = MemPermit { budget, need };
-
-    let (img, icc, exif) = match jxl {
-        Some(j) => j
-            .decode()
-            .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?,
-        None => decode_image(
-            raw,
-            None,
-            svg_render.map(|((w, h), _)| (w, h)),
-            svg.as_ref().map(|s| &s.tree),
-        )
-        .with_context(|| msg().err_decode.replacen("{}", "<stdin>", 1))?,
-    };
-    let img = if !looks_like_svg(raw) && !is_heif(raw) { auto_orient(img, raw) } else { img };
-    let img = if config.grayscale { img.grayscale() } else { img };
-    let img = if let Some(ref size) = config.target_size {
-        let skip_resize = matches!(svg_render, Some((_, true)));
-        if skip_resize {
-            img
-        } else {
-            apply_resize(img, size)
-        }
-    } else { img };
-    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
-    let exif = if config.keep_exif { exif.as_deref() } else { None };
-    encode_to_vec(&img, config, icc.as_deref(), exif)
+    let decoded = run_pipeline(raw, config, None, svg.as_ref(), svg_render)?;
+    let exif = if config.keep_exif { decoded.exif.as_deref() } else { None };
+    encode_to_vec(&decoded.img, config, decoded.icc.as_deref(), exif)
 }
 
 fn process_and_write_stdout(raw: &[u8], config: &Config) -> Result<()> {
@@ -2102,6 +2169,10 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
     let raw = read_input(&entry.file)?;
 
+    if let Some(page) = passthrough_jpeg_pdf(&raw, config) {
+        return Ok(page);
+    }
+
     let svg = if looks_like_svg(&raw) {
         Some(parse_svg(&raw, Some(&entry.file))?)
     } else { None };
@@ -2117,40 +2188,8 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         }
     }
 
-    let jxl = JxlPrepared::prepare(&raw);
-    let need = if let Some(j) = &jxl {
-        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
-    } else {
-        compute_need(&raw, svg.as_ref(), config)
-    };
-    let budget = mem_budget();
-    budget.acquire(need);
-    let _permit = MemPermit { budget, need };
-
-    let (img, _icc, _exif) = match jxl {
-        Some(j) => j
-            .decode()
-            .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
-        None => decode_image(
-            &raw,
-            None,
-            svg_render.map(|((w, h), _)| (w, h)),
-            svg.as_ref().map(|s| &s.tree),
-        )
-        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
-    };
-    let img = if !looks_like_svg(&raw) && !is_heif(&raw) { auto_orient(img, &raw) } else { img };
-    let img = if config.grayscale { img.grayscale() } else { img };
-    let img = if let Some(ref size) = config.target_size {
-        let skip_resize = matches!(svg_render, Some((_, true)));
-        if skip_resize {
-            img
-        } else {
-            apply_resize(img, size)
-        }
-    } else { img };
-    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
-    crate::pdf::make_page(&img, config)
+    let decoded = run_pipeline(&raw, config, None, svg.as_ref(), svg_render)?;
+    crate::pdf::make_page(&decoded.img, config)
 }
 
 fn merge_group_to_pdf(
