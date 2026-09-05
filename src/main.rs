@@ -1049,6 +1049,14 @@ fn process_files(entries: &[InputEntry], config: &Config) {
                         None => eprintln!("{}", formatted),
                     }
 
+                    if let Err(e) = &result {
+                        let detail = format!("  MAYDAY! {} — {}", input.file_name().unwrap_or_default().to_string_lossy(), e);
+                        match pb {
+                            Some(pb) => pb.println(detail),
+                            None => eprintln!("{}", detail),
+                        }
+                    }
+
                     if config.shanty {
                         let shanty = format!("  {}", next_shanty());
                         match pb {
