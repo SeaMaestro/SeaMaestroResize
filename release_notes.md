@@ -31,8 +31,8 @@ publisher" warning on first run.
 
 **VirusTotal** — TBD
 
-- SHA-256: TBD
-- Size: TBD (PE executable, 64-bit)
+- SHA-256: `98a2628aea155862ced52ccd9d679868e8d4edcfac2434c4507ffa2fe8935c4a`
+- Size: 35.56 MB (PE executable, 64-bit)
 
 ---
 
