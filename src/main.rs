@@ -83,6 +83,40 @@ fn path_key(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
+#[cfg(windows)]
+fn fs_path(p: &Path) -> PathBuf {
+    let raw = p.as_os_str().to_string_lossy().into_owned();
+    if raw.starts_with(r"\\?\") {
+        return p.to_path_buf();
+    }
+    let abs = match std::path::absolute(p) {
+        Ok(a) => a,
+        Err(_) => return p.to_path_buf(),
+    };
+    let norm = abs.to_string_lossy().into_owned().replace('/', "\\");
+    if norm.len() < 248 {
+        return p.to_path_buf();
+    }
+    let out = if norm.starts_with("\\\\") {
+        format!(r"\\?\UNC\{}", &norm[2..])
+    } else {
+        format!(r"\\?\{}", norm)
+    };
+    PathBuf::from(out)
+}
+
+#[cfg(not(windows))]
+fn fs_path(p: &Path) -> PathBuf {
+    p.to_path_buf()
+}
+
+fn exe_dir() -> PathBuf {
+    env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 mod lang;
 mod metadata;
 mod encode;
@@ -463,7 +497,7 @@ fn run() -> Result<Config> {
                 let out = PathBuf::from(config.output.as_deref().unwrap());
                 if let Some(parent) = out.parent() {
                     if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(parent)
+                        fs::create_dir_all(&fs_path(parent))
                             .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
                     }
                 }
@@ -471,7 +505,7 @@ fn run() -> Result<Config> {
                 atomic_write(&out, &bytes)?;
             }
         } else {
-            process_files(&entries, &config);
+            process_all(entries, &config);
         }
         return Ok(config);
     }
@@ -524,7 +558,7 @@ fn run() -> Result<Config> {
         return Ok(config);
     }
 
-    process_files(&entries, &config);
+    process_all(entries, &config);
     Ok(config)
 }
 
@@ -679,7 +713,7 @@ fn easter_index(fl: &str) -> Option<usize> {
 }
 
 fn is_directory_empty(path: &Path) -> bool {
-    fs::read_dir(path).map(|mut d| d.next().is_none()).unwrap_or(true)
+    fs::read_dir(fs_path(path)).map(|mut d| d.next().is_none()).unwrap_or(true)
 }
 
 #[cfg(target_os = "windows")]
@@ -715,11 +749,11 @@ fn local_now() -> (i64, u32, u32, u32, u32, u32) {
 }
 
 fn unique_output_dir(base: &Path) -> PathBuf {
-    if base.exists() && !is_directory_empty(base) {
+    if fs_path(base).exists() && !is_directory_empty(base) {
         let (y, mo, d, h, mi, s) = local_now();
         let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
         let mut candidate = PathBuf::from(format!("{}_{}", base.display(), stamp));
-        if candidate.exists() && !is_directory_empty(&candidate) {
+        if fs_path(&candidate).exists() && !is_directory_empty(&candidate) {
             candidate = PathBuf::from(format!(
                 "{}_{}_{}",
                 base.display(),
@@ -734,7 +768,7 @@ fn unique_output_dir(base: &Path) -> PathBuf {
 }
 
 fn unique_output_dir_reserved(base: &Path, used: &mut HashSet<String>) -> PathBuf {
-    let collides = |p: &Path| (p.exists() && !is_directory_empty(p)) || used.contains(&path_key(p));
+    let collides = |p: &Path| (fs_path(p).exists() && !is_directory_empty(p)) || used.contains(&path_key(p));
     if collides(base) {
         let (y, mo, d, h, mi, s) = local_now();
         let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
@@ -757,8 +791,40 @@ fn unique_output_dir_reserved(base: &Path, used: &mut HashSet<String>) -> PathBu
 
 // ── process_files ─────────────────────────────────────────────
 
-fn process_files(entries: &[InputEntry], config: &Config) {
+struct Pool {
+    key: String,
+    entries: Vec<InputEntry>,
+}
+
+fn pool_key(path: &Path) -> String {
+    match path.components().next() {
+        Some(std::path::Component::Prefix(p)) => path_key(Path::new(p.as_os_str())),
+        _ => String::new(),
+    }
+}
+
+fn partition_into_pools(entries: Vec<InputEntry>) -> Vec<Pool> {
+    let mut pools: Vec<Pool> = Vec::new();
+    for entry in entries {
+        let key = pool_key(&entry.root);
+        if let Some(pool) = pools.iter_mut().find(|p| p.key == key) {
+            pool.entries.push(entry);
+        } else {
+            pools.push(Pool { key, entries: vec![entry] });
+        }
+    }
+    pools
+}
+
+fn process_all(entries: Vec<InputEntry>, config: &Config) {
+    let pools = partition_into_pools(entries);
     HAD_ERRORS.store(false, Ordering::Relaxed);
+    for pool in &pools {
+        process_files(&pool.entries, config);
+    }
+}
+
+fn process_files(entries: &[InputEntry], config: &Config) {
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
     set_avif_threads(total);
@@ -771,11 +837,6 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let grouped = group_by_root(entries);
     let single_file_mode = total == 1 && entries[0].direct_file;
     let multi_root = grouped.len() > 1;
-
-    let exe_dir = env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."));
 
     let any_removable = grouped.keys().any(|r| is_on_removable_drive(r));
 
@@ -808,17 +869,17 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     for (root, files) in &grouped {
         let out_dir = if any_removable {
             if single_file_mode {
-                unique_output_dir(&exe_dir.join("SeaMaestroResized"))
+                unique_output_dir(&exe_dir().join("SeaMaestroResized"))
             } else {
                 let is_loose = entries.iter().filter(|e| &e.root == root).all(|e| e.direct_file);
                 if is_loose {
-                    unique_output_dir(&exe_dir.join("SeaMaestroResized"))
+                    unique_output_dir(&exe_dir().join("SeaMaestroResized"))
                 } else {
                     let root_name = root.file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                         .to_string_lossy();
                     unique_output_dir_reserved(
-                        &exe_dir.join("SeaMaestroResized").join(format!("{}_Resized", root_name)),
+                        &exe_dir().join("SeaMaestroResized").join(format!("{}_Resized", root_name)),
                         &mut used_out_dirs,
                     )
                 }
@@ -1242,7 +1303,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     if let Some(bytes) = try_dct_downscale(&raw, config) {
         if let Some(parent) = out_path.parent() {
             if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)
+                fs::create_dir_all(&fs_path(parent))
                     .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
             }
         }
@@ -1255,7 +1316,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 if let Some(parent) = out_path.parent() {
                     if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(parent)
+                        fs::create_dir_all(&fs_path(parent))
                             .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
                     }
                 }
@@ -1305,7 +1366,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
 
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
+            fs::create_dir_all(&fs_path(parent))
                 .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
         }
     }
@@ -1506,6 +1567,8 @@ fn temp_path(out: &Path) -> PathBuf {
 }
 
 fn atomic_write(out: &Path, bytes: &[u8]) -> Result<()> {
+    let out_buf = fs_path(out);
+    let out = out_buf.as_path();
     let tmp = temp_path(out);
     if let Err(e) = fs::write(&tmp, bytes) {
         let _ = fs::remove_file(&tmp);
@@ -1521,6 +1584,8 @@ fn atomic_write(out: &Path, bytes: &[u8]) -> Result<()> {
 fn atomic_write_with<F>(out: &Path, write: F) -> Result<()>
 where F: FnOnce(&Path) -> Result<()>
 {
+    let out_buf = fs_path(out);
+    let out = out_buf.as_path();
     let tmp = temp_path(out);
     if let Err(e) = write(&tmp) {
         let _ = fs::remove_file(&tmp);
@@ -1776,6 +1841,25 @@ fn random_funny_message() -> String {
     m.funny[fastrand::usize(..m.funny.len())].to_string()
 }
 
+struct MergeGroup<'a> {
+    dir: PathBuf,
+    files: Vec<&'a InputEntry>,
+}
+
+fn group_by_parent<'a>(entries: &'a [InputEntry]) -> Vec<MergeGroup<'a>> {
+    let mut map: HashMap<PathBuf, Vec<&'a InputEntry>> = HashMap::new();
+    for e in entries {
+        let parent = e.file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        map.entry(parent).or_default().push(e);
+    }
+    let mut groups: Vec<MergeGroup<'a>> = map
+        .into_iter()
+        .map(|(dir, files)| MergeGroup { dir, files })
+        .collect();
+    groups.sort_by(|a, b| path_key(&a.dir).cmp(&path_key(&b.dir)));
+    groups
+}
+
 fn merge_chunk_len(total: usize, config: &Config) -> usize {
     let budget = (usable_ram() / 8).clamp(64 * 1024 * 1024, 512 * 1024 * 1024);
     let per_page = if config.lossless {
@@ -1787,40 +1871,143 @@ fn merge_chunk_len(total: usize, config: &Config) -> usize {
     n.clamp(1, total)
 }
 
+fn truncate_chars(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn cap_name_parts(parts: &[String]) -> String {
+    const LIMIT: usize = 120;
+    let full = parts.join("_");
+    if full.len() <= LIMIT {
+        return full;
+    }
+    let first = truncate_chars(parts.first().map(|s| s.as_str()).unwrap_or(""), 48);
+    let last = truncate_chars(parts.last().map(|s| s.as_str()).unwrap_or(""), 48);
+    let hash = crc32fast::hash(full.as_bytes());
+    format!("{}_..._{}_{:08x}", first, last, hash)
+}
+
+fn merge_path_plans(
+    groups: &[MergeGroup<'_>],
+    common_base: &Path,
+    out_dir: &Path,
+) -> Vec<(usize, PathBuf, String)> {
+    let rels: Vec<(usize, Vec<String>)> = groups
+        .iter()
+        .enumerate()
+        .map(|(idx, g)| {
+            let rel = g.dir.strip_prefix(common_base).unwrap_or(&g.dir);
+            let mut comps: Vec<String> = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                .collect();
+            if comps.is_empty() {
+                comps.push(common_base.file_name().unwrap_or_default().to_string_lossy().to_string());
+            }
+            (idx, comps)
+        })
+        .collect();
+
+    let common_len = {
+        let mut bound = usize::MAX;
+        for (_, comps) in &rels {
+            bound = bound.min(comps.len().saturating_sub(1));
+        }
+        let mut cl = 0usize;
+        'outer: while cl < bound {
+            let c = &rels[0].1[cl];
+            for (_, comps) in &rels[1..] {
+                if &comps[cl] != c {
+                    break 'outer;
+                }
+            }
+            cl += 1;
+        }
+        cl
+    };
+
+    let mut children: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
+    for (_, comps) in &rels {
+        let path_len = comps.len().saturating_sub(1);
+        let path = &comps[common_len..path_len];
+        let leaf = comps.last().cloned().unwrap_or_default();
+        for i in 0..path.len() {
+            let node: Vec<String> = path[..=i].to_vec();
+            let next = if i + 1 < path.len() { path[i + 1].clone() } else { leaf.clone() };
+            children.entry(node).or_default().insert(next);
+        }
+    }
+
+    let mut plans = Vec::with_capacity(rels.len());
+    for (idx, comps) in &rels {
+        let path_len = comps.len().saturating_sub(1);
+        let path = &comps[common_len..path_len];
+        let leaf = comps.last().cloned().unwrap_or_default();
+        let mut dir_parts: Vec<String> = Vec::new();
+        let mut name_parts: Vec<String> = Vec::new();
+        for i in 0..path.len() {
+            let node: Vec<String> = path[..=i].to_vec();
+            let count = children.get(&node).map(|s| s.len()).unwrap_or(0);
+            if count > 1 {
+                name_parts.push(path[i].clone());
+                dir_parts.push(cap_name_parts(&name_parts));
+                name_parts.clear();
+            } else {
+                name_parts.push(path[i].clone());
+            }
+        }
+        let mut full = path.to_vec();
+        full.push(leaf.clone());
+        let leaf_branches = children.get(&full).map(|s| s.len()).unwrap_or(0) > 1;
+        if leaf_branches {
+            name_parts.push(leaf.clone());
+            dir_parts.push(cap_name_parts(&name_parts));
+            name_parts.clear();
+            name_parts.push(leaf.clone());
+        } else {
+            name_parts.push(leaf.clone());
+        }
+        let name = cap_name_parts(&name_parts);
+        let dir = dir_parts.iter().fold(out_dir.to_path_buf(), |acc, d| acc.join(d));
+        plans.push((*idx, dir, name));
+    }
+    plans
+}
+
 fn process_merge(entries: &[InputEntry], config: &Config) {
-    HAD_ERRORS.store(false, Ordering::Relaxed);
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
 
-    let mut ordered: Vec<&InputEntry> = entries.iter().collect();
-    ordered.sort_by(|a, b| path_key(&a.file).cmp(&path_key(&b.file)));
+    let groups = group_by_parent(entries);
+    let (default_dir, common_base) = merge_output_dir(entries);
 
-    let out_file = if let Some(o) = &config.output {
+    let out_dir: PathBuf = if let Some(o) = &config.output {
         let p = PathBuf::from(o);
-        if let Some(parent) = p.parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!("  {}", msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1));
-                    eprintln!("  {:#}", e);
-                    HAD_ERRORS.store(true, Ordering::Relaxed);
-                    return;
-                }
-            }
-        }
-        p
-    } else {
-        let out_dir = merge_output_dir(entries);
-        if let Err(e) = fs::create_dir_all(&out_dir) {
-            eprintln!("  {}", msg().err_mkdir.replacen("{}", &out_dir.display().to_string(), 1));
+        if let Err(e) = fs::create_dir_all(&fs_path(&p)) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &p.display().to_string(), 1));
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return;
         }
-        unique_pdf_file(&out_dir, config)
+        p
+    } else {
+        if let Err(e) = fs::create_dir_all(&fs_path(&default_dir)) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &default_dir.display().to_string(), 1));
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return;
+        }
+        default_dir
     };
 
     captain_log(total);
-    let m = msg();
 
     let stderr_is_tty = std::io::stderr().is_terminal();
     let pb: Option<ProgressBar> = if stderr_is_tty {
@@ -1839,6 +2026,144 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         None
     };
 
+    let progress = AtomicUsize::new(0);
+    let stat_in = AtomicU64::new(0);
+    let stat_out = AtomicU64::new(0);
+    let mut error_list: Vec<(String, String)> = Vec::new();
+
+    let plans = merge_path_plans(&groups, &common_base, &out_dir);
+
+    for (idx, dir, name) in &plans {
+        if let Err(e) = fs::create_dir_all(&fs_path(dir)) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &dir.display().to_string(), 1));
+            eprintln!("  {:#}", e);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            continue;
+        }
+        if let Some((_path, size)) = merge_group_to_pdf(
+            &groups[*idx], dir, name, config, &pb, &progress, &stat_in, total, &mut error_list,
+        ) {
+            stat_out.fetch_add(size, Ordering::Relaxed);
+        }
+    }
+
+    if let Some(pb) = pb {
+        pb.finish_and_clear();
+    }
+
+    for (name, e) in &error_list {
+        eprintln!("  MAYDAY! {} — {}", name, e);
+    }
+
+    let m = msg();
+    let in_total = stat_in.load(Ordering::Relaxed);
+    let out_total = stat_out.load(Ordering::Relaxed);
+
+    eprintln!("\n  ═══════════════════════════════════════════════");
+    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
+    if !error_list.is_empty() {
+        eprintln!("  {}", m.voyage_errors.replacen("{}", &error_list.len().to_string(), 1));
+    }
+
+    let (diff_str, pct_total, arrow) = if in_total > out_total {
+        let pct = (in_total as f64 - out_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_discharged.replacen("{}", &human_size(in_total - out_total), 1), pct, "↑")
+    } else if out_total > in_total {
+        let pct = (out_total as f64 - in_total as f64) / in_total as f64 * 100.0;
+        (m.cargo_took_on.replacen("{}", &human_size(out_total - in_total), 1), pct, "↓")
+    } else {
+        (String::new(), 0.0, "=")
+    };
+
+    if in_total == out_total {
+        eprintln!("  {}", m.cargo_line_nochange
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1));
+    } else {
+        eprintln!("  {}", m.cargo_line
+            .replacen("{}", &human_size(in_total), 1)
+            .replacen("{}", &human_size(out_total), 1)
+            .replacen("{}", &diff_str, 1)
+            .replacen("{}", arrow, 1)
+            .replacen("{:.0}", &format!("{:.0}", pct_total), 1));
+    }
+    eprintln!("  {}", m.output_label.replacen("{}", &out_dir.display().to_string(), 1));
+    eprintln!("  {}", random_funny_message());
+    HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
+}
+
+fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
+    let raw = fs::read(&entry.file)
+        .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
+
+    let svg = if looks_like_svg(&raw) {
+        Some(parse_svg(&raw, Some(&entry.file))?)
+    } else { None };
+    let svg_render = svg
+        .as_ref()
+        .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
+
+    if !config.sharpen {
+        if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
+            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
+                return Ok(crate::pdf::PdfPage::Vector(vp));
+            }
+        }
+    }
+
+    let jxl = JxlPrepared::prepare(&raw);
+    let need = if let Some(j) = &jxl {
+        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
+    } else {
+        compute_need(&raw, svg.as_ref(), config)
+    };
+    let budget = mem_budget();
+    budget.acquire(need);
+    let _permit = MemPermit { budget, need };
+
+    let (img, _icc, _exif) = match jxl {
+        Some(j) => j
+            .decode()
+            .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
+        None => decode_image(
+            &raw,
+            None,
+            svg_render.map(|((w, h), _)| (w, h)),
+            svg.as_ref().map(|s| &s.tree),
+        )
+        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
+    };
+    let img = if !looks_like_svg(&raw) && !is_heif(&raw) { auto_orient(img, &raw) } else { img };
+    let img = if config.grayscale { img.grayscale() } else { img };
+    let img = if let Some(ref size) = config.target_size {
+        let skip_resize = matches!(svg_render, Some((_, true)));
+        if skip_resize {
+            img
+        } else {
+            apply_resize(img, size)
+        }
+    } else { img };
+    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
+    crate::pdf::make_page(&img, config)
+}
+
+fn merge_group_to_pdf(
+    group: &MergeGroup,
+    out_dir: &Path,
+    rel_name: &str,
+    config: &Config,
+    pb: &Option<ProgressBar>,
+    progress: &AtomicUsize,
+    stat_in: &AtomicU64,
+    total: usize,
+    error_list: &mut Vec<(String, String)>,
+) -> Option<(PathBuf, u64)> {
+    let m = msg();
+
+    let out_file = unique_merge_pdf(out_dir, rel_name, config);
+    let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let out_file = fs_path(&out_file);
+
     let tmp = temp_path(&out_file);
     let mut sink = match crate::pdf::PdfSink::create(&tmp) {
         Ok(s) => s,
@@ -1846,7 +2171,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             let _ = fs::remove_file(&tmp);
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
-            return;
+            return None;
         }
     };
     if let Err(e) = sink.write_catalog() {
@@ -1854,29 +2179,28 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         let _ = fs::remove_file(&tmp);
         eprintln!("  {:#}", e);
         HAD_ERRORS.store(true, Ordering::Relaxed);
-        return;
+        return None;
     }
 
-    let progress = Arc::new(AtomicUsize::new(0));
-    let stat_in = AtomicU64::new(0);
-    let mut error_list: Vec<(String, String)> = Vec::new();
-    let out_name = out_file.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let mut ordered: Vec<&InputEntry> = group.files.iter().copied().collect();
+    ordered.sort_by(|a, b| path_key(&a.file).cmp(&path_key(&b.file)));
 
-    let chunk = merge_chunk_len(total, config);
+    let group_total = ordered.len();
+    let chunk = merge_chunk_len(group_total, config);
     let mut written = 0usize;
 
     let mut offset = 0usize;
-    while offset < total {
-        let end = (offset + chunk).min(total);
+    while offset < group_total {
+        let end = (offset + chunk).min(group_total);
         let slice = &ordered[offset..end];
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let chunk_workers = cpus.min(slice.len());
         let task_idx = AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let task_idx = &task_idx;
-        let progress = &progress;
-        let stat_in = &stat_in;
-        let pb = &pb;
+        let progress = progress;
+        let stat_in = stat_in;
+        let pb = pb;
         let out_name = out_name.as_str();
 
         std::thread::scope(|s| {
@@ -1961,7 +2285,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
                         let _ = fs::remove_file(&tmp);
                         eprintln!("  {:#}", e);
                         HAD_ERRORS.store(true, Ordering::Relaxed);
-                        return;
+                        return None;
                     }
                     written += 1;
                 }
@@ -1975,15 +2299,6 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         offset = end;
     }
 
-    if let Some(pb) = pb {
-        pb.finish_and_clear();
-    }
-
-    for (name, e) in &error_list {
-        eprintln!("  MAYDAY! {} — {}", name, e);
-    }
-
-    let in_total = stat_in.load(Ordering::Relaxed);
     let out_total = if written > 0 {
         match sink.finish(written) {
             Ok(size) => size,
@@ -1992,13 +2307,12 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
                 let _ = fs::remove_file(&tmp);
                 eprintln!("  {:#}", e);
                 HAD_ERRORS.store(true, Ordering::Relaxed);
-                return;
+                return None;
             }
         }
     } else {
         0
     };
-
     drop(sink);
 
     if written > 0 {
@@ -2006,129 +2320,49 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             let _ = fs::remove_file(&tmp);
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
-            return;
+            return None;
         }
     } else {
         let _ = fs::remove_file(&tmp);
+        return None;
     }
 
-    eprintln!("\n  ═══════════════════════════════════════════════");
-    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
-    if !error_list.is_empty() {
-        eprintln!("  {}", m.voyage_errors.replacen("{}", &error_list.len().to_string(), 1));
-    }
-
-    let (diff_str, pct_total, arrow) = if in_total > out_total {
-        let pct = (in_total as f64 - out_total as f64) / in_total as f64 * 100.0;
-        (m.cargo_discharged.replacen("{}", &human_size(in_total - out_total), 1), pct, "↑")
-    } else if out_total > in_total {
-        let pct = (out_total as f64 - in_total as f64) / in_total as f64 * 100.0;
-        (m.cargo_took_on.replacen("{}", &human_size(out_total - in_total), 1), pct, "↓")
-    } else {
-        (String::new(), 0.0, "=")
-    };
-
-    if in_total == out_total {
-        eprintln!("  {}", m.cargo_line_nochange
-            .replacen("{}", &human_size(in_total), 1)
-            .replacen("{}", &human_size(out_total), 1));
-    } else {
-        eprintln!("  {}", m.cargo_line
-            .replacen("{}", &human_size(in_total), 1)
-            .replacen("{}", &human_size(out_total), 1)
-            .replacen("{}", &diff_str, 1)
-            .replacen("{}", arrow, 1)
-            .replacen("{:.0}", &format!("{:.0}", pct_total), 1));
-    }
-    eprintln!("  {}", m.output_label.replacen("{}", &out_file.display().to_string(), 1));
-    eprintln!("  {}", random_funny_message());
-    HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
+    Some((out_file, out_total))
 }
 
-fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
-    let raw = fs::read(&entry.file)
-        .with_context(|| msg().err_read.replacen("{}", &entry.file.display().to_string(), 1))?;
-
-    let svg = if looks_like_svg(&raw) {
-        Some(parse_svg(&raw, Some(&entry.file))?)
-    } else { None };
-    let svg_render = svg
-        .as_ref()
-        .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
-
-    if !config.sharpen {
-        if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
-                return Ok(crate::pdf::PdfPage::Vector(vp));
-            }
+fn merge_output_dir(entries: &[InputEntry]) -> (PathBuf, PathBuf) {
+    let mut roots: Vec<&PathBuf> = Vec::new();
+    for e in entries {
+        if !roots.iter().any(|r| path_key(r) == path_key(&e.root)) {
+            roots.push(&e.root);
         }
     }
-
-    let jxl = JxlPrepared::prepare(&raw);
-    let need = if let Some(j) = &jxl {
-        compute_need_inner(&raw, j.dims().0, j.dims().1, false, config)
-    } else {
-        compute_need(&raw, svg.as_ref(), config)
-    };
-    let budget = mem_budget();
-    budget.acquire(need);
-    let _permit = MemPermit { budget, need };
-
-    let (img, _icc, _exif) = match jxl {
-        Some(j) => j
-            .decode()
-            .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
-        None => decode_image(
-            &raw,
-            None,
-            svg_render.map(|((w, h), _)| (w, h)),
-            svg.as_ref().map(|s| &s.tree),
-        )
-        .with_context(|| msg().err_decode.replacen("{}", &entry.file.display().to_string(), 1))?,
-    };
-    let img = if !looks_like_svg(&raw) && !is_heif(&raw) { auto_orient(img, &raw) } else { img };
-    let img = if config.grayscale { img.grayscale() } else { img };
-    let img = if let Some(ref size) = config.target_size {
-        let skip_resize = matches!(svg_render, Some((_, true)));
-        if skip_resize {
-            img
-        } else {
-            apply_resize(img, size)
-        }
-    } else { img };
-    let img = if config.sharpen { sharpen_par(img, 3) } else { img };
-    crate::pdf::make_page(&img, config)
-}
-
-fn merge_output_dir(entries: &[InputEntry]) -> PathBuf {
-    let grouped = group_by_root(entries);
-    let any_removable = grouped.keys().any(|r| is_on_removable_drive(r));
-    if any_removable {
-        return entries[0].root.clone();
-    }
-    if grouped.len() == 1 {
-        let root = grouped.keys().next().unwrap().clone();
-        let is_loose = entries.iter().all(|e| e.direct_file);
-        if is_loose {
-            return unique_output_dir(&root.join("SeaMaestroResized"));
-        }
-        let parent = root.parent().unwrap_or(&root).to_path_buf();
-        return unique_output_dir(&parent.join("SeaMaestroResized"));
-    }
-    let roots: Vec<&PathBuf> = grouped.keys().collect();
+    let any_removable = roots.iter().any(|r| is_on_removable_drive(*r));
     let common = find_common_parent(roots);
-    unique_output_dir(&common.join("SeaMaestroResized"))
+    let base_name = common
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("SeaMaestro"))
+        .to_string_lossy()
+        .to_string();
+    let parent = common.parent().unwrap_or(&common).to_path_buf();
+
+    let out_dir = if any_removable {
+        unique_output_dir(&exe_dir().join(format!("{}_Merged", base_name)))
+    } else {
+        unique_output_dir(&parent.join(format!("{}_Merged", base_name)))
+    };
+    (out_dir, common)
 }
 
-fn unique_pdf_file(dir: &Path, config: &Config) -> PathBuf {
+fn unique_merge_pdf(out_dir: &Path, rel: &str, config: &Config) -> PathBuf {
     let suffix = build_suffix(config);
-    let base = dir.join(format!("SeaMaestroMerged{}.pdf", suffix));
-    if !base.exists() { return base; }
+    let base = out_dir.join(format!("{}_Merged{}.pdf", rel, suffix));
+    if !fs_path(&base).exists() { return base; }
     let (y, mo, d, h, mi, s) = local_now();
     let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
-    let candidate = dir.join(format!("SeaMaestroMerged{}_{}.pdf", suffix, stamp));
-    if candidate.exists() {
-        return dir.join(format!("SeaMaestroMerged{}_{}_{}.pdf", suffix, stamp, fastrand::u32(100..999)));
+    let candidate = out_dir.join(format!("{}_Merged{}_{}.pdf", rel, suffix, stamp));
+    if fs_path(&candidate).exists() {
+        return out_dir.join(format!("{}_Merged{}_{}_{}.pdf", rel, suffix, stamp, fastrand::u32(100..999)));
     }
     candidate
 }

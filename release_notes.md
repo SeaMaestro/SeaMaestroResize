@@ -1,3 +1,31 @@
+## SeaMaestroResize v2.4.7
+
+## ✨ Improvements
+
+**`--merge` Path Compression** — merging a folder now writes one PDF per
+folder, rebuilding the source tree instead of one flat file. A shared prefix
+is dropped, branches with several children stay as real subfolders, and
+single-child paths fold into the PDF name (`Trip`/`Day1` →
+`Trip_Day1_q85.pdf`). Loose files at the root land at the output root.
+
+**Long paths & name cap** — output paths beyond 260 characters now work on
+Windows via the `\\?\` verbatim prefix, so deep source folders no longer fail
+with "path too long". Over-long merged PDF names are capped to ~120 characters
+with a `first_..._last_<hash>` pattern, keeping them readable and under the
+NTFS 255-character file-name limit.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+**VirusTotal** — TBD
+
+- SHA-256: TBD
+- Size: TBD (PE executable, 64-bit)
+
+---
+
 ## SeaMaestroResize v2.4.6
 
 ## ⚡ Performance

@@ -17,7 +17,8 @@ the whole workflow.
 - Drop a **folder with subfolders** → the whole tree is rebuilt under
   `SeaMaestroResized`, preserving the folder structure (each subfolder keeps its
   name with a `_Resized` suffix).
-- Drop onto a **merge-renamed exe** → one `SeaMaestroMerged{settings}.pdf`.
+- Drop onto a **merge-renamed exe** → one PDF per folder, rebuilding the tree
+  under a `*_Merged` folder with **Path Compression**.
 
 ## Features
 
@@ -31,9 +32,9 @@ the whole workflow.
   and SVG/SVGZ are rasterized at the target size, so vector sources scale to
   any size without pixelation.
 - **Convert** between WebP, JPEG, AVIF, JXL, PNG, ICO, TIFF, QOI, BMP, GIF.
-- **PDF output** — `--format pdf` writes one PDF per input; `--merge` combines
-  inputs into one sorted multi-page PDF. The merge streams to a temp file and
-  uses chunked parallel page generation, so memory stays constant.
+- **PDF output** — `--format pdf` writes one PDF per input; `--merge` writes
+  one PDF per folder and rebuilds the tree with **Path Compression**. Pages are
+  sorted, generated chunked and in parallel, so memory stays constant.
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
 - **Grayscale** (`--bw`) and **sharpen** (`--sharpen`).
 - **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF.
@@ -129,7 +130,7 @@ SeaMaestroResize [OPTIONS] <FILES...>
 | `--progressive` | Progressive JPEG |
 | `--sharpen` | Sharpen after resize (sigma=1.0, threshold=3) |
 | `--keep-exif` | Keep EXIF metadata (cleared by default) |
-| `--merge` | Combine all inputs into one sorted multi-page PDF (implies `--format pdf`) |
+| `--merge` | One PDF per folder, mirroring the tree (Path Compression; implies `--format pdf`) |
 | `--output <FILE>` | Output file name/path (single file only) |
 | `--no-pause` | Do not wait for Enter on exit |
 | `--shanty` | Sea shanties while working |
@@ -154,13 +155,19 @@ seamaestro --format pdf logo.svg
 ```text
 SeaMaestroResize --format pdf photo.jpg             → photo_q85.pdf
 SeaMaestroResize --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
-SeaMaestroResize --merge vacation_folder            → SeaMaestroMerged_q85.pdf
-SeaMaestroResize --merge --lossless --bw folder     → SeaMaestroMerged_bw.pdf
+SeaMaestroResize --merge vacation_folder            → vacation_folder_Merged\ (one PDF per folder)
+SeaMaestroResize --merge --lossless --bw folder     → folder_Merged\ (FlateDecode, grayscale)
 ```
 
 Single PDF keeps the normal output name, e.g. `photo_q85.pdf`.
-`--merge` forces PDF output, sorts inputs by path, and writes pages in sorted order.
-The merged PDF is written to a temp file first and renamed at the end, so an interrupted run leaves no half-written PDF behind.
+`--merge` rebuilds the folder tree next to the source: each folder becomes one
+PDF. **Path Compression** drops the shared prefix, keeps branches with several
+children as real subfolders, and folds single-child paths into the PDF name
+(`Trip`/`Day1` → `Trip_Day1_q85.pdf`). Over-long names are capped to ~120
+characters (`first_..._last_<hash>`), and paths beyond 260 characters are handled
+via the `\\?\` prefix. Pages are sorted, generated chunked and in parallel, and
+written to a temp file first, so an interrupted run leaves no half-written PDF
+behind.
 
 ## SVG & PDF
 
@@ -212,14 +219,14 @@ Rename the executable to bake in settings. Tokens may be separated by `_`,
 | `sharp` | Sharpen |
 | `exif` | Keep EXIF |
 | `shanty` | Sea shanties |
-| `merge` | Merge inputs into one PDF |
+| `merge` | One PDF per folder, mirroring the tree (Path Compression) |
 
 Examples:
 
 `SeaMaestroResize_q80_w800_webp.exe` — quality 80, 800px wide, WebP
 `SeaMaestroResize1920jpgq85_DE.exe` — 1920px wide, JPEG, quality 85, German language
 `SeaMaestroResize_w300_h300_png_bw.exe` — 300×300 cover crop, PNG, grayscale
-`SeaMaestroResize_merge.exe` — merge dropped files/folder into one PDF
+`SeaMaestroResize_merge.exe` — one PDF per folder, mirroring the tree
 
 ## EXIF behavior
 
