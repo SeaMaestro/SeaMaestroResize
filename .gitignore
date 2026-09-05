@@ -3,7 +3,8 @@
 .vscode/
 *.tmp
 *.log
-/vendor/
+/vendor/*
+!/vendor/libz-ng-sys/
 /releases/
 /.cargo/config.toml
 vector_tests/

@@ -50,3 +50,4 @@ winres = "0.1"
 
 [patch.crates-io]
 jxl-oxide = { git = "https://github.com/imazen/jxl-oxide.git", rev = "fd4e2c3e0947b8cbdd2b1022a8f951682d36ca02" }
+libz-ng-sys = { path = "vendor/libz-ng-sys" }
