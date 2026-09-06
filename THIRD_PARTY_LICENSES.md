@@ -81,21 +81,6 @@ This software is based in part on the work of the Independent JPEG Group.
 - License: BSD 3-Clause
 - Project: https://chromium.googlesource.com/webm/libwebp
 
-## rav1e — AV1 encoding (transitive, via ravif)
-
-- License: BSD 2-Clause
-- Project: https://github.com/xiph/rav1e
-
-## ravif — AVIF encoding (transitive, via image)
-
-- License: BSD 3-Clause
-- Project: https://github.com/kornelski/ravif
-
-## avif-serialize — AVIF container serialization (transitive, via ravif)
-
-- License: BSD 3-Clause
-- Project: https://github.com/kornelski/avif-serialize
-
 ## resvg / usvg — SVG rendering
 
 - License: Mozilla Public License 2.0 (MPL-2.0)
