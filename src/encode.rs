@@ -365,6 +365,7 @@ impl Drop for JxlRunnerGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, channels: u32, quality: u8, lossless: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     unsafe {
         let enc_ptr = JxlEncoderCreate(std::ptr::null());

@@ -411,10 +411,10 @@ fn probe_jxl_dims(raw: &[u8]) -> Option<(u32, u32)> {
                 JxlDecoderDestroy(dec);
                 return None;
             }
-            if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0 {
-                if JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS {
-                    break;
-                }
+            if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0
+                && JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS
+            {
+                break;
             }
             if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
                 break;
@@ -475,7 +475,7 @@ fn jxl_exif(raw: &[u8]) -> Option<Vec<u8>> {
                     }
                 }
             }
-            if status & JxlDecoderStatus_JXL_DEC_SUCCESS != 0 {
+            if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
                 break;
             }
         }
@@ -569,10 +569,10 @@ impl JxlPrepared {
                     JxlDecoderDestroy(dec);
                     return None;
                 }
-                if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0 {
-                    if JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS {
-                        break;
-                    }
+                if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0
+                    && JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS
+                {
+                    break;
                 }
                 if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
                     break;
@@ -601,6 +601,7 @@ impl JxlPrepared {
         (self.w, self.h)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn decode(self) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
         let Self { raw, w, h, grayscale, alpha } = self;
         unsafe {
