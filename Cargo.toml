@@ -19,6 +19,7 @@ mozjpeg = "0.10"
 mozjpeg-sys = { version = "2.2", features = ["icc_io"] }
 libc = "0.2"
 libavif-sys = { path = "vendor/libavif-sys" }
+libjxl-sys = { path = "vendor/libjxl-sys" }
 webp = "0.3"
 ravif = "0.13"
 oxipng = "10.2"

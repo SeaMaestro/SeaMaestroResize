@@ -23,6 +23,7 @@ dependencies = [
  "libavif-sys",
  "libc",
  "libheif-rs",
+ "libjxl-sys",
  "mimalloc",
  "mozjpeg",
  "mozjpeg-sys",
@@ -1525,6 +1526,14 @@ dependencies = [
  "system-deps",
  "vcpkg",
  "walkdir",
+]
+
+[[package]]
+name = "libjxl-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "vcpkg",
 ]
 
 [[package]]
