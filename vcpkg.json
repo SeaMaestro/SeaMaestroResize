@@ -1,12 +1,11 @@
 {
   "name": "seamaestroresize",
-  "version-string": "2.4.8",
+  "version-string": "2.4.9",
   "dependencies": [
     "pkgconf",
     {
       "name": "libheif",
-      "default-features": false,
-      "features": ["aom"]
+      "default-features": false
     },
     {
       "name": "libavif",

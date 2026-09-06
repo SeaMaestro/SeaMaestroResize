@@ -40,7 +40,7 @@ the whole workflow.
   (output lands next to the program).
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
 - **Grayscale** (`--bw`) and **sharpen** (`--sharpen`).
-- **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF.
+- **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF, AVIF.
 - **EXIF passthrough** (`--keep-exif`) with orientation normalization and
   resized pixel-dimension update; EXIF is cleared by default.
 - **Auto-rotation** from EXIF `Orientation`.
@@ -70,7 +70,7 @@ the whole workflow.
 
 **Metadata**
 
-- ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`.
+- ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`, `AVIF`.
 - EXIF is preserved only with `--keep-exif`, and only for `JPEG`, `PNG`,
   `WEBP`, `JXL`.
 
