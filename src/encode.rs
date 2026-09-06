@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::path::Path;
 use libavif_sys::*;
+use libjxl_sys::*;
 
 use crate::msg;
 use crate::Config;
@@ -344,35 +345,138 @@ fn encode_gif_to_vec(img: &image::DynamicImage) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
-fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, layout: jxl_encoder::PixelLayout, quality: u8, lossless: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
-    let mut metadata = icc.filter(|p| !p.is_empty()).map(|p| jxl_encoder::ImageMetadata::new().with_icc_profile(p));
-    if let Some(blob) = exif.filter(|e| !e.is_empty()) {
-        metadata = Some(metadata.unwrap_or_else(jxl_encoder::ImageMetadata::new).with_exif(blob));
-    }
-    if lossless {
-        let config = jxl_encoder::LosslessConfig::new().with_effort(5);
-        if let Some(meta) = &metadata {
-            config.encode_request(w, h, layout).with_metadata(meta).encode(raw)
-        } else {
-            config.encode_request(w, h, layout).encode(raw)
+struct JxlEncoderGuard(*mut JxlEncoder);
+
+impl Drop for JxlEncoderGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { JxlEncoderDestroy(self.0) };
         }
-        .map_err(|e| anyhow::anyhow!("JXL encode failed: {}", e))
-    } else {
-        let distance = jxl_encoder::quality_to_distance(quality.clamp(1, 100) as f32);
-        let config = jxl_encoder::LossyConfig::new(distance).with_effort(5);
-        if let Some(meta) = &metadata {
-            config.encode_request(w, h, layout).with_metadata(meta).encode(raw)
-        } else {
-            config.encode_request(w, h, layout).encode(raw)
-        }
-        .map_err(|e| anyhow::anyhow!("JXL encode failed: {}", e))
     }
-}fn encode_jxl_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
+}
+
+struct JxlRunnerGuard(*mut libc::c_void);
+
+impl Drop for JxlRunnerGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { JxlThreadParallelRunnerDestroy(self.0) };
+        }
+    }
+}
+
+fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, channels: u32, quality: u8, lossless: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
+    unsafe {
+        let enc_ptr = JxlEncoderCreate(std::ptr::null());
+        if enc_ptr.is_null() {
+            anyhow::bail!("JXL encode failed: JxlEncoderCreate returned NULL");
+        }
+        let runner_ptr = JxlThreadParallelRunnerCreate(std::ptr::null(), avif_threads());
+        if runner_ptr.is_null() {
+            JxlEncoderDestroy(enc_ptr);
+            anyhow::bail!("JXL encode failed: JxlThreadParallelRunnerCreate returned NULL");
+        }
+        let runner = JxlRunnerGuard(runner_ptr);
+        let enc = JxlEncoderGuard(enc_ptr);
+
+        let res = JxlEncoderSetParallelRunner(enc.0, Some(JxlThreadParallelRunner), runner.0);
+        if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+            anyhow::bail!("JXL encode failed: JxlEncoderSetParallelRunner: {}", res);
+        }
+
+        let mut info = std::mem::zeroed::<JxlBasicInfo>();
+        JxlEncoderInitBasicInfo(&mut info);
+        info.xsize = w;
+        info.ysize = h;
+        if channels == 1 {
+            info.num_color_channels = 1;
+        } else if channels == 4 {
+            info.num_extra_channels = 1;
+            info.alpha_bits = 8;
+        }
+        let res = JxlEncoderSetBasicInfo(enc.0, &info);
+        if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+            anyhow::bail!("JXL encode failed: JxlEncoderSetBasicInfo: {}", res);
+        }
+
+        if let Some(profile) = icc.filter(|p| !p.is_empty()) {
+            let res = JxlEncoderSetICCProfile(enc.0, profile.as_ptr(), profile.len());
+            if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+                anyhow::bail!("JXL encode failed: JxlEncoderSetICCProfile: {}", res);
+            }
+        }
+
+        let frame_settings = JxlEncoderFrameSettingsCreate(enc.0, std::ptr::null());
+        if frame_settings.is_null() {
+            anyhow::bail!("JXL encode failed: JxlEncoderFrameSettingsCreate returned NULL");
+        }
+        if lossless {
+            let res = JxlEncoderSetFrameLossless(frame_settings, JXL_TRUE as libc::c_int);
+            if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+                anyhow::bail!("JXL encode failed: JxlEncoderSetFrameLossless: {}", res);
+            }
+        } else {
+            let distance = JxlEncoderDistanceFromQuality(quality.clamp(1, 100) as f32);
+            let res = JxlEncoderSetFrameDistance(frame_settings, distance);
+            if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+                anyhow::bail!("JXL encode failed: JxlEncoderSetFrameDistance: {}", res);
+            }
+        }
+
+        if let Some(blob) = exif.filter(|e| !e.is_empty()) {
+            let res = JxlEncoderUseBoxes(enc.0);
+            if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+                anyhow::bail!("JXL encode failed: JxlEncoderUseBoxes: {}", res);
+            }
+            let box_type: [libc::c_char; 4] = [b'E' as libc::c_char, b'x' as libc::c_char, b'i' as libc::c_char, b'f' as libc::c_char];
+            let res = JxlEncoderAddBox(enc.0, &box_type, blob.as_ptr(), blob.len(), 0);
+            if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+                anyhow::bail!("JXL encode failed: JxlEncoderAddBox: {}", res);
+            }
+            JxlEncoderCloseBoxes(enc.0);
+        }
+
+        let pixel_format = JxlPixelFormat {
+            num_channels: channels,
+            data_type: JxlDataType_JXL_TYPE_UINT8,
+            endianness: JxlEndianness_JXL_NATIVE_ENDIAN,
+            align: 0,
+        };
+        let res = JxlEncoderAddImageFrame(frame_settings, &pixel_format, raw.as_ptr() as *const libc::c_void, raw.len());
+        if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
+            anyhow::bail!("JXL encode failed: JxlEncoderAddImageFrame: {}", res);
+        }
+
+        JxlEncoderCloseInput(enc.0);
+
+        let mut output: Vec<u8> = Vec::new();
+        let mut chunk = 64 * 1024usize;
+        loop {
+            let offset = output.len();
+            output.resize(offset + chunk, 0);
+            let mut next_out = output.as_mut_ptr().add(offset);
+            let mut avail_out = chunk;
+            let res = JxlEncoderProcessOutput(enc.0, &mut next_out, &mut avail_out);
+            let written = chunk - avail_out;
+            output.truncate(offset + written);
+            if res == JxlEncoderStatus_JXL_ENC_SUCCESS {
+                break;
+            }
+            if res == JxlEncoderStatus_JXL_ENC_ERROR {
+                anyhow::bail!("JXL encode failed: JxlEncoderProcessOutput: {}", res);
+            }
+            chunk = chunk.saturating_mul(2);
+        }
+        Ok(output)
+    }
+}
+
+fn encode_jxl_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     if let Some(gray) = img.as_luma8() {
-        return encode_jxl_raw(gray.as_raw(), gray.width(), gray.height(), jxl_encoder::PixelLayout::Gray8, quality, lossless, icc, exif);
+        return encode_jxl_raw(gray.as_raw(), gray.width(), gray.height(), 1, quality, lossless, icc, exif);
     }
     if let Some(rgb) = img.as_rgb8() {
-        return encode_jxl_raw(rgb.as_raw(), rgb.width(), rgb.height(), jxl_encoder::PixelLayout::Rgb8, quality, lossless, icc, exif);
+        return encode_jxl_raw(rgb.as_raw(), rgb.width(), rgb.height(), 3, quality, lossless, icc, exif);
     }
     let owned;
     let rgba_img: &image::RgbaImage = if let Some(rgba) = img.as_rgba8() {
@@ -381,7 +485,7 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, layout: jxl_encoder::PixelLayout, 
         owned = img.to_rgba8();
         &owned
     };
-    encode_jxl_raw(rgba_img.as_raw(), rgba_img.width(), rgba_img.height(), jxl_encoder::PixelLayout::Rgba8, quality, lossless, icc, exif)
+    encode_jxl_raw(rgba_img.as_raw(), rgba_img.width(), rgba_img.height(), 4, quality, lossless, icc, exif)
 }
 
 pub(crate) fn encode_pdf_jpeg(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
