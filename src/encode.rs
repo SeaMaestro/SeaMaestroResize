@@ -199,6 +199,22 @@ fn encode_avif_to_vec(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>>
     }
 }
 
+extern "C" {
+    fn svt_av1_set_log_callback(
+        cb: Option<unsafe extern "C" fn(*mut libc::c_void, libc::c_int, *const libc::c_char, *const libc::c_char, *mut libc::c_char)>,
+        ctx: *mut libc::c_void,
+    );
+}
+
+unsafe extern "C" fn noop_svt_log(
+    _ctx: *mut libc::c_void,
+    _level: libc::c_int,
+    _tag: *const libc::c_char,
+    _fmt: *const libc::c_char,
+    _args: *mut libc::c_char,
+) {
+}
+
 fn encode_avif_raw(
     pixels: &[u8],
     w: u32,
@@ -208,6 +224,7 @@ fn encode_avif_raw(
     quality: i32,
 ) -> Result<Vec<u8>> {
     unsafe {
+        svt_av1_set_log_callback(Some(noop_svt_log), std::ptr::null_mut());
         let encoder = avifEncoderCreate();
         if encoder.is_null() {
             anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifEncoderCreate returned NULL", 1));
