@@ -1428,7 +1428,8 @@ fn run_pipeline(
         Some(n) => ((native.0 * n / 8).max(1), (native.1 * n / 8).max(1)),
         None => native,
     };
-    let need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config);
+    let need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config)
+        .saturating_add(raw.len() as u64);
     let budget = mem_budget();
     budget.acquire(need);
     let _permit = MemPermit { budget, need };
@@ -1454,7 +1455,8 @@ fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
 }
 
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
-    let (raw, _file_permit) = read_input(input)?;
+    let (raw, file_permit) = read_input(input)?;
+    drop(file_permit);
 
     let out_path = if let Some(ref out) = config.output {
         PathBuf::from(out)
@@ -2172,7 +2174,8 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 }
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
-    let (raw, _file_permit) = read_input(&entry.file)?;
+    let (raw, file_permit) = read_input(&entry.file)?;
+    drop(file_permit);
 
     if let Some(page) = passthrough_jpeg_pdf(&raw, config) {
         return Ok(page);
