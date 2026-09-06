@@ -1942,27 +1942,19 @@ fn merge_chunk_len(total: usize, config: &Config) -> usize {
     n.clamp(1, total)
 }
 
-fn truncate_chars(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 fn cap_name_parts(parts: &[String]) -> String {
     const LIMIT: usize = 120;
+    const HEAD: usize = 55;
+    const TAIL: usize = 55;
     let full = parts.join("_");
-    if full.len() <= LIMIT {
+    let chars = full.chars().count();
+    if chars <= LIMIT {
         return full;
     }
-    let first = truncate_chars(parts.first().map(|s| s.as_str()).unwrap_or(""), 48);
-    let last = truncate_chars(parts.last().map(|s| s.as_str()).unwrap_or(""), 48);
+    let head: String = full.chars().take(HEAD).collect();
+    let tail: String = full.chars().skip(chars - TAIL).collect();
     let hash = crc32fast::hash(full.as_bytes());
-    format!("{}_..._{}_{:08x}", first, last, hash)
+    format!("{}_{:08x}_{}", head, hash, tail)
 }
 
 fn merge_path_plans(
@@ -1970,7 +1962,13 @@ fn merge_path_plans(
     common_base: &Path,
     out_dir: &Path,
 ) -> Vec<(usize, PathBuf, String)> {
-    let rels: Vec<(usize, Vec<String>)> = groups
+    let root_name = common_base
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let rels: Vec<(usize, Vec<String>, bool)> = groups
         .iter()
         .enumerate()
         .map(|(idx, g)| {
@@ -1979,22 +1977,23 @@ fn merge_path_plans(
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
                 .collect();
-            if comps.is_empty() {
-                comps.push(common_base.file_name().unwrap_or_default().to_string_lossy().to_string());
+            let is_root = comps.is_empty();
+            if is_root {
+                comps.push(root_name.clone());
             }
-            (idx, comps)
+            (idx, comps, is_root)
         })
         .collect();
 
     let common_len = {
         let mut bound = usize::MAX;
-        for (_, comps) in &rels {
+        for (_, comps, _) in &rels {
             bound = bound.min(comps.len().saturating_sub(1));
         }
         let mut cl = 0usize;
         'outer: while cl < bound {
             let c = &rels[0].1[cl];
-            for (_, comps) in &rels[1..] {
+            for (_, comps, _) in &rels[1..] {
                 if &comps[cl] != c {
                     break 'outer;
                 }
@@ -2005,7 +2004,7 @@ fn merge_path_plans(
     };
 
     let mut children: HashMap<Vec<String>, HashSet<String>> = HashMap::new();
-    for (_, comps) in &rels {
+    for (_, comps, _) in &rels {
         let path_len = comps.len().saturating_sub(1);
         let path = &comps[common_len..path_len];
         let leaf = comps.last().cloned().unwrap_or_default();
@@ -2017,7 +2016,7 @@ fn merge_path_plans(
     }
 
     let mut plans = Vec::with_capacity(rels.len());
-    for (idx, comps) in &rels {
+    for (idx, comps, is_root) in &rels {
         let path_len = comps.len().saturating_sub(1);
         let path = &comps[common_len..path_len];
         let leaf = comps.last().cloned().unwrap_or_default();
@@ -2045,6 +2044,15 @@ fn merge_path_plans(
         } else {
             name_parts.push(leaf.clone());
         }
+
+        if dir_parts.is_empty() {
+            if !is_root {
+                name_parts.insert(0, root_name.clone());
+            }
+        } else {
+            dir_parts[0] = format!("{}_{}", root_name, dir_parts[0]);
+        }
+
         let name = cap_name_parts(&name_parts);
         let dir = dir_parts.iter().fold(out_dir.to_path_buf(), |acc, d| acc.join(d));
         plans.push((*idx, dir, name));
