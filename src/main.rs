@@ -97,8 +97,8 @@ fn fs_path(p: &Path) -> PathBuf {
     if norm.len() < 248 {
         return p.to_path_buf();
     }
-    let out = if norm.starts_with("\\\\") {
-        format!(r"\\?\UNC\{}", &norm[2..])
+    let out = if let Some(stripped) = norm.strip_prefix("\\\\") {
+        format!(r"\\?\UNC\{}", stripped)
     } else {
         format!(r"\\?\{}", norm)
     };
@@ -208,7 +208,7 @@ static SHANTY_IDX: AtomicUsize = AtomicUsize::new(0);
 fn next_shanty() -> &'static str {
     let i = SHANTY_IDX.fetch_add(1, Ordering::Relaxed);
     let s = msg().shanties;
-    &s[i % s.len()]
+    s[i % s.len()]
 }
 
 static HAD_ERRORS: AtomicBool = AtomicBool::new(false);
@@ -470,15 +470,14 @@ fn run() -> Result<Config> {
 
         let entries = collect_input_files(&cli.files);
         let mut stdin_buf: Option<Vec<u8>> = None;
-        if entries.is_empty() {
-            if !std::io::stdin().is_terminal() {
+        if entries.is_empty()
+            && !std::io::stdin().is_terminal() {
                 let mut buf = Vec::new();
                 std::io::stdin().read_to_end(&mut buf)?;
                 if !buf.is_empty() {
                     stdin_buf = Some(buf);
                 }
             }
-        }
         if entries.is_empty() && stdin_buf.is_none() {
             eprintln!("  {}", msg().no_input_files);
             eprintln!("  {}\n", msg().drop_hint);
@@ -500,7 +499,7 @@ fn run() -> Result<Config> {
                 let out = PathBuf::from(config.output.as_deref().unwrap());
                 if let Some(parent) = out.parent() {
                     if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(&fs_path(parent))
+                        fs::create_dir_all(fs_path(parent))
                             .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
                     }
                 }
@@ -1072,7 +1071,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
                         stat_out.fetch_add(out_meta.len(), Ordering::Relaxed);
                     }
 
-                    let out_tuple = (input.clone(), result.map(|o| o.clone()).map_err(|e| format!("{}", e)), current);
+                    let out_tuple = (input.clone(), result.map_err(|e| format!("{}", e)), current);
                     let _ = tx.send((idx, out_tuple));
                 }
             });
@@ -1286,9 +1285,9 @@ fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decod
         (4, 128)
     } else if is_raw_bytes(raw) {
         (6, 128)
-    } else if raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP" {
-        (3, 64)
-    } else if raw.len() >= 24 && raw.starts_with(b"\x89PNG\r\n\x1a\n") {
+    } else if (raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP")
+        || (raw.len() >= 24 && raw.starts_with(b"\x89PNG\r\n\x1a\n"))
+    {
         (3, 64)
     } else {
         (1, 16)
@@ -1354,7 +1353,7 @@ fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orie
 fn ensure_dir(out: &Path) -> Result<()> {
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(&fs_path(parent))
+            fs::create_dir_all(fs_path(parent))
                 .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
         }
     }
@@ -1638,13 +1637,13 @@ fn unsharp_plane(buf: &mut [u8], w: usize, h: usize, ch: usize, threshold: i32) 
         let src_plane: &[u8] = buf;
         tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let src = &src_plane[y * stride..(y + 1) * stride];
-            for x in 0..w {
+            for (x, item) in row.iter_mut().enumerate().take(w) {
                 let mut acc = 0f32;
                 for (k, t) in taps.iter().enumerate() {
                     let xx = (x as isize + k as isize - r).clamp(0, (w - 1) as isize) as usize;
                     acc += src[xx * ch + c] as f32 * t;
                 }
-                row[x] = acc;
+                *item = acc;
             }
         });
         buf.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
@@ -1772,8 +1771,8 @@ fn banner(config: &Config) {
     let gray_str = if config.grayscale { m.on } else { m.off };
     let top = "═".repeat(62);
     eprintln!("  ╔{}╗", top);
-    eprintln!("  ║  {}{}  ║", pad_right(m.banner_title, 58), "");
-    eprintln!("  ║  {}{}  ║", pad_right(m.banner_tagline, 58), "");
+    eprintln!("  ║  {}  ║", pad_right(m.banner_title, 58));
+    eprintln!("  ║  {}  ║", pad_right(m.banner_tagline, 58));
     eprintln!("  ║  {}  ║", pad_right(&format!("{} Version: {}", m.banner_by, env!("CARGO_PKG_VERSION")), 58));
     eprintln!("  ║  {}  ║", pad_right("🖂  seamaestro@proton.me", 58));
     eprintln!("  ║  {}  ║", pad_right("⎇  https://github.com/SeaMaestro/SeaMaestroResize", 58));
@@ -1928,7 +1927,7 @@ fn group_by_parent<'a>(entries: &'a [InputEntry]) -> Vec<MergeGroup<'a>> {
         .into_iter()
         .map(|(dir, files)| MergeGroup { dir, files })
         .collect();
-    groups.sort_by(|a, b| path_key(&a.dir).cmp(&path_key(&b.dir)));
+    groups.sort_by_key(|a| path_key(&a.dir));
     groups
 }
 
@@ -2070,7 +2069,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 
     let out_dir: PathBuf = if let Some(o) = &config.output {
         let p = PathBuf::from(o);
-        if let Err(e) = fs::create_dir_all(&fs_path(&p)) {
+        if let Err(e) = fs::create_dir_all(fs_path(&p)) {
             eprintln!("  {}", msg().err_mkdir.replacen("{}", &p.display().to_string(), 1));
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
@@ -2078,7 +2077,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         }
         p
     } else {
-        if let Err(e) = fs::create_dir_all(&fs_path(&default_dir)) {
+        if let Err(e) = fs::create_dir_all(fs_path(&default_dir)) {
             eprintln!("  {}", msg().err_mkdir.replacen("{}", &default_dir.display().to_string(), 1));
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
@@ -2114,7 +2113,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let plans = merge_path_plans(&groups, &common_base, &out_dir);
 
     for (idx, dir, name) in &plans {
-        if let Err(e) = fs::create_dir_all(&fs_path(dir)) {
+        if let Err(e) = fs::create_dir_all(fs_path(dir)) {
             eprintln!("  {}", msg().err_mkdir.replacen("{}", &dir.display().to_string(), 1));
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
@@ -2199,6 +2198,7 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
     crate::pdf::make_page(&decoded.img, config)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn merge_group_to_pdf(
     group: &MergeGroup,
     out_dir: &Path,
@@ -2234,8 +2234,8 @@ fn merge_group_to_pdf(
         return None;
     }
 
-    let mut ordered: Vec<&InputEntry> = group.files.iter().copied().collect();
-    ordered.sort_by(|a, b| path_key(&a.file).cmp(&path_key(&b.file)));
+    let mut ordered: Vec<&InputEntry> = group.files.to_vec();
+    ordered.sort_by_key(|a| path_key(&a.file));
 
     let group_total = ordered.len();
     let chunk = merge_chunk_len(group_total, config);
@@ -2250,9 +2250,6 @@ fn merge_group_to_pdf(
         let task_idx = AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let task_idx = &task_idx;
-        let progress = progress;
-        let stat_in = stat_in;
-        let pb = pb;
         let out_name = out_name.as_str();
 
         std::thread::scope(|s| {
@@ -2395,7 +2392,7 @@ fn merge_output_dir(entries: &[InputEntry]) -> (PathBuf, PathBuf) {
             roots.push(&e.root);
         }
     }
-    let any_removable = roots.iter().any(|r| is_on_removable_drive(*r));
+    let any_removable = roots.iter().any(|r| is_on_removable_drive(r));
     let common = find_common_parent(roots);
     let parent = common.parent().unwrap_or(&common).to_path_buf();
 

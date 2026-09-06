@@ -48,11 +48,10 @@ unsafe fn run_scaled_decode(
     {
         let mut icc_ptr: *mut u8 = std::ptr::null_mut();
         let mut icc_len: c_uint = 0;
-        if jpeg_read_icc_profile(&mut dinfo, &mut icc_ptr, &mut icc_len) != 0 {
-            if !icc_ptr.is_null() && icc_len > 0 {
+        if jpeg_read_icc_profile(&mut dinfo, &mut icc_ptr, &mut icc_len) != 0
+            && !icc_ptr.is_null() && icc_len > 0 {
                 icc = Some(std::slice::from_raw_parts(icc_ptr, icc_len as usize).to_vec());
             }
-        }
         if !icc_ptr.is_null() {
             libc::free(icc_ptr as *mut libc::c_void);
         }

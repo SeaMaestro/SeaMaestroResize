@@ -136,7 +136,7 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if is_raw_bytes(raw) {
         return probe_raw_dims(raw);
     }
-    if raw.len() >= 6 && &raw[0..4] == [0, 0, 1, 0] {
+    if raw.len() >= 6 && raw[0..4] == [0, 0, 1, 0] {
         return ico_dims(raw);
     }
     None
@@ -742,6 +742,7 @@ impl JxlPrepared {
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn decode_image(
     raw: &[u8],
     path: Option<&Path>,
@@ -865,10 +866,11 @@ fn svg_font_db() -> Arc<fontdb::Database> {
 }
 
 fn svg_options(path: Option<&Path>) -> usvg::Options<'static> {
-    let mut opts = usvg::Options::default();
-    opts.fontdb = svg_font_db();
-    opts.resources_dir = path.and_then(|p| p.parent().map(Path::to_path_buf));
-    opts
+    usvg::Options {
+        fontdb: svg_font_db(),
+        resources_dir: path.and_then(|p| p.parent().map(Path::to_path_buf)),
+        ..Default::default()
+    }
 }
 
 pub(crate) fn looks_like_svg(raw: &[u8]) -> bool {
@@ -940,11 +942,10 @@ fn collect_node_raster_images(node: &usvg::Node, depth: usize, out: &mut Vec<(u3
     }
     let mut ok = true;
     node.subroots(|sub| {
-        if ok {
-            if collect_raster_images(sub, depth + 1, out).is_none() {
+        if ok
+            && collect_raster_images(sub, depth + 1, out).is_none() {
                 ok = false;
             }
-        }
     });
     if ok { Some(()) } else { None }
 }
@@ -1138,6 +1139,7 @@ pub fn decode_svg(
     Ok(image::DynamicImage::ImageRgba8(img))
 }
 
+#[allow(clippy::manual_checked_ops)]
 fn unpremultiply_rgba(buf: &mut [u8]) {
     for px in buf.chunks_exact_mut(4) {
         let a = px[3] as u32;
@@ -1146,9 +1148,9 @@ fn unpremultiply_rgba(buf: &mut [u8]) {
             px[1] = 0;
             px[2] = 0;
         } else {
-            for c in 0..3 {
-                let v = px[c] as u32;
-                px[c] = ((v * 255 + a / 2) / a) as u8;
+            for p in px.iter_mut().take(3) {
+                let v = *p as u32;
+                *p = ((v * 255 + a / 2) / a) as u8;
             }
         }
     }
@@ -1220,7 +1222,7 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
         _ => anyhow::bail!("{}", msg().err_heif_decode),
     };
 
-    Ok(img.context(msg().err_heif_decode)?)
+    img.context(msg().err_heif_decode)
 }
 
 // ── AVIF helpers (libavif-sys) ────────────────────────────────

@@ -79,6 +79,7 @@ pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Opt
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_mozjpeg(
     color_space: mozjpeg::ColorSpace,
     w: usize,
@@ -160,8 +161,8 @@ fn encode_webp_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, ic
         webp_encode(webp::Encoder::from_rgb(&rgb, w, h), q, lossless)?
     };
     let bytes = data.to_vec();
-    let has_icc = icc.map_or(false, |p| !p.is_empty());
-    let has_exif = exif.map_or(false, |e| !e.is_empty());
+    let has_icc = icc.is_some_and(|p| !p.is_empty());
+    let has_exif = exif.is_some_and(|e| !e.is_empty());
     if has_icc || has_exif {
         webp_embed_metadata(bytes, icc, exif, w, h, img.color().has_alpha())
     } else {
@@ -303,7 +304,7 @@ fn encode_png_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>, exif: Option
         let image = ico::IconImage::from_rgba_data(size, size, resized.into_raw());
         ico_dir.add_entry(ico::IconDirEntry::encode(&image).context(msg().err_ico_entry)?);
     }
-    if ico_dir.entries().len() == 0 {
+    if ico_dir.entries().is_empty() {
         let image = ico::IconImage::from_rgba_data(w, h, rgba.into_raw());
         ico_dir.add_entry(ico::IconDirEntry::encode(&image).context(msg().err_ico_entry)?);
     }
@@ -330,7 +331,7 @@ fn encode_qoi_to_vec(img: &image::DynamicImage) -> Result<Vec<u8>> {
     let rgba = img.to_rgba8();
     let w = rgba.width();
     let h = rgba.height();
-    qoi::encode_to_vec(&rgba.into_raw(), w, h).context(msg().err_qoi)
+    qoi::encode_to_vec(rgba.into_raw(), w, h).context(msg().err_qoi)
 }
 
 fn encode_bmp_to_vec(img: &image::DynamicImage) -> Result<Vec<u8>> {
