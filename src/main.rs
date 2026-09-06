@@ -385,7 +385,6 @@ fn main() -> std::process::ExitCode {
         default_hook(info);
     }));
 
-    jxl_oxide::integration::register_image_decoding_hook();
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);

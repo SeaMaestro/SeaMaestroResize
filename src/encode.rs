@@ -49,7 +49,7 @@ pub(crate) fn set_avif_threads(total_files: usize) {
     AVIF_THREADS.store(threads, Ordering::Relaxed);
 }
 
-fn avif_threads() -> usize {
+pub(crate) fn avif_threads() -> usize {
     let t = AVIF_THREADS.load(Ordering::Relaxed);
     if t == 0 {
         std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
