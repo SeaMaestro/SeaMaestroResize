@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::Path;
+use libavif_sys::*;
 
 use crate::msg;
 use crate::Config;
@@ -165,42 +166,95 @@ fn encode_webp_to_vec(img: &image::DynamicImage, quality: u8, lossless: bool, ic
     } else {
         Ok(bytes)
     }
-}fn encode_avif_to_vec(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
-    let q = quality.clamp(1, 100) as f32;
+}struct AvifEncoderGuard(*mut avifEncoder);
+
+impl Drop for AvifEncoderGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifEncoderDestroy(self.0) };
+        }
+    }
+}
+
+struct AvifImageGuard(*mut avifImage);
+
+impl Drop for AvifImageGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifImageDestroy(self.0) };
+        }
+    }
+}
+
+fn encode_avif_to_vec(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
+    let q = quality.clamp(1, 100) as i32;
     if img.color().has_alpha() {
-        let owned;
-        let rgba_img: &image::RgbaImage = if let Some(rgba) = img.as_rgba8() {
-            rgba
-        } else {
-            owned = img.to_rgba8();
-            &owned
-        };
-        let (w, h) = (rgba_img.width() as usize, rgba_img.height() as usize);
-        let pixels: &[rgb::RGBA8] = rgb::bytemuck::cast_slice(rgba_img.as_raw().as_slice());
-        let enc = ravif::Encoder::new()
-            .with_quality(q)
-            .with_speed(8)
-            .with_num_threads(Some(avif_threads()))
-            .encode_rgba(ravif::Img::new(pixels, w, h))
-            .map_err(|e| anyhow::anyhow!("{}", msg().err_avif.replacen("{}", &e.to_string(), 1)))?;
-        Ok(enc.avif_file)
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        encode_avif_raw(rgba.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGBA, 4, q)
     } else {
-        let owned;
-        let rgb_img: &image::RgbImage = if let Some(rgb) = img.as_rgb8() {
-            rgb
+        let rgb = img.to_rgb8();
+        let (w, h) = (rgb.width(), rgb.height());
+        encode_avif_raw(rgb.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGB, 3, q)
+    }
+}
+
+fn encode_avif_raw(
+    pixels: &[u8],
+    w: u32,
+    h: u32,
+    format: avifRGBFormat,
+    channels: u32,
+    quality: i32,
+) -> Result<Vec<u8>> {
+    unsafe {
+        let encoder = avifEncoderCreate();
+        if encoder.is_null() {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifEncoderCreate returned NULL", 1));
+        }
+        let encoder = AvifEncoderGuard(encoder);
+        (*encoder.0).codecChoice = avifCodecChoice_AVIF_CODEC_CHOICE_SVT;
+        (*encoder.0).speed = 8;
+        (*encoder.0).quality = quality;
+        (*encoder.0).qualityAlpha = quality;
+        (*encoder.0).maxThreads = avif_threads() as i32;
+
+        let image = avifImageCreate(w, h, 8, avifPixelFormat_AVIF_PIXEL_FORMAT_YUV444);
+        if image.is_null() {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifImageCreate returned NULL", 1));
+        }
+        let image = AvifImageGuard(image);
+        (*image.0).yuvRange = avifRange_AVIF_RANGE_FULL;
+        (*image.0).colorPrimaries = AVIF_COLOR_PRIMARIES_BT709 as u16;
+        (*image.0).transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_SRGB as u16;
+        (*image.0).matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT601 as u16;
+
+        let mut rgb = std::mem::zeroed::<avifRGBImage>();
+        avifRGBImageSetDefaults(&mut rgb, image.0);
+        rgb.format = format;
+        rgb.depth = 8;
+        rgb.pixels = pixels.as_ptr() as *mut u8;
+        rgb.rowBytes = w * channels;
+
+        let res = avifImageRGBToYUV(image.0, &rgb);
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifImageRGBToYUV: {}", res), 1));
+        }
+
+        let res = avifEncoderAddImage(encoder.0, image.0, 1, avifAddImageFlag_AVIF_ADD_IMAGE_FLAG_SINGLE as u32);
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifEncoderAddImage: {}", res), 1));
+        }
+
+        let mut output = std::mem::zeroed::<avifRWData>();
+        let res = avifEncoderFinish(encoder.0, &mut output);
+        let result = if res == avifResult_AVIF_RESULT_OK {
+            Ok(std::slice::from_raw_parts(output.data, output.size).to_vec())
         } else {
-            owned = img.to_rgb8();
-            &owned
+            Err(anyhow::anyhow!("{}", msg().err_avif.replacen("{}", &format!("avifEncoderFinish: {}", res), 1)))
         };
-        let (w, h) = (rgb_img.width() as usize, rgb_img.height() as usize);
-        let pixels: &[rgb::RGB8] = rgb::bytemuck::cast_slice(rgb_img.as_raw().as_slice());
-        let enc = ravif::Encoder::new()
-            .with_quality(q)
-            .with_speed(8)
-            .with_num_threads(Some(avif_threads()))
-            .encode_rgb(ravif::Img::new(pixels, w, h))
-            .map_err(|e| anyhow::anyhow!("{}", msg().err_avif.replacen("{}", &e.to_string(), 1)))?;
-        Ok(enc.avif_file)
+        avifRWDataFree(&mut output);
+        result
     }
 }
 
