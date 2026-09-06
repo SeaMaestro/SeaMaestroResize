@@ -1304,7 +1304,7 @@ fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decod
 
     let decode_need = decode_raster.saturating_mul(in_mult).saturating_add(in_oh * 1024 * 1024);
     let encode_need = target_raster.saturating_mul(out_mult).saturating_add(out_oh * 1024 * 1024);
-    decode_need.max(encode_need).saturating_add(raw.len() as u64)
+    decode_need.max(encode_need)
 }
 
 fn exif_orientation(raw: &[u8]) -> Option<u32> {
@@ -1333,14 +1333,6 @@ fn build_stages(config: &Config) -> Vec<Stage> {
     stages
 }
 
-fn resize_to(img: image::DynamicImage, target: (u32, u32)) -> image::DynamicImage {
-    if img.width() == target.0 && img.height() == target.1 {
-        img
-    } else {
-        resize_dynamic(img, target.0, target.1, ResizeOptions::new())
-    }
-}
-
 fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orient: bool, config: &Config, preflight: &Preflight) -> image::DynamicImage {
     for stage in stages {
         img = match stage {
@@ -1350,8 +1342,6 @@ fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orie
             Stage::Resize => {
                 if preflight.exact && img.width() == preflight.target.0 && img.height() == preflight.target.1 {
                     img
-                } else if preflight.exact {
-                    resize_to(img, preflight.target)
                 } else {
                     apply_resize(img, config.target_size.as_ref().unwrap())
                 }
@@ -1451,16 +1441,20 @@ fn run_pipeline(
 
 const MAX_INPUT_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
-fn read_input(path: &Path) -> Result<Vec<u8>> {
+fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
     let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if len > MAX_INPUT_SIZE {
         anyhow::bail!("{}", msg().err_too_large.replacen("{}", &path.display().to_string(), 1));
     }
-    fs::read(path).with_context(|| msg().err_read.replacen("{}", &path.display().to_string(), 1))
+    let budget = mem_budget();
+    budget.acquire(len);
+    let permit = MemPermit { budget, need: len };
+    let raw = fs::read(path).with_context(|| msg().err_read.replacen("{}", &path.display().to_string(), 1))?;
+    Ok((raw, permit))
 }
 
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
-    let raw = read_input(input)?;
+    let (raw, _file_permit) = read_input(input)?;
 
     let out_path = if let Some(ref out) = config.output {
         PathBuf::from(out)
@@ -2170,7 +2164,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 }
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
-    let raw = read_input(&entry.file)?;
+    let (raw, _file_permit) = read_input(&entry.file)?;
 
     if let Some(page) = passthrough_jpeg_pdf(&raw, config) {
         return Ok(page);

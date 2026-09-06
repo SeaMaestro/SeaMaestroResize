@@ -125,6 +125,9 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if raw.len() >= 8 && (raw.starts_with(b"II*\0") || raw.starts_with(b"MM\0*")) {
         return tiff_dims(raw);
     }
+    if is_raw_bytes(raw) {
+        return probe_raw_dims(raw);
+    }
     if raw.len() >= 6 && &raw[0..4] == [0, 0, 1, 0] {
         return ico_dims(raw);
     }
@@ -187,6 +190,12 @@ fn tiff_dims(raw: &[u8]) -> Option<(u32, u32)> {
         else if tag == 0x0101 { h = Some(val); }
     }
     Some((w?, h?))
+}
+
+fn probe_raw_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    let source = rawler::rawsource::RawSource::new_from_slice(raw);
+    let rawimage = rawler::decode_dummy(&source).ok()?;
+    Some((rawimage.width as u32, rawimage.height as u32))
 }
 
 fn ico_dims(raw: &[u8]) -> Option<(u32, u32)> {
