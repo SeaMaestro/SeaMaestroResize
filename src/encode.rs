@@ -252,7 +252,7 @@ fn encode_avif_raw(
         avifRGBImageSetDefaults(&mut rgb, image.0);
         rgb.format = format;
         rgb.depth = 8;
-        rgb.pixels = pixels.as_ptr() as *mut u8;
+        rgb.pixels = pixels.as_ptr().cast_mut();
         rgb.rowBytes = w * channels;
 
         let res = avifImageRGBToYUV(image.0, &rgb);
