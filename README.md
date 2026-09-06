@@ -96,7 +96,7 @@ $env:PKG_CONFIG = "pkgconf"
 $env:PKG_CONFIG_PATH = "$vcpkg\installed\x64-windows-static\lib\pkgconfig"
 
 # Build manifest dependencies (static triplet)
-& "$vcpkg\vcpkg.exe" install --triplet x64-windows-static
+& "$vcpkg\vcpkg.exe" install --triplet x64-windows-static --x-install-root="$vcpkg\installed"
 
 # pkgconf from the vcpkg manifest must be discoverable
 $env:Path = "$vcpkg\installed\x64-windows-static\tools\pkgconf;$env:Path"
