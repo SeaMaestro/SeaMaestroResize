@@ -585,8 +585,8 @@ pub(crate) fn decode_image(
         }
     }
     if is_avif(raw) {
-        if let Ok(img) = decode_avif(raw) {
-            return Ok((img, None, exif));
+        if let Ok((img, icc)) = decode_avif(raw) {
+            return Ok((img, icc, exif));
         }
     }
     if let Ok((img, icc)) = decode_with_limits(raw) {
@@ -1076,24 +1076,30 @@ pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-fn decode_avif(buf: &[u8]) -> Result<image::DynamicImage> {
+fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>)> {
     unsafe {
         let decoder = avifDecoderCreate();
         if decoder.is_null() {
-            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifDecoderCreate returned NULL", 1));
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", "avifDecoderCreate returned NULL", 1));
         }
         let decoder = AvifDecoderGuard(decoder);
 
         let image = avifImageCreateEmpty();
         if image.is_null() {
-            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifImageCreateEmpty returned NULL", 1));
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", "avifImageCreateEmpty returned NULL", 1));
         }
         let image = AvifImageGuard(image);
 
         let res = avifDecoderReadMemory(decoder.0, image.0, buf.as_ptr(), buf.len());
         if res != avifResult_AVIF_RESULT_OK {
-            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifDecoderReadMemory: {}", res), 1));
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", &format!("avifDecoderReadMemory: {}", res), 1));
         }
+
+        let icc = if (*image.0).icc.size > 0 && !(*image.0).icc.data.is_null() {
+            Some(std::slice::from_raw_parts((*image.0).icc.data, (*image.0).icc.size).to_vec())
+        } else {
+            None
+        };
 
         let w = (*image.0).width;
         let h = (*image.0).height;
@@ -1116,18 +1122,19 @@ fn decode_avif(buf: &[u8]) -> Result<image::DynamicImage> {
 
         let res = avifImageYUVToRGB(image.0, &rgb);
         if res != avifResult_AVIF_RESULT_OK {
-            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifImageYUVToRGB: {}", res), 1));
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", &format!("avifImageYUVToRGB: {}", res), 1));
         }
 
-        if has_alpha {
+        let img = if has_alpha {
             image::RgbaImage::from_raw(w, h, pixels)
                 .map(image::DynamicImage::ImageRgba8)
-                .context(msg().err_avif)
+                .context(msg().err_avif_decode)?
         } else {
             image::RgbImage::from_raw(w, h, pixels)
                 .map(image::DynamicImage::ImageRgb8)
-                .context(msg().err_avif)
-        }
+                .context(msg().err_avif_decode)?
+        };
+        Ok((img, icc))
     }
 }
 
