@@ -262,14 +262,18 @@ scanned with VirusTotal before upload; Windows SmartScreen may show an
 ## Third-party codecs
 
 This project links several codec libraries, each under its own license
-(mostly permissive BSD/MIT/Apache): libwebp, mozjpeg, rav1e (ravif),
-jxl-oxide, oxipng, and others.
+(mostly permissive BSD/MIT/Apache): libjxl, libavif, libheif, libde265,
+libwebp, mozjpeg (libjpeg-turbo), dav1d, svt-av1, oxipng, zune-jpeg,
+and others.
 
-HEIC/HEIF support uses libheif, which is licensed under LGPL-3.0.
+HEIC/HEIF support uses libheif and libde265, both licensed under LGPL-3.0.
 When distributing the binary you must comply with LGPL-3.0 — in particular,
-make the libheif source available and allow relinking.
+make the libheif and libde265 source available and allow relinking.
 
 mimalloc (MIT) is used as the global allocator.
+
+The full list of third-party licenses is in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## Author
 
