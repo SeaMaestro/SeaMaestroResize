@@ -219,7 +219,7 @@ fn encode_avif_raw(
         (*encoder.0).qualityAlpha = quality;
         (*encoder.0).maxThreads = avif_threads() as i32;
 
-        let image = avifImageCreate(w, h, 8, avifPixelFormat_AVIF_PIXEL_FORMAT_YUV444);
+        let image = avifImageCreate(w, h, 8, avifPixelFormat_AVIF_PIXEL_FORMAT_YUV420);
         if image.is_null() {
             anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifImageCreate returned NULL", 1));
         }
