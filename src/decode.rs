@@ -5,6 +5,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use flate2::read::GzDecoder;
 use image::ImageDecoder;
+use libavif_sys::*;
 
 use crate::msg;
 use crate::usable_ram;
@@ -114,6 +115,11 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     }
     if raw.len() >= 12 && &raw[4..12] == b"ftypcrx " {
         return bmff_tkhd_dims(raw);
+    }
+    if is_avif(raw) {
+        if let Some(d) = probe_avif_dims(raw) {
+            return Some(d);
+        }
     }
     if raw.len() >= 12 && &raw[4..8] == b"ftyp" {
         if let Ok(ctx) = libheif_rs::HeifContext::read_from_bytes(raw) {
@@ -578,6 +584,11 @@ pub(crate) fn decode_image(
             return Ok((img, None, exif));
         }
     }
+    if is_avif(raw) {
+        if let Ok(img) = decode_avif(raw) {
+            return Ok((img, None, exif));
+        }
+    }
     if let Ok((img, icc)) = decode_with_limits(raw) {
         return Ok((img, icc, exif));
     }
@@ -1014,6 +1025,110 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
     };
 
     Ok(img.context(msg().err_heif_decode)?)
+}
+
+// ── AVIF helpers (libavif-sys) ────────────────────────────────
+
+struct AvifDecoderGuard(*mut avifDecoder);
+
+impl Drop for AvifDecoderGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifDecoderDestroy(self.0) };
+        }
+    }
+}
+
+struct AvifImageGuard(*mut avifImage);
+
+impl Drop for AvifImageGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifImageDestroy(self.0) };
+        }
+    }
+}
+
+pub(crate) fn is_avif(buf: &[u8]) -> bool {
+    buf.len() >= 12 && (&buf[4..12] == b"ftypavif" || &buf[4..12] == b"ftypavis")
+}
+
+pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
+    unsafe {
+        let decoder = avifDecoderCreate();
+        if decoder.is_null() {
+            return None;
+        }
+        let decoder = AvifDecoderGuard(decoder);
+        let res = avifDecoderSetIOMemory(decoder.0, buf.as_ptr(), buf.len());
+        if res != avifResult_AVIF_RESULT_OK {
+            return None;
+        }
+        let res = avifDecoderParse(decoder.0);
+        if res != avifResult_AVIF_RESULT_OK {
+            return None;
+        }
+        let image = (*decoder.0).image;
+        if image.is_null() {
+            return None;
+        }
+        Some(((*image).width, (*image).height))
+    }
+}
+
+fn decode_avif(buf: &[u8]) -> Result<image::DynamicImage> {
+    unsafe {
+        let decoder = avifDecoderCreate();
+        if decoder.is_null() {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifDecoderCreate returned NULL", 1));
+        }
+        let decoder = AvifDecoderGuard(decoder);
+
+        let image = avifImageCreateEmpty();
+        if image.is_null() {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifImageCreateEmpty returned NULL", 1));
+        }
+        let image = AvifImageGuard(image);
+
+        let res = avifDecoderReadMemory(decoder.0, image.0, buf.as_ptr(), buf.len());
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifDecoderReadMemory: {}", res), 1));
+        }
+
+        let w = (*image.0).width;
+        let h = (*image.0).height;
+        let has_alpha = !(*image.0).alphaPlane.is_null();
+        let channels: u32 = if has_alpha { 4 } else { 3 };
+
+        let mut rgb = std::mem::zeroed::<avifRGBImage>();
+        avifRGBImageSetDefaults(&mut rgb, image.0);
+        rgb.depth = 8;
+        rgb.format = if has_alpha {
+            avifRGBFormat_AVIF_RGB_FORMAT_RGBA
+        } else {
+            avifRGBFormat_AVIF_RGB_FORMAT_RGB
+        };
+        rgb.rowBytes = w * channels;
+
+        let size = (w as usize) * (h as usize) * (channels as usize);
+        let mut pixels = vec![0u8; size];
+        rgb.pixels = pixels.as_mut_ptr();
+
+        let res = avifImageYUVToRGB(image.0, &rgb);
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifImageYUVToRGB: {}", res), 1));
+        }
+
+        if has_alpha {
+            image::RgbaImage::from_raw(w, h, pixels)
+                .map(image::DynamicImage::ImageRgba8)
+                .context(msg().err_avif)
+        } else {
+            image::RgbImage::from_raw(w, h, pixels)
+                .map(image::DynamicImage::ImageRgb8)
+                .context(msg().err_avif)
+        }
+    }
 }
 
 // ── RAW helpers ───────────────────────────────────────────────
