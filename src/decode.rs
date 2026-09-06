@@ -1120,7 +1120,7 @@ fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>)> {
         let mut pixels = vec![0u8; size];
         rgb.pixels = pixels.as_mut_ptr();
 
-        let res = avifImageYUVToRGB(image.0, &rgb);
+        let res = avifImageYUVToRGB(image.0, &mut rgb);
         if res != avifResult_AVIF_RESULT_OK {
             anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", &format!("avifImageYUVToRGB: {}", res), 1));
         }
