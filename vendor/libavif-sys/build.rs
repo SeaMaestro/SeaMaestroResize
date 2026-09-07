@@ -16,7 +16,18 @@ fn main() {
     }
 }
 
+fn ensure_vcpkg_updates_dir() {
+    if let Ok(root) = std::env::var("VCPKG_ROOT") {
+        let dir = std::path::Path::new(&root)
+            .join("installed")
+            .join("vcpkg")
+            .join("updates");
+        let _ = std::fs::create_dir_all(dir);
+    }
+}
+
 fn find_libavif() -> Vec<PathBuf> {
+    ensure_vcpkg_updates_dir();
     vcpkg::Config::new()
         .emit_includes(true)
         .find_package("libavif")
