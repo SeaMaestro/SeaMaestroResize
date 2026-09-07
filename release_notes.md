@@ -14,7 +14,10 @@ default output format.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-**VirusTotal** — TBD
+**VirusTotal** — clean: 0/70 security vendors flagged the file.
+
+- SHA-256: `a8c4540fd9dbf782f07e48731de8f8d07a16fd800dd969253eb0f0fe30185d48`
+- Size: 33.19 MB (PE executable, 64-bit)
 
 ---
 
@@ -52,7 +55,10 @@ extracts EXIF on decode (previously dropped on both ends).
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-**VirusTotal** — TBD
+**VirusTotal** — clean: 0/71 security vendors flagged the file.
+
+- SHA-256: `451f2515cb77b65d366d0f6b28c50ef19ccfba9fcc21456cd05f3ef1287585b2`
+- Size: 33.17 MB (PE executable, 64-bit)
 
 ---
 
@@ -99,7 +105,10 @@ embedding computes its CRC incrementally (no temporary buffer).
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-**VirusTotal** — TBD
+**VirusTotal** — clean: 0/71 security vendors flagged the file.
+
+- SHA-256: `da0012886948435e3fa5c5d83b0e2f40af6e56565b105a8aab993e162240847a`
+- Size: 35.91 MB (PE executable, 64-bit)
 
 ---
 
@@ -134,7 +143,7 @@ during processing instead of only at the end.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-**VirusTotal** — TBD
+**VirusTotal** — clean: 0/70 security vendors flagged the file.
 
 - SHA-256: `98a2628aea155862ced52ccd9d679868e8d4edcfac2434c4507ffa2fe8935c4a`
 - Size: 35.56 MB (PE executable, 64-bit)
