@@ -36,6 +36,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: v2-${{ hashFiles('vcpkg.json') }}
           cache-all-crates: "true"
 
       - name: Cache vcpkg
