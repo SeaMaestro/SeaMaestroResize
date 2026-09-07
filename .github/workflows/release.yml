@@ -42,9 +42,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-installed-v2-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
+          key: vcpkg-installed-v3-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
           restore-keys: |
-            vcpkg-installed-${{ runner.os }}-x64-windows-static-
+            vcpkg-installed-v3-${{ runner.os }}-x64-windows-static-
 
       - name: Install vcpkg dependencies
         run: vcpkg install --triplet x64-windows-static --x-install-root="C:\vcpkg\installed"
