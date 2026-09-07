@@ -1917,11 +1917,11 @@ struct MergeGroup<'a> {
     files: Vec<&'a InputEntry>,
 }
 
-fn group_by_parent<'a>(entries: &'a [InputEntry]) -> Vec<MergeGroup<'a>> {
+fn group_by_parent<'a>(entries: &[&'a InputEntry]) -> Vec<MergeGroup<'a>> {
     let mut map: HashMap<PathBuf, Vec<&'a InputEntry>> = HashMap::new();
     for e in entries {
         let parent = e.file.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-        map.entry(parent).or_default().push(e);
+        map.entry(parent).or_default().push(*e);
     }
     let mut groups: Vec<MergeGroup<'a>> = map
         .into_iter()
@@ -2064,27 +2064,20 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
 
-    let groups = group_by_parent(entries);
-    let (default_dir, common_base) = merge_output_dir(entries);
+    let mut by_root: std::collections::BTreeMap<PathBuf, Vec<&InputEntry>> = std::collections::BTreeMap::new();
+    for e in entries {
+        by_root.entry(e.root.clone()).or_default().push(e);
+    }
 
-    let out_dir: PathBuf = if let Some(o) = &config.output {
-        let p = PathBuf::from(o);
-        if let Err(e) = fs::create_dir_all(fs_path(&p)) {
-            eprintln!("  {}", msg().err_mkdir.replacen("{}", &p.display().to_string(), 1));
+    let global_out_dir = config.output.as_ref().map(PathBuf::from);
+    if let Some(out) = &global_out_dir {
+        if let Err(e) = fs::create_dir_all(fs_path(out)) {
+            eprintln!("  {}", msg().err_mkdir.replacen("{}", &out.display().to_string(), 1));
             eprintln!("  {:#}", e);
             HAD_ERRORS.store(true, Ordering::Relaxed);
             return;
         }
-        p
-    } else {
-        if let Err(e) = fs::create_dir_all(fs_path(&default_dir)) {
-            eprintln!("  {}", msg().err_mkdir.replacen("{}", &default_dir.display().to_string(), 1));
-            eprintln!("  {:#}", e);
-            HAD_ERRORS.store(true, Ordering::Relaxed);
-            return;
-        }
-        default_dir
-    };
+    }
 
     captain_log(total);
 
@@ -2110,19 +2103,51 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let stat_out = AtomicU64::new(0);
     let mut error_list: Vec<(String, String)> = Vec::new();
 
-    let plans = merge_path_plans(&groups, &common_base, &out_dir);
+    let mut base_to_unique: HashMap<PathBuf, PathBuf> = HashMap::new();
 
-    for (idx, dir, name) in &plans {
-        if let Err(e) = fs::create_dir_all(fs_path(dir)) {
-            eprintln!("  {}", msg().err_mkdir.replacen("{}", &dir.display().to_string(), 1));
-            eprintln!("  {:#}", e);
-            HAD_ERRORS.store(true, Ordering::Relaxed);
-            continue;
-        }
-        if let Some((_path, size)) = merge_group_to_pdf(
-            &groups[*idx], dir, name, config, &pb, &progress, &stat_in, total, &mut error_list,
-        ) {
-            stat_out.fetch_add(size, Ordering::Relaxed);
+    for (root, root_entries) in &by_root {
+        let out_dir = if let Some(out) = &global_out_dir {
+            out.clone()
+        } else {
+            let any_removable = is_on_removable_drive(root);
+            let is_loose = root_entries.iter().all(|e| e.direct_file);
+            let base_dir = if any_removable {
+                exe_dir().join("SeaMaestro_Merged")
+            } else if is_loose {
+                root.join("SeaMaestro_Merged")
+            } else {
+                root.parent().unwrap_or(root).join("SeaMaestro_Merged")
+            };
+
+            let unique = base_to_unique.entry(base_dir.clone()).or_insert_with(|| {
+                unique_output_dir(&base_dir)
+            });
+
+            if let Err(e) = fs::create_dir_all(fs_path(unique)) {
+                eprintln!("  {}", msg().err_mkdir.replacen("{}", &unique.display().to_string(), 1));
+                eprintln!("  {:#}", e);
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                continue;
+            }
+            unique.clone()
+        };
+
+        let groups = group_by_parent(root_entries);
+        let common_base = root.clone();
+        let plans = merge_path_plans(&groups, &common_base, &out_dir);
+
+        for (idx, dir, name) in &plans {
+            if let Err(e) = fs::create_dir_all(fs_path(dir)) {
+                eprintln!("  {}", msg().err_mkdir.replacen("{}", &dir.display().to_string(), 1));
+                eprintln!("  {:#}", e);
+                HAD_ERRORS.store(true, Ordering::Relaxed);
+                continue;
+            }
+            if let Some((_path, size)) = merge_group_to_pdf(
+                &groups[*idx], dir, name, config, &pb, &progress, &stat_in, total, &mut error_list,
+            ) {
+                stat_out.fetch_add(size, Ordering::Relaxed);
+            }
         }
     }
 
@@ -2166,7 +2191,18 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             .replacen("{}", arrow, 1)
             .replacen("{:.0}", &format!("{:.0}", pct_total), 1));
     }
-    eprintln!("  {}", m.output_label.replacen("{}", &out_dir.display().to_string(), 1));
+
+    let mut printed_dirs = HashSet::new();
+    if let Some(out) = &global_out_dir {
+        eprintln!("  {}", m.output_label.replacen("{}", &out.display().to_string(), 1));
+    } else {
+        for unique in base_to_unique.values() {
+            if printed_dirs.insert(unique.clone()) {
+                eprintln!("  {}", m.output_label.replacen("{}", &unique.display().to_string(), 1));
+            }
+        }
+    }
+
     eprintln!("  {}", random_funny_message());
     HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
 }
@@ -2385,24 +2421,7 @@ fn merge_group_to_pdf(
     Some((out_file, out_total))
 }
 
-fn merge_output_dir(entries: &[InputEntry]) -> (PathBuf, PathBuf) {
-    let mut roots: Vec<&PathBuf> = Vec::new();
-    for e in entries {
-        if !roots.iter().any(|r| path_key(r) == path_key(&e.root)) {
-            roots.push(&e.root);
-        }
-    }
-    let any_removable = roots.iter().any(|r| is_on_removable_drive(r));
-    let common = find_common_parent(roots);
-    let parent = common.parent().unwrap_or(&common).to_path_buf();
 
-    let out_dir = if any_removable {
-        unique_output_dir(&exe_dir().join("SeaMaestro_Merged"))
-    } else {
-        unique_output_dir(&parent.join("SeaMaestro_Merged"))
-    };
-    (out_dir, common)
-}
 
 fn unique_merge_pdf(out_dir: &Path, rel: &str, config: &Config) -> PathBuf {
     let suffix = build_suffix(config);
