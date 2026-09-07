@@ -5,7 +5,10 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use flate2::read::GzDecoder;
 use image::ImageDecoder;
+use libavif_sys::*;
+use libjxl_sys::*;
 
+use crate::encode::avif_threads;
 use crate::msg;
 use crate::usable_ram;
 use crate::util::{read16, read32};
@@ -107,13 +110,18 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if raw.len() >= 30 && raw.starts_with(b"RIFF") && &raw[8..12] == b"WEBP" {
         return webp_dims(raw);
     }
-    if (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A]) {
-        if let Ok(image) = jxl_oxide::JxlImage::builder().read(std::io::Cursor::new(raw)) {
-            return Some((image.width(), image.height()));
+    if is_jxl(raw) {
+        if let Some(d) = probe_jxl_dims(raw) {
+            return Some(d);
         }
     }
     if raw.len() >= 12 && &raw[4..12] == b"ftypcrx " {
         return bmff_tkhd_dims(raw);
+    }
+    if is_avif(raw) {
+        if let Some(d) = probe_avif_dims(raw) {
+            return Some(d);
+        }
     }
     if raw.len() >= 12 && &raw[4..8] == b"ftyp" {
         if let Ok(ctx) = libheif_rs::HeifContext::read_from_bytes(raw) {
@@ -125,7 +133,10 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if raw.len() >= 8 && (raw.starts_with(b"II*\0") || raw.starts_with(b"MM\0*")) {
         return tiff_dims(raw);
     }
-    if raw.len() >= 6 && &raw[0..4] == [0, 0, 1, 0] {
+    if is_raw_bytes(raw) {
+        return probe_raw_dims(raw);
+    }
+    if raw.len() >= 6 && raw[0..4] == [0, 0, 1, 0] {
         return ico_dims(raw);
     }
     None
@@ -187,6 +198,12 @@ fn tiff_dims(raw: &[u8]) -> Option<(u32, u32)> {
         else if tag == 0x0101 { h = Some(val); }
     }
     Some((w?, h?))
+}
+
+fn probe_raw_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    let source = rawler::rawsource::RawSource::new_from_slice(raw);
+    let rawimage = rawler::decode_dummy(&source).ok()?;
+    Some((rawimage.width as u32, rawimage.height as u32))
 }
 
 fn ico_dims(raw: &[u8]) -> Option<(u32, u32)> {
@@ -370,15 +387,107 @@ fn webp_exif(raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+fn probe_jxl_dims(raw: &[u8]) -> Option<(u32, u32)> {
+    unsafe {
+        let dec = JxlDecoderCreate(std::ptr::null());
+        if dec.is_null() {
+            return None;
+        }
+        let res = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus_JXL_DEC_BASIC_INFO);
+        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+            JxlDecoderDestroy(dec);
+            return None;
+        }
+        let res = JxlDecoderSetInput(dec, raw.as_ptr(), raw.len());
+        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+            JxlDecoderDestroy(dec);
+            return None;
+        }
+        JxlDecoderCloseInput(dec);
+        let mut info = std::mem::zeroed::<JxlBasicInfo>();
+        loop {
+            let status = JxlDecoderProcessInput(dec);
+            if status == JxlDecoderStatus_JXL_DEC_ERROR {
+                JxlDecoderDestroy(dec);
+                return None;
+            }
+            if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0
+                && JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS
+            {
+                break;
+            }
+            if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
+                break;
+            }
+        }
+        let w = info.xsize;
+        let h = info.ysize;
+        JxlDecoderDestroy(dec);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        Some((w, h))
+    }
+}
+
 fn jxl_exif(raw: &[u8]) -> Option<Vec<u8>> {
-    use jxl_oxide::{AuxBoxData, JxlImage};
-    let image = JxlImage::builder().read(std::io::Cursor::new(raw)).ok()?;
-    let raw_exif = match image.aux_boxes().first_exif().ok()? {
-        AuxBoxData::Data(r) => r,
-        _ => return None,
-    };
-    let off = raw_exif.tiff_header_offset() as usize;
-    Some(raw_exif.payload().get(off..)?.to_vec())
+    unsafe {
+        let dec = JxlDecoderCreate(std::ptr::null());
+        if dec.is_null() {
+            return None;
+        }
+        let res = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus_JXL_DEC_BOX);
+        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+            JxlDecoderDestroy(dec);
+            return None;
+        }
+        let res = JxlDecoderSetInput(dec, raw.as_ptr(), raw.len());
+        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+            JxlDecoderDestroy(dec);
+            return None;
+        }
+        JxlDecoderCloseInput(dec);
+
+        let mut box_buf: Vec<u8> = Vec::new();
+        loop {
+            let status = JxlDecoderProcessInput(dec);
+            if status == JxlDecoderStatus_JXL_DEC_ERROR {
+                break;
+            }
+            if status & JxlDecoderStatus_JXL_DEC_BOX != 0 {
+                let mut box_type = [0i8; 4];
+                if JxlDecoderGetBoxType(dec, &mut box_type, JXL_FALSE as libc::c_int)
+                    == JxlDecoderStatus_JXL_DEC_SUCCESS
+                {
+                    let exif_type: [libc::c_char; 4] = [
+                        b'E' as libc::c_char,
+                        b'x' as libc::c_char,
+                        b'i' as libc::c_char,
+                        b'f' as libc::c_char,
+                    ];
+                    if box_type == exif_type {
+                        let mut box_size: u64 = 0;
+                        JxlDecoderGetBoxSizeContents(dec, &mut box_size);
+                        box_buf = vec![0u8; box_size as usize];
+                        JxlDecoderSetBoxBuffer(dec, box_buf.as_mut_ptr(), box_size as usize);
+                    } else {
+                        JxlDecoderSetBoxBuffer(dec, std::ptr::null_mut(), 0);
+                    }
+                }
+            }
+            if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
+                break;
+            }
+        }
+        JxlDecoderDestroy(dec);
+
+        if box_buf.len() >= 4 {
+            let off = u32::from_be_bytes([box_buf[0], box_buf[1], box_buf[2], box_buf[3]]) as usize;
+            box_buf.get(off..).map(|b| b.to_vec())
+        } else {
+            None
+        }
+    }
 }
 
 pub(crate) fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
@@ -403,8 +512,32 @@ pub(crate) fn is_jxl(raw: &[u8]) -> bool {
     (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A])
 }
 
+struct JxlDecoderGuard(*mut JxlDecoder);
+
+impl Drop for JxlDecoderGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { JxlDecoderDestroy(self.0) };
+        }
+    }
+}
+
+struct JxlRunnerGuard(*mut libc::c_void);
+
+impl Drop for JxlRunnerGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { JxlThreadParallelRunnerDestroy(self.0) };
+        }
+    }
+}
+
 pub(crate) struct JxlPrepared {
-    image: jxl_oxide::JxlImage,
+    raw: Vec<u8>,
+    w: u32,
+    h: u32,
+    grayscale: bool,
+    alpha: bool,
 }
 
 impl JxlPrepared {
@@ -412,125 +545,204 @@ impl JxlPrepared {
         if !is_jxl(raw) {
             return None;
         }
+        unsafe {
+            let dec = JxlDecoderCreate(std::ptr::null());
+            if dec.is_null() {
+                return None;
+            }
+            let res = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus_JXL_DEC_BASIC_INFO);
+            if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+                JxlDecoderDestroy(dec);
+                return None;
+            }
+            let res = JxlDecoderSetInput(dec, raw.as_ptr(), raw.len());
+            if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+                JxlDecoderDestroy(dec);
+                return None;
+            }
+            JxlDecoderCloseInput(dec);
 
-        use jxl_oxide::{AllocTracker, EnumColourEncoding, JxlImage, RenderingIntent};
+            let mut info = std::mem::zeroed::<JxlBasicInfo>();
+            loop {
+                let status = JxlDecoderProcessInput(dec);
+                if status == JxlDecoderStatus_JXL_DEC_ERROR {
+                    JxlDecoderDestroy(dec);
+                    return None;
+                }
+                if status & JxlDecoderStatus_JXL_DEC_BASIC_INFO != 0
+                    && JxlDecoderGetBasicInfo(dec, &mut info) == JxlDecoderStatus_JXL_DEC_SUCCESS
+                {
+                    break;
+                }
+                if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
+                    break;
+                }
+            }
 
-        let mut image = JxlImage::builder()
-            .alloc_tracker(AllocTracker::with_limit(runtime_limits().max_alloc as usize))
-            .read(std::io::Cursor::new(raw))
-            .ok()?;
+            let w = info.xsize;
+            let h = info.ysize;
+            JxlDecoderDestroy(dec);
 
-        if image.width() > 32768 || image.height() > 32768 {
-            return None;
+            if w == 0 || h == 0 || w > 32768 || h > 32768 {
+                return None;
+            }
+
+            Some(Self {
+                raw: raw.to_vec(),
+                w,
+                h,
+                grayscale: info.num_color_channels == 1,
+                alpha: info.num_extra_channels > 0,
+            })
         }
-
-        if image.pixel_format().has_black() {
-            image.request_color_encoding(EnumColourEncoding::srgb(RenderingIntent::Relative));
-        }
-
-        Some(Self { image })
     }
 
     pub(crate) fn dims(&self) -> (u32, u32) {
-        (self.image.width(), self.image.height())
+        (self.w, self.h)
     }
 
+    #[allow(clippy::type_complexity)]
     pub(crate) fn decode(self) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
-        use jxl_oxide::AuxBoxData;
-
-        let exif = match self.image.aux_boxes().first_exif() {
-            Ok(AuxBoxData::Data(r)) => {
-                let off = r.tiff_header_offset() as usize;
-                r.payload().get(off..).map(|b| b.to_vec())
+        let Self { raw, w, h, grayscale, alpha } = self;
+        unsafe {
+            let dec_ptr = JxlDecoderCreate(std::ptr::null());
+            if dec_ptr.is_null() {
+                anyhow::bail!("JXL decode failed: JxlDecoderCreate returned NULL");
             }
-            _ => None,
-        };
+            let runner_ptr = JxlThreadParallelRunnerCreate(std::ptr::null(), avif_threads());
+            let runner = JxlRunnerGuard(runner_ptr);
+            let dec = JxlDecoderGuard(dec_ptr);
+            if !runner.0.is_null() {
+                JxlDecoderSetParallelRunner(dec.0, Some(JxlThreadParallelRunner), runner.0);
+            }
 
-        let icc = Some(self.image.rendered_icc());
+            let events = JxlDecoderStatus_JXL_DEC_COLOR_ENCODING
+                | JxlDecoderStatus_JXL_DEC_FULL_IMAGE
+                | JxlDecoderStatus_JXL_DEC_BOX;
+            let res = JxlDecoderSubscribeEvents(dec.0, events);
+            if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+                anyhow::bail!("JXL decode failed: JxlDecoderSubscribeEvents: {}", res);
+            }
 
-        let render = self
-            .image
-            .render_frame(0)
-            .map_err(|e| anyhow::anyhow!("JXL render failed: {}", e))?;
+            let res = JxlDecoderSetInput(dec.0, raw.as_ptr(), raw.len());
+            if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+                anyhow::bail!("JXL decode failed: JxlDecoderSetInput: {}", res);
+            }
+            JxlDecoderCloseInput(dec.0);
 
-        let mut stream = render.stream();
-        let w = stream.width();
-        let h = stream.height();
-        let c = stream.channels() as usize;
-        let count = (w as usize) * (h as usize) * c;
+            let channels: u32 = match (grayscale, alpha) {
+                (false, false) => 3,
+                (false, true) => 4,
+                (true, false) => 1,
+                (true, true) => 2,
+            };
+            let format = JxlPixelFormat {
+                num_channels: channels,
+                data_type: JxlDataType_JXL_TYPE_UINT8,
+                endianness: JxlEndianness_JXL_NATIVE_ENDIAN,
+                align: 0,
+            };
 
-        let grayscale = self.image.pixel_format().is_grayscale();
-        let alpha = self.image.pixel_format().has_alpha();
-        let bit_depth = self.image.image_header().metadata.bit_depth;
-        let is_float = matches!(
-            bit_depth,
-            jxl_oxide::image::BitDepth::FloatSample { .. }
-                | jxl_oxide::image::BitDepth::IntegerSample { bits_per_sample: 17.. }
-        );
-        let need_16bit = bit_depth.bits_per_sample() > 8;
+            let mut pixels: Vec<u8> = Vec::new();
+            let mut icc: Option<Vec<u8>> = None;
+            let mut box_buf: Vec<u8> = Vec::new();
 
-        let img = if is_float && !grayscale {
-            let mut buf = vec![0f32; count];
-            stream.write_to_buffer(&mut buf);
-            if alpha {
-                image::DynamicImage::ImageRgba32F(
-                    image::Rgba32FImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                )
+            loop {
+                let status = JxlDecoderProcessInput(dec.0);
+                if status == JxlDecoderStatus_JXL_DEC_ERROR {
+                    anyhow::bail!("JXL decode failed: JxlDecoderProcessInput: {}", status);
+                }
+                if status & JxlDecoderStatus_JXL_DEC_COLOR_ENCODING != 0 {
+                    let mut icc_size: usize = 0;
+                    if JxlDecoderGetICCProfileSize(
+                        dec.0,
+                        JxlColorProfileTarget_JXL_COLOR_PROFILE_TARGET_DATA,
+                        &mut icc_size,
+                    ) == JxlDecoderStatus_JXL_DEC_SUCCESS
+                        && icc_size > 0
+                    {
+                        let mut buf = vec![0u8; icc_size];
+                        if JxlDecoderGetColorAsICCProfile(
+                            dec.0,
+                            JxlColorProfileTarget_JXL_COLOR_PROFILE_TARGET_DATA,
+                            buf.as_mut_ptr(),
+                            icc_size,
+                        ) == JxlDecoderStatus_JXL_DEC_SUCCESS
+                        {
+                            icc = Some(buf);
+                        }
+                    }
+                }
+
+                if status & JxlDecoderStatus_JXL_DEC_NEED_IMAGE_OUT_BUFFER != 0 {
+                    let mut size: usize = 0;
+                    JxlDecoderImageOutBufferSize(dec.0, &format, &mut size);
+                    pixels = vec![0u8; size];
+                    let res = JxlDecoderSetImageOutBuffer(
+                        dec.0,
+                        &format,
+                        pixels.as_mut_ptr() as *mut libc::c_void,
+                        size,
+                    );
+                    if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+                        anyhow::bail!("JXL decode failed: JxlDecoderSetImageOutBuffer: {}", res);
+                    }
+                }
+                if status & JxlDecoderStatus_JXL_DEC_BOX != 0 {
+                    let mut box_type = [0i8; 4];
+                    if JxlDecoderGetBoxType(dec.0, &mut box_type, JXL_FALSE as libc::c_int)
+                        == JxlDecoderStatus_JXL_DEC_SUCCESS
+                    {
+                        let exif_type: [libc::c_char; 4] = [
+                            b'E' as libc::c_char,
+                            b'x' as libc::c_char,
+                            b'i' as libc::c_char,
+                            b'f' as libc::c_char,
+                        ];
+                        if box_type == exif_type {
+                            let mut box_size: u64 = 0;
+                            JxlDecoderGetBoxSizeContents(dec.0, &mut box_size);
+                            box_buf = vec![0u8; box_size as usize];
+                            JxlDecoderSetBoxBuffer(dec.0, box_buf.as_mut_ptr(), box_size as usize);
+                        } else {
+                            JxlDecoderSetBoxBuffer(dec.0, std::ptr::null_mut(), 0);
+                        }
+                    }
+                }
+                if status & JxlDecoderStatus_JXL_DEC_FULL_IMAGE != 0 {
+                    break;
+                }
+            }
+
+            let exif = if box_buf.len() >= 4 {
+                let off =
+                    u32::from_be_bytes([box_buf[0], box_buf[1], box_buf[2], box_buf[3]]) as usize;
+                box_buf.get(off..).map(|b| b.to_vec())
             } else {
-                image::DynamicImage::ImageRgb32F(
-                    image::Rgb32FImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                )
-            }
-        } else if need_16bit {
-            let mut buf = vec![0u16; count];
-            stream.write_to_buffer(&mut buf);
-            match (grayscale, alpha) {
-                (false, false) => image::DynamicImage::ImageRgb16(
-                    image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (false, true) => image::DynamicImage::ImageRgba16(
-                    image::ImageBuffer::<image::Rgba<u16>, Vec<u16>>::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (true, false) => image::DynamicImage::ImageLuma16(
-                    image::ImageBuffer::<image::Luma<u16>, Vec<u16>>::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (true, true) => image::DynamicImage::ImageLumaA16(
-                    image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-            }
-        } else {
-            let mut buf = vec![0u8; count];
-            stream.write_to_buffer(&mut buf);
-            match (grayscale, alpha) {
-                (false, false) => image::DynamicImage::ImageRgb8(
-                    image::RgbImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (false, true) => image::DynamicImage::ImageRgba8(
-                    image::RgbaImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (true, false) => image::DynamicImage::ImageLuma8(
-                    image::GrayImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-                (true, true) => image::DynamicImage::ImageLumaA8(
-                    image::GrayAlphaImage::from_raw(w, h, buf)
-                        .ok_or_else(|| anyhow::anyhow!("JXL buffer size mismatch"))?,
-                ),
-            }
-        };
+                None
+            };
 
-        Ok((img, icc, exif))
+            let img = match (grayscale, alpha) {
+                (false, false) => image::RgbImage::from_raw(w, h, pixels)
+                    .map(image::DynamicImage::ImageRgb8)
+                    .context("JXL buffer size mismatch")?,
+                (false, true) => image::RgbaImage::from_raw(w, h, pixels)
+                    .map(image::DynamicImage::ImageRgba8)
+                    .context("JXL buffer size mismatch")?,
+                (true, false) => image::GrayImage::from_raw(w, h, pixels)
+                    .map(image::DynamicImage::ImageLuma8)
+                    .context("JXL buffer size mismatch")?,
+                (true, true) => image::GrayAlphaImage::from_raw(w, h, pixels)
+                    .map(image::DynamicImage::ImageLumaA8)
+                    .context("JXL buffer size mismatch")?,
+            };
+
+            Ok((img, icc, exif))
+        }
     }
 }
 
+#[allow(clippy::type_complexity)]
 pub(crate) fn decode_image(
     raw: &[u8],
     path: Option<&Path>,
@@ -567,6 +779,11 @@ pub(crate) fn decode_image(
     if is_heif(raw) {
         if let Ok(img) = decode_heif_manual(raw, path) {
             return Ok((img, None, exif));
+        }
+    }
+    if is_avif(raw) {
+        if let Ok((img, icc, avif_exif)) = decode_avif(raw) {
+            return Ok((img, icc, avif_exif));
         }
     }
     if let Ok((img, icc)) = decode_with_limits(raw) {
@@ -649,10 +866,11 @@ fn svg_font_db() -> Arc<fontdb::Database> {
 }
 
 fn svg_options(path: Option<&Path>) -> usvg::Options<'static> {
-    let mut opts = usvg::Options::default();
-    opts.fontdb = svg_font_db();
-    opts.resources_dir = path.and_then(|p| p.parent().map(Path::to_path_buf));
-    opts
+    usvg::Options {
+        fontdb: svg_font_db(),
+        resources_dir: path.and_then(|p| p.parent().map(Path::to_path_buf)),
+        ..Default::default()
+    }
 }
 
 pub(crate) fn looks_like_svg(raw: &[u8]) -> bool {
@@ -724,11 +942,10 @@ fn collect_node_raster_images(node: &usvg::Node, depth: usize, out: &mut Vec<(u3
     }
     let mut ok = true;
     node.subroots(|sub| {
-        if ok {
-            if collect_raster_images(sub, depth + 1, out).is_none() {
+        if ok
+            && collect_raster_images(sub, depth + 1, out).is_none() {
                 ok = false;
             }
-        }
     });
     if ok { Some(()) } else { None }
 }
@@ -922,6 +1139,7 @@ pub fn decode_svg(
     Ok(image::DynamicImage::ImageRgba8(img))
 }
 
+#[allow(clippy::manual_checked_ops)]
 fn unpremultiply_rgba(buf: &mut [u8]) {
     for px in buf.chunks_exact_mut(4) {
         let a = px[3] as u32;
@@ -930,9 +1148,9 @@ fn unpremultiply_rgba(buf: &mut [u8]) {
             px[1] = 0;
             px[2] = 0;
         } else {
-            for c in 0..3 {
-                let v = px[c] as u32;
-                px[c] = ((v * 255 + a / 2) / a) as u8;
+            for p in px.iter_mut().take(3) {
+                let v = *p as u32;
+                *p = ((v * 255 + a / 2) / a) as u8;
             }
         }
     }
@@ -1004,7 +1222,125 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
         _ => anyhow::bail!("{}", msg().err_heif_decode),
     };
 
-    Ok(img.context(msg().err_heif_decode)?)
+    img.context(msg().err_heif_decode)
+}
+
+// ── AVIF helpers (libavif-sys) ────────────────────────────────
+
+struct AvifDecoderGuard(*mut avifDecoder);
+
+impl Drop for AvifDecoderGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifDecoderDestroy(self.0) };
+        }
+    }
+}
+
+struct AvifImageGuard(*mut avifImage);
+
+impl Drop for AvifImageGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { avifImageDestroy(self.0) };
+        }
+    }
+}
+
+pub(crate) fn is_avif(buf: &[u8]) -> bool {
+    buf.len() >= 12 && (&buf[4..12] == b"ftypavif" || &buf[4..12] == b"ftypavis")
+}
+
+pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
+    unsafe {
+        let decoder = avifDecoderCreate();
+        if decoder.is_null() {
+            return None;
+        }
+        let decoder = AvifDecoderGuard(decoder);
+        let res = avifDecoderSetIOMemory(decoder.0, buf.as_ptr(), buf.len());
+        if res != avifResult_AVIF_RESULT_OK {
+            return None;
+        }
+        let res = avifDecoderParse(decoder.0);
+        if res != avifResult_AVIF_RESULT_OK {
+            return None;
+        }
+        let image = (*decoder.0).image;
+        if image.is_null() {
+            return None;
+        }
+        Some(((*image).width, (*image).height))
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
+    unsafe {
+        let decoder = avifDecoderCreate();
+        if decoder.is_null() {
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", "avifDecoderCreate returned NULL", 1));
+        }
+        let decoder = AvifDecoderGuard(decoder);
+
+        let image = avifImageCreateEmpty();
+        if image.is_null() {
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", "avifImageCreateEmpty returned NULL", 1));
+        }
+        let image = AvifImageGuard(image);
+
+        let res = avifDecoderReadMemory(decoder.0, image.0, buf.as_ptr(), buf.len());
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", &format!("avifDecoderReadMemory: {}", res), 1));
+        }
+
+        let icc = if (*image.0).icc.size > 0 && !(*image.0).icc.data.is_null() {
+            Some(std::slice::from_raw_parts((*image.0).icc.data, (*image.0).icc.size).to_vec())
+        } else {
+            None
+        };
+
+        let exif = if (*image.0).exif.size > 0 && !(*image.0).exif.data.is_null() {
+            Some(std::slice::from_raw_parts((*image.0).exif.data, (*image.0).exif.size).to_vec())
+        } else {
+            None
+        };
+
+        let w = (*image.0).width;
+        let h = (*image.0).height;
+        let has_alpha = !(*image.0).alphaPlane.is_null();
+        let channels: u32 = if has_alpha { 4 } else { 3 };
+
+        let mut rgb = std::mem::zeroed::<avifRGBImage>();
+        avifRGBImageSetDefaults(&mut rgb, image.0);
+        rgb.depth = 8;
+        rgb.format = if has_alpha {
+            avifRGBFormat_AVIF_RGB_FORMAT_RGBA
+        } else {
+            avifRGBFormat_AVIF_RGB_FORMAT_RGB
+        };
+        rgb.rowBytes = w * channels;
+
+        let size = (w as usize) * (h as usize) * (channels as usize);
+        let mut pixels = vec![0u8; size];
+        rgb.pixels = pixels.as_mut_ptr();
+
+        let res = avifImageYUVToRGB(image.0, &mut rgb);
+        if res != avifResult_AVIF_RESULT_OK {
+            anyhow::bail!("{}", msg().err_avif_decode.replacen("{}", &format!("avifImageYUVToRGB: {}", res), 1));
+        }
+
+        let img = if has_alpha {
+            image::RgbaImage::from_raw(w, h, pixels)
+                .map(image::DynamicImage::ImageRgba8)
+                .context(msg().err_avif_decode)?
+        } else {
+            image::RgbImage::from_raw(w, h, pixels)
+                .map(image::DynamicImage::ImageRgb8)
+                .context(msg().err_avif_decode)?
+        };
+        Ok((img, icc, exif))
+    }
 }
 
 // ── RAW helpers ───────────────────────────────────────────────

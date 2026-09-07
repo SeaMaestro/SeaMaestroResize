@@ -72,7 +72,7 @@ fn wrap_value(value: &str, width: usize) -> Vec<String> {
         let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
         word.push(ch);
         word_w += cw;
-        if chars.peek().map_or(true, |c| *c == ' ') {
+        if chars.peek().is_none_or(|c| *c == ' ') {
             if line_w > 0 && line_w + sep_w + word_w > width {
                 out.push(std::mem::take(&mut line));
                 line_w = 0;

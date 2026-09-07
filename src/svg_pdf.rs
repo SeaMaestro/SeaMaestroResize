@@ -3,8 +3,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use fontdb;
-use subsetter;
 
 use resvg::usvg;
 use usvg::tiny_skia_path::PathSegment;
@@ -151,6 +149,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_node(
     node: &usvg::Node,
     s: f32,
@@ -247,6 +246,7 @@ fn emit_node(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_clip_children(
     parent: &usvg::Group,
     clip_t: &usvg::Transform,
@@ -313,6 +313,7 @@ fn emit_clip_children(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_path(
     p: &usvg::Path,
     s: f32,
@@ -657,6 +658,7 @@ pub(crate) fn to_unicode_cmap(map: &BTreeMap<u16, String>) -> Vec<u8> {
     s.into_bytes()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_text_flattened(
     t: &usvg::Text,
     s: f32,
@@ -691,6 +693,7 @@ fn emit_text_flattened(
     true
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_text(
     t: &usvg::Text,
     s: f32,
@@ -732,10 +735,10 @@ fn emit_text(
             if pg.id.0 > u16::MAX as u32 {
                 return emit_text_flattened(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth);
             }
-            if !idx_by_font.contains_key(&pg.font) {
+            if let std::collections::hash_map::Entry::Vacant(e) = idx_by_font.entry(pg.font) {
                 match fonts.iter().position(|f| f.font_id == pg.font) {
                     Some(pos) => {
-                        idx_by_font.insert(pg.font, pos);
+                        e.insert(pos);
                     }
                     None => return emit_text_flattened(t, s, th, grayscale, out, ext_gs, gs_names, shadings, patterns, images, fonts, fontdb, depth),
                 }
@@ -1329,9 +1332,9 @@ fn jpeg_icc(raw: &[u8]) -> Option<Vec<u8>> {
     }
     let mut icc = Vec::new();
     for seq in 1..=total {
-        match chunks.get(&seq) {
-            Some(c) => icc.extend_from_slice(c),
-            None => return None,
+        {
+            let c = chunks.get(&seq)?;
+            icc.extend_from_slice(c)
         }
     }
     if icc.is_empty() { None } else { Some(icc) }
@@ -1389,13 +1392,14 @@ fn icc_color_space(icc: &[u8]) -> Option<ImageColorSpace> {
     }
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn gamma_lut(gama: u32) -> Option<[u8; 256]> {
     let g = gama as f64 / 100000.0;
     if !(g > 0.0) || !g.is_finite() {
         return None;
     }
     let mut lut = [0u8; 256];
-    for i in 0..=255 {
+    for (i, entry) in lut.iter_mut().enumerate() {
         let x = i as f64 / 255.0;
         let linear = x.powf(1.0 / g);
         let srgb = if linear <= 0.0031308 {
@@ -1403,7 +1407,7 @@ fn gamma_lut(gama: u32) -> Option<[u8; 256]> {
         } else {
             1.055 * linear.powf(1.0 / 2.4) - 0.055
         };
-        lut[i] = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+        *entry = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
     }
     Some(lut)
 }

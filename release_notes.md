@@ -1,3 +1,41 @@
+## SeaMaestroResize v2.4.9
+
+## 🎉 New Formats
+
+**JXL (JPEG XL) encode & decode** — full JPEG XL support via the libjxl FFI:
+lossy (`--quality`) and lossless (`--lossless`) encoding, plus decode with ICC
+and EXIF passthrough.
+
+## ⚡ Smaller Binary
+
+**Removed `aom` from libheif** — AVIF/HEIF now encode through SVT-AV1 only.
+The static binary dropped from ~42 MB to ~33 MB.
+
+## 🐛 Bug Fixes
+
+**JXL lossless** — the encoder now sets `uses_original_profile` (required by
+libjxl for lossless); previously `--format jxl --lossless` failed.
+
+**PNG EXIF loss** — `--keep-exif` no longer silently drops EXIF: the `eXIf`
+chunk is embedded after oxipng optimization so it survives compression.
+
+## ✨ Improvements
+
+**AVIF EXIF & ICC** — AVIF now passes EXIF and ICC through on encode and
+extracts EXIF on decode (previously dropped on both ends).
+
+**UI sync for AVIF EXIF** — the banner shows `EXIF: on` for AVIF, and the
+`--keep-exif` help lists AVIF in all 8 languages.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+**VirusTotal** — TBD
+
+---
+
 ## SeaMaestroResize v2.4.8
 
 ## ⚡ Performance

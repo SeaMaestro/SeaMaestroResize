@@ -238,7 +238,7 @@ impl<W: Write> PdfSink<W> {
                 .find(|(n, _)| n == &pat.shading)
                 .map(|(_, i)| *i)
                 .ok_or_else(|| anyhow::anyhow!("shading '{}' not found", pat.shading))?;
-            let shading = vp.shadings.iter().find(|s| &s.name == &pat.shading).unwrap();
+            let shading = vp.shadings.iter().find(|s| s.name == pat.shading).unwrap();
             let m = shading.matrix;
 
             let id = self.alloc_id();

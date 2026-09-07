@@ -1,10 +1,13 @@
 /target/
+vcpkg_installed/
 *.bak*
 .vscode/
 *.tmp
 *.log
 /vendor/*
 !/vendor/libz-ng-sys/
+!/vendor/libavif-sys/
+!/vendor/libjxl-sys/
 /releases/
 /.cargo/config.toml
 vector_tests/

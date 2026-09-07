@@ -3,8 +3,8 @@ use anyhow::Result;
 use crate::util::{read16, read32};
 
 pub(crate) fn webp_embed_metadata(webp: Vec<u8>, icc: Option<&[u8]>, exif: Option<&[u8]>, w: u32, h: u32, has_alpha: bool) -> Result<Vec<u8>> {
-    let has_icc = icc.map_or(false, |p| !p.is_empty());
-    let has_exif = exif.map_or(false, |e| !e.is_empty());
+    let has_icc = icc.is_some_and(|p| !p.is_empty());
+    let has_exif = exif.is_some_and(|e| !e.is_empty());
     if webp.len() < 12 || (!has_icc && !has_exif) {
         return Ok(webp);
     }

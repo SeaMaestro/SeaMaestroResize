@@ -40,7 +40,7 @@ the whole workflow.
   (output lands next to the program).
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
 - **Grayscale** (`--bw`) and **sharpen** (`--sharpen`).
-- **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF.
+- **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF, AVIF.
 - **EXIF passthrough** (`--keep-exif`) with orientation normalization and
   resized pixel-dimension update; EXIF is cleared by default.
 - **Auto-rotation** from EXIF `Orientation`.
@@ -70,7 +70,7 @@ the whole workflow.
 
 **Metadata**
 
-- ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`.
+- ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`, `AVIF`.
 - EXIF is preserved only with `--keep-exif`, and only for `JPEG`, `PNG`,
   `WEBP`, `JXL`.
 
@@ -96,7 +96,7 @@ $env:PKG_CONFIG = "pkgconf"
 $env:PKG_CONFIG_PATH = "$vcpkg\installed\x64-windows-static\lib\pkgconfig"
 
 # Build manifest dependencies (static triplet)
-& "$vcpkg\vcpkg.exe" install --triplet x64-windows-static
+& "$vcpkg\vcpkg.exe" install --triplet x64-windows-static --x-install-root="$vcpkg\installed"
 
 # pkgconf from the vcpkg manifest must be discoverable
 $env:Path = "$vcpkg\installed\x64-windows-static\tools\pkgconf;$env:Path"
@@ -262,14 +262,18 @@ scanned with VirusTotal before upload; Windows SmartScreen may show an
 ## Third-party codecs
 
 This project links several codec libraries, each under its own license
-(mostly permissive BSD/MIT/Apache): libwebp, mozjpeg, rav1e (ravif),
-jxl-oxide, oxipng, and others.
+(mostly permissive BSD/MIT/Apache): libjxl, libavif, libheif, libde265,
+libwebp, mozjpeg (libjpeg-turbo), dav1d, svt-av1, oxipng, zune-jpeg,
+and others.
 
-HEIC/HEIF support uses libheif, which is licensed under LGPL-3.0.
+HEIC/HEIF support uses libheif and libde265, both licensed under LGPL-3.0.
 When distributing the binary you must comply with LGPL-3.0 — in particular,
-make the libheif source available and allow relinking.
+make the libheif and libde265 source available and allow relinking.
 
 mimalloc (MIT) is used as the global allocator.
+
+The full list of third-party licenses is in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
 
 ## Author
 

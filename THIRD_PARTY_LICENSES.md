@@ -25,11 +25,49 @@ under LGPL-3.0. The source code of libde265 is available at the project link
 above, and the source code of SeaMaestroResize is available in this
 repository, so the application may be relinked against a modified libde265.
 
-## aom — AV1 decoding (linked into libheif)
+## libavif — AVIF
 
-- License: BSD 2-Clause
-- Project: https://aomedia.googlesource.com/aom
-- License text: https://aomedia.googlesource.com/aom/+/refs/heads/main/LICENSE
+- License: BSD-2-Clause AND Apache-2.0
+- Project: https://github.com/AOMediaCodec/libavif
+
+## dav1d — AV1 decoding (linked into libavif)
+
+- License: BSD-2-Clause AND ISC
+- Project: https://code.videolan.org/videolan/dav1d
+
+## svt-av1 — AV1 encoding (linked into libavif)
+
+- License: BSD-3-Clause-Clear, with the Alliance for Open Media Patent License 1.0
+- Project: https://gitlab.com/AOMediaCodec/SVT-AV1
+
+## libjxl — JPEG XL
+
+- License: BSD-3-Clause
+- Project: https://github.com/libjxl/libjxl
+
+## brotli — compression (linked into libjxl)
+
+- License: MIT
+- Project: https://github.com/google/brotli
+
+## highway — SIMD (linked into libjxl)
+
+- License: Apache-2.0
+- Project: https://github.com/google/highway
+
+## lcms — color management (linked into libjxl)
+
+- License: MIT
+- Project: https://github.com/mm2/Little-CMS
+
+## libyuv — YUV conversion (linked into libavif)
+
+- License: BSD-3-Clause
+- Project: https://chromium.googlesource.com/libyuv/libyuv
+
+## fastfeat — FAST feature detection (linked into svt-av1)
+
+- License: BSD-3-Clause
 
 ## mozjpeg / libjpeg-turbo — JPEG
 
@@ -43,39 +81,6 @@ This software is based in part on the work of the Independent JPEG Group.
 - License: BSD 3-Clause
 - Project: https://chromium.googlesource.com/webm/libwebp
 
-## rav1e — AVIF
-
-- License: BSD 2-Clause
-- Project: https://github.com/xiph/rav1e
-
-## ravif — AVIF encoding
-
-- License: BSD 3-Clause
-- Project: https://github.com/kornelski/ravif
-
-## avif-serialize — AVIF container serialization
-
-- License: BSD 3-Clause
-- Project: https://github.com/kornelski/avif-serialize
-
-## dav1d — AVIF decoding
-
-- License: BSD 2-Clause
-- Project: https://code.videolan.org/videolan/dav1d
-
-The Rust bindings (`dav1d`, `dav1d-sys`) are MIT-licensed; the libdav1d
-decoder linked into the binary is BSD 2-Clause.
-
-## mp4parse — AVIF/HEIF container parsing
-
-- License: Mozilla Public License 2.0 (MPL-2.0)
-- Project: https://github.com/mozilla/mp4parse-rust
-- License text: https://www.mozilla.org/en-US/MPL/2.0/
-
-The source code of the MPL-2.0-licensed files is available at the project
-link above, and the source code of SeaMaestroResize is available in this
-repository.
-
 ## resvg / usvg — SVG rendering
 
 - License: Mozilla Public License 2.0 (MPL-2.0)
@@ -86,7 +91,7 @@ The source code of the MPL-2.0-licensed files is available at the project
 link above, and the source code of SeaMaestroResize is available in this
 repository.
 
-## jxl-oxide — JPEG XL
+## jxl-oxide — JPEG XL (RAW decoding, via rawler)
 
 - License: Apache-2.0
 - Project: https://github.com/imazen/jxl-oxide
@@ -113,5 +118,5 @@ Copyright (c) Microsoft Corporation, Daan Leijen. Licensed under the MIT License
 
 The remaining Rust dependencies are licensed under MIT, Apache-2.0,
 BSD-style, or MPL-2.0 licenses. MPL-2.0 crates with their own code
-(`mp4parse`, `resvg`, `usvg`) are listed above. The full list is recorded in
+(`resvg`, `usvg`) are listed above. The full list is recorded in
 `Cargo.lock`.
