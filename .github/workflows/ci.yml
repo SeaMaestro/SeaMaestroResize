@@ -29,6 +29,10 @@ jobs:
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
 
+      - name: Reset VCPKG_ROOT after MSVC
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=C:\vcpkg"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
