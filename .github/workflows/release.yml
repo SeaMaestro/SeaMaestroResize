@@ -34,18 +34,26 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Compute vcpkg deps hash
+        id: vcpkg-deps
+        shell: pwsh
+        run: |
+          $deps = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).dependencies | ConvertTo-Json -Compress -Depth 10
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($deps)
+          $hash = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLower()
+          "deps_hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v2-${{ hashFiles('vcpkg.json') }}
+          prefix-key: v3-${{ steps.vcpkg-deps.outputs.deps_hash }}
           cache-all-crates: "true"
 
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-installed-v3-${{ runner.os }}-x64-windows-static-${{ hashFiles('vcpkg.json') }}
-          restore-keys: |
-            vcpkg-installed-v3-${{ runner.os }}-x64-windows-static-
+          key: vcpkg-installed-v4-${{ runner.os }}-x64-windows-static-${{ steps.vcpkg-deps.outputs.deps_hash }}
 
       - name: Install vcpkg dependencies
         run: vcpkg install --triplet x64-windows-static --x-install-root="C:\vcpkg\installed"
