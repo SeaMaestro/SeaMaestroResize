@@ -88,7 +88,14 @@ jobs:
           $hash = (Get-FileHash "target/release/SeaMaestroResize.exe" -Algorithm SHA256).Hash.ToLower()
           "$hash  SeaMaestroResize.exe" | Out-File -FilePath checksums.txt -Encoding ascii
 
+      - name: Extract current release notes
+        shell: pwsh
+        run: |
+          $content = Get-Content release_notes.md -Raw -Encoding utf8
+          $top = ($content -split '(?m)^---[ \t]*\r?$')[0].Trim()
+          $top | Out-File -FilePath release_notes_current.md -Encoding utf8
+
       - name: Create GitHub Release
-        run: gh release create "${{ github.ref_name }}" --title "SeaMaestroResize ${{ github.ref_name }}" --notes-file release_notes.md "target/release/SeaMaestroResize.exe#SeaMaestroResize_${{ github.ref_name }}.exe" "checksums.txt"
+        run: gh release create "${{ github.ref_name }}" --title "SeaMaestroResize ${{ github.ref_name }}" --notes-file release_notes_current.md "target/release/SeaMaestroResize.exe#SeaMaestroResize_${{ github.ref_name }}.exe" "checksums.txt"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
