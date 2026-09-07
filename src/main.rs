@@ -1793,7 +1793,7 @@ fn banner(config: &Config) {
         eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
     }
     if config.keep_exif
-        && matches!(config.format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Jxl)
+        && matches!(config.format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Jxl | ImageFormat::Avif)
     {
         eprintln!("  ║  {:<13}{}  ║", m.label_exif, pad_right(m.on, 45));
     }

@@ -782,8 +782,8 @@ pub(crate) fn decode_image(
         }
     }
     if is_avif(raw) {
-        if let Ok((img, icc)) = decode_avif(raw) {
-            return Ok((img, icc, exif));
+        if let Ok((img, icc, avif_exif)) = decode_avif(raw) {
+            return Ok((img, icc, avif_exif));
         }
     }
     if let Ok((img, icc)) = decode_with_limits(raw) {
@@ -1274,7 +1274,8 @@ pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>)> {
+#[allow(clippy::type_complexity)]
+fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
     unsafe {
         let decoder = avifDecoderCreate();
         if decoder.is_null() {
@@ -1295,6 +1296,12 @@ fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>)> {
 
         let icc = if (*image.0).icc.size > 0 && !(*image.0).icc.data.is_null() {
             Some(std::slice::from_raw_parts((*image.0).icc.data, (*image.0).icc.size).to_vec())
+        } else {
+            None
+        };
+
+        let exif = if (*image.0).exif.size > 0 && !(*image.0).exif.data.is_null() {
+            Some(std::slice::from_raw_parts((*image.0).exif.data, (*image.0).exif.size).to_vec())
         } else {
             None
         };
@@ -1332,7 +1339,7 @@ fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>)> {
                 .map(image::DynamicImage::ImageRgb8)
                 .context(msg().err_avif_decode)?
         };
-        Ok((img, icc))
+        Ok((img, icc, exif))
     }
 }
 

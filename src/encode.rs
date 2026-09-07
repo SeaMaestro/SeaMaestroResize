@@ -64,7 +64,7 @@ pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Opt
     match config.format {
         ImageFormat::Jpeg => encode_jpeg_to_vec(img, config.quality, config.progressive, icc, exif),
         ImageFormat::WebP => encode_webp_to_vec(img, config.quality, config.lossless, icc, exif),
-        ImageFormat::Avif => encode_avif_to_vec(img, config.quality),
+        ImageFormat::Avif => encode_avif_to_vec(img, config.quality, icc, exif),
         ImageFormat::Png => encode_png_to_vec(img, icc, exif),
         ImageFormat::Ico => encode_ico_to_vec(img),
         ImageFormat::Tiff => encode_tiff_to_vec(img, icc),
@@ -188,16 +188,16 @@ impl Drop for AvifImageGuard {
     }
 }
 
-fn encode_avif_to_vec(img: &image::DynamicImage, quality: u8) -> Result<Vec<u8>> {
+fn encode_avif_to_vec(img: &image::DynamicImage, quality: u8, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     let q = quality.clamp(1, 100) as i32;
     if img.color().has_alpha() {
         let rgba = img.to_rgba8();
         let (w, h) = (rgba.width(), rgba.height());
-        encode_avif_raw(rgba.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGBA, 4, q)
+        encode_avif_raw(rgba.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGBA, 4, q, icc, exif)
     } else {
         let rgb = img.to_rgb8();
         let (w, h) = (rgb.width(), rgb.height());
-        encode_avif_raw(rgb.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGB, 3, q)
+        encode_avif_raw(rgb.as_raw(), w, h, avifRGBFormat_AVIF_RGB_FORMAT_RGB, 3, q, icc, exif)
     }
 }
 
@@ -217,6 +217,7 @@ unsafe extern "C" fn noop_svt_log(
 ) {
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encode_avif_raw(
     pixels: &[u8],
     w: u32,
@@ -224,6 +225,8 @@ fn encode_avif_raw(
     format: avifRGBFormat,
     channels: u32,
     quality: i32,
+    icc: Option<&[u8]>,
+    exif: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     unsafe {
         svt_av1_set_log_callback(Some(noop_svt_log), std::ptr::null_mut());
@@ -247,6 +250,19 @@ fn encode_avif_raw(
         (*image.0).colorPrimaries = AVIF_COLOR_PRIMARIES_BT709 as u16;
         (*image.0).transferCharacteristics = AVIF_TRANSFER_CHARACTERISTICS_SRGB as u16;
         (*image.0).matrixCoefficients = AVIF_MATRIX_COEFFICIENTS_BT601 as u16;
+
+        if let Some(profile) = icc.filter(|p| !p.is_empty()) {
+            let res = avifImageSetProfileICC(image.0, profile.as_ptr(), profile.len());
+            if res != avifResult_AVIF_RESULT_OK {
+                anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifImageSetProfileICC: {}", res), 1));
+            }
+        }
+        if let Some(blob) = exif.filter(|e| !e.is_empty()) {
+            let res = avifImageSetMetadataExif(image.0, blob.as_ptr(), blob.len());
+            if res != avifResult_AVIF_RESULT_OK {
+                anyhow::bail!("{}", msg().err_avif.replacen("{}", &format!("avifImageSetMetadataExif: {}", res), 1));
+            }
+        }
 
         let mut rgb = std::mem::zeroed::<avifRGBImage>();
         avifRGBImageSetDefaults(&mut rgb, image.0);
@@ -286,13 +302,12 @@ fn encode_png_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>, exif: Option
         }
     }
     img.write_with_encoder(encoder).context(msg().err_png)?;
-    if let Some(blob) = exif {
-        if !blob.is_empty() {
-            buf = png_embed_exif(buf, blob);
-        }
+    let optimized = oxipng::optimize_from_memory(&buf, &oxipng::Options::from_preset(1))
+        .map_err(|e| anyhow::anyhow!("{}", msg().err_oxipng.replacen("{}", &e.to_string(), 1)))?;
+    if let Some(blob) = exif.filter(|e| !e.is_empty()) {
+        return Ok(png_embed_exif(optimized, blob));
     }
-    oxipng::optimize_from_memory(&buf, &oxipng::Options::from_preset(1))
-        .map_err(|e| anyhow::anyhow!("{}", msg().err_oxipng.replacen("{}", &e.to_string(), 1)))
+    Ok(optimized)
 }fn encode_ico_to_vec(img: &image::DynamicImage) -> Result<Vec<u8>> {
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
@@ -390,6 +405,9 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, channels: u32, quality: u8, lossle
         JxlEncoderInitBasicInfo(&mut info);
         info.xsize = w;
         info.ysize = h;
+        if lossless {
+            info.uses_original_profile = JXL_TRUE as libc::c_int;
+        }
         if channels == 1 {
             info.num_color_channels = 1;
         } else if channels == 4 {
