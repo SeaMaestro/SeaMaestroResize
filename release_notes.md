@@ -1,3 +1,23 @@
+## SeaMaestroResize v2.4.10
+
+## 🐛 Bug Fixes
+
+**Merge output folder** — `--merge` with multiple input folders now places the
+merged PDFs next to each source folder (each root is processed independently),
+instead of jumping to the parent of the common root.
+
+**Help text** — the help table now correctly shows JPG (not WebP) as the
+default output format.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+**VirusTotal** — TBD
+
+---
+
 ## SeaMaestroResize v2.4.9
 
 ## 🎉 New Formats
