@@ -1,3 +1,17 @@
+## SeaMaestroResize v2.4.11
+
+## 🎨 New Icon
+
+**New app icon** — refreshed multi-resolution icon (16–256 px) for the
+executable and Windows shell.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+---
+
 ## SeaMaestroResize v2.4.10
 
 ## 🐛 Bug Fixes

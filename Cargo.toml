@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestroResize"
-version = "2.4.10"
+version = "2.4.11"
 edition = "2021"
 
 [dependencies]

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "SeaMaestroResize"
-version = "2.4.10"
+version = "2.4.11"
 dependencies = [
  "anyhow",
  "clap",
