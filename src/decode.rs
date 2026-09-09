@@ -500,6 +500,9 @@ pub(crate) fn extract_exif(raw: &[u8]) -> Option<Vec<u8>> {
     if raw.len() >= 12 && &raw[0..4] == b"RIFF" && &raw[8..12] == b"WEBP" {
         return webp_exif(raw);
     }
+    if is_heif(raw) {
+        return heif_exif(raw);
+    }
     if (raw.len() >= 8 && &raw[4..8] == b"JXL ") || raw.starts_with(&[0xFF, 0x0A]) {
         return jxl_exif(raw);
     }
@@ -1164,6 +1167,24 @@ pub(crate) fn is_heif(buf: &[u8]) -> bool {
         &buf[4..12] == b"ftypmif1"  ||
         &buf[4..12] == b"ftypmsf1"
     )
+}
+
+fn heif_exif(raw: &[u8]) -> Option<Vec<u8>> {
+    use libheif_rs::HeifContext;
+    let ctx = HeifContext::read_from_bytes(raw).ok()?;
+    let handle = ctx.primary_image_handle().ok()?;
+    for meta in handle.all_metadata() {
+        if meta.item_type.to_string() == "Exif" {
+            let payload = &meta.raw_data;
+            for i in 0..16.min(payload.len().saturating_sub(4)) {
+                let s = &payload[i..i + 4];
+                if s == b"II*\0" || s == b"MM\0*" {
+                    return Some(payload[i..].to_vec());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::DynamicImage> {
