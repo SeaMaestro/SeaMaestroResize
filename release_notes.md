@@ -26,6 +26,13 @@ format, matching the in-app help table.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
+VirusTotal — clean: 0/65 security vendors flagged the file.
+SHA-256: ac1774464d232203f802e733392da5675fb8e59d938225fa311e412e8c78b0d8
+Size: 33.20 MB (PE executable, 64-bit)
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
 ---
 
 ## SeaMaestroResize v2.4.11
