@@ -235,7 +235,6 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 #[derive(Parser)]
 #[command(
     name = "SeaMaestro",
-    version,
     after_help = "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
