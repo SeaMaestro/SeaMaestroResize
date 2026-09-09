@@ -1,3 +1,33 @@
+## SeaMaestro v2.4.12
+
+## ✨ What's New
+
+**Renamed to `SeaMaestro`** — the executable is now `SeaMaestro.exe`
+(was `SeaMaestroResize.exe`). Rename-based settings still work, e.g.
+`SeaMaestro_q80_w800_webp.exe`.
+
+**HEIC/HEIF EXIF** — `--keep-exif` now preserves EXIF from HEIC/HEIF photos
+(e.g. iPhone → JPEG/WebP keeps GPS, date and camera info).
+
+**TIFF compression** — TIFF output is now Deflate-compressed (lossless,
+~5–10× smaller files).
+
+**`--output` for batch** — `--output <dir>` now works as an output directory
+for batch processing.
+
+**Elapsed time** — the "Voyage complete" summary now shows the run duration
+(e.g. `… processed in 12.3s.`).
+
+**Full format list in `--help`** — `--help` now lists every supported input
+format, matching the in-app help table.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+---
+
 ## SeaMaestroResize v2.4.11
 
 ## 🎨 New Icon
