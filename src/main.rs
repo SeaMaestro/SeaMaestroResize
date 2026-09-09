@@ -837,6 +837,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         return;
     }
 
+    let start = std::time::Instant::now();
     let grouped = group_by_root(entries);
     let single_file_mode = total == 1 && entries[0].direct_file;
     let multi_root = grouped.len() > 1;
@@ -1103,7 +1104,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     }
 
     eprintln!("\n  ═══════════════════════════════════════════════");
-    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
+    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1).replacen("{}", &format_elapsed(start.elapsed()), 1));
     if errors > 0 {
         eprintln!("  {}", m.voyage_errors.replacen("{}", &errors.to_string(), 1));
     }
@@ -1843,6 +1844,23 @@ fn captain_log(total: usize) {
 
 // ── human_size ─────────────────────────────────────────────────
 
+fn format_elapsed(d: std::time::Duration) -> String {
+    let total = d.as_secs_f64();
+    if total < 60.0 {
+        format!("{:.1}s", total)
+    } else {
+        let secs = d.as_secs();
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        let s = secs % 60;
+        if h > 0 {
+            format!("{}h {}m {}s", h, m, s)
+        } else {
+            format!("{}m {}s", m, s)
+        }
+    }
+}
+
 fn human_size(bytes: u64) -> String {
     if bytes < 1024 { format!("{} B", bytes) }
     else if bytes < 1024*1024 { format!("{:.1} KB", bytes as f64 / 1024.0) }
@@ -2068,6 +2086,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
 
+    let start = std::time::Instant::now();
     let mut by_root: std::collections::BTreeMap<PathBuf, Vec<&InputEntry>> = std::collections::BTreeMap::new();
     for e in entries {
         by_root.entry(e.root.clone()).or_default().push(e);
@@ -2168,7 +2187,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     let out_total = stat_out.load(Ordering::Relaxed);
 
     eprintln!("\n  ═══════════════════════════════════════════════");
-    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1));
+    eprintln!("  {}", m.voyage_complete.replacen("{}", &total.to_string(), 1).replacen("{}", &format_elapsed(start.elapsed()), 1));
     if !error_list.is_empty() {
         eprintln!("  {}", m.voyage_errors.replacen("{}", &error_list.len().to_string(), 1));
     }
