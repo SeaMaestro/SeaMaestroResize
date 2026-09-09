@@ -237,7 +237,7 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     name = "SeaMaestro",
     version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
-    after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ TGA PNM PBM PGM PPM PAM DDS HDR EXR FF HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
+    after_help = "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
     seamaestro --size 800 --format webp --quality 80 photo.jpg\n    \
