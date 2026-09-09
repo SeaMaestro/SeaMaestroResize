@@ -1,7 +1,7 @@
 use std::process::Command;
 
 fn exe() -> &'static str {
-    env!("CARGO_BIN_EXE_SeaMaestroResize")
+    env!("CARGO_BIN_EXE_SeaMaestro")
 }
 
 #[test]
