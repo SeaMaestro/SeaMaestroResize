@@ -65,14 +65,15 @@ the whole workflow.
 
 **Output**
 
-`webp` (default), `jpeg`/`jpg`, `avif`, `png`, `jxl`, `ico`, `tiff`/`tif`,
+`jpeg`/`jpg` (default), `webp`, `avif`, `png`, `jxl`, `ico`, `tiff`/`tif`,
 `qoi`, `bmp`, `gif`, `pdf`.
 
 **Metadata**
 
 - ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`, `AVIF`.
-- EXIF is preserved only with `--keep-exif`, and only for `JPEG`, `PNG`,
-  `WEBP`, `JXL`.
+- EXIF is preserved only with `--keep-exif`. It is read from `JPEG`, `PNG`,
+  `WEBP`, `JXL`, `AVIF`, `HEIC/HEIF` and written to `JPEG`, `PNG`, `WEBP`,
+  `JXL`, `AVIF`.
 
 ## Build
 
@@ -127,7 +128,7 @@ SeaMaestroResize [OPTIONS] <FILES...>
 | --- | --- |
 | `--size <SIZE>` | 800 (long edge), w800, h600, 800x600 (cover crop), 50pct |
 | `--quality <1..100>` | Lossy quality, default 85 |
-| `--format <FMT>` | Output format, default webp (webp, jpeg, avif, jxl, png, ico, tiff, qoi, bmp, gif, pdf) |
+| `--format <FMT>` | Output format, default jpeg (webp, jpeg, avif, jxl, png, ico, tiff, qoi, bmp, gif, pdf) |
 | `--bw` | Grayscale (black & white) |
 | `--lossless` | Lossless WebP / JXL / PDF (quality ignored) |
 | `--progressive` | Progressive JPEG |
@@ -235,9 +236,9 @@ Examples:
 
 Default: EXIF is removed.
 
-`--keep-exif`: preserves EXIF for JPEG, PNG, WebP and JXL; normalizes
-Orientation to 1 (the image is already auto-rotated) and updates pixel
-dimensions to the resized size. AVIF EXIF write is not supported.
+`--keep-exif`: preserves EXIF (input: JPEG, PNG, WebP, AVIF, JXL, HEIC/HEIF;
+output: JPEG, PNG, WebP, AVIF, JXL); normalizes Orientation to 1 (the image
+is already auto-rotated) and updates pixel dimensions to the resized size.
 
 ## Languages
 
@@ -249,8 +250,7 @@ SeaMaestroResize is licensed under the MIT License.
 
 ## Code signing policy
 
-Release binaries are currently unsigned. Each release is built locally and
-scanned with VirusTotal before upload; Windows SmartScreen may show an
+Release binaries are currently unsigned. Each release is built locally or Github workflow and scanned with VirusTotal before upload; Windows SmartScreen may show an
 "Unknown publisher" warning on first run.
 
 - **Committers and reviewers**: [Volodymyr Gumanyuk](https://github.com/SeaMaestro)
