@@ -61,7 +61,6 @@ pub enum HelpRow {
 }
 
 pub struct Messages {
-    pub about: &'static str,
     pub after_help: &'static str,
     pub h_resize: &'static str,
     pub h_misc: &'static str,
@@ -161,7 +160,6 @@ pub struct Messages {
 }
 
 pub const EN: Messages = Messages {
-    about: "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
     after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI EXAMPLES:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  EXE RENAME EXAMPLES (Windows):\n    SeaMaestro_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    SeaMaestro1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
     h_resize: "RESIZE",
     h_misc: "MISC",
@@ -432,7 +430,6 @@ pub const EN: Messages = Messages {
 // RU и UK идут следом — продолжу сразу после этого блока
 
 pub const RU: Messages = Messages {
-    about: "⚓ Морской конвертер изображений — изменение размера, конвертация и оптимизация из командной строки.",
     after_help: "ВХОД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nВЫХОД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИМЕРЫ CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  ПРИМЕРЫ ПЕРЕИМЕНОВАНИЯ EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → качество 80, ширина 800px, WebP\n    SeaMaestro1920jpgq85.exe          → ширина 1920px, JPEG, качество 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 кадрирование, PNG, ч/б",
     h_resize: "РАЗМЕР",
     h_misc: "ПРОЧЕЕ",
@@ -701,7 +698,6 @@ pub const RU: Messages = Messages {
 };
 
 pub const UK: Messages = Messages {
-    about: "⚓ Морський конвертер зображень — зміна розміру, конвертація та оптимізація з командного рядка.",
     after_help: "ВХІД: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nВИХІД: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ПРИКЛАДИ CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  ПРИКЛАДИ ПЕРЕЙМЕНУВАННЯ EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → якість 80, ширина 800px, WebP\n    SeaMaestro1920jpgq85.exe          → ширина 1920px, JPEG, якість 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 кадрування, PNG, ч/б",
     h_resize: "РОЗМІР",
     h_misc: "ІНШЕ",
@@ -973,7 +969,6 @@ pub const UK: Messages = Messages {
 // DEUTSCH (GERMAN) - Ганзейский морской стиль, точный и суровый
 // =====================================================================
 pub const DE: Messages = Messages {
-    about: "⚓ Maritimer Bildkonverter — Ändern der Größe, Konvertieren und Optimieren über die Kommandozeile.",
     after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  CLI BEISPIELE:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  EXE UMBENENNEN BEISPIELE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → Qualität 80, 800px Breite, WebP\n    SeaMaestro1920jpgq85.exe          → 1920px Breite, JPEG, Qualität 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 Zuschnitt, PNG, Graustufen",
     h_resize: "GRÖSSE",
     h_misc: "SONSTIGES",
@@ -1245,7 +1240,6 @@ pub const DE: Messages = Messages {
 // ESPAÑOL (SPANISH) - Дух испанских галеонов и карибских пиратов
 // =====================================================================
 pub const ES: Messages = Messages {
-    about: "⚓ Redimensionador de imágenes marítimo — redimensiona, convierte y optimiza imágenes desde la consola.",
     after_help: "ENTRADA: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nSALIDA: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EJEMPLOS CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  EJEMPLOS RENOMBRANDO EL EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → calidad 80, 800px de ancho, WebP\n    SeaMaestro1920jpgq85.exe          → 1920px de ancho, JPEG, calidad 85\n    SeaMaestro_w300_h300_png_bw.exe   → recorte 300×300, PNG, escala de grises",
     h_resize: "TAMAÑO",
     h_misc: "MISCELÁNEA",
@@ -1517,7 +1511,6 @@ pub const ES: Messages = Messages {
 // FRANÇAIS (FRENCH) - Дух французских корсаров и капитана Хэддока
 // =====================================================================
 pub const FR: Messages = Messages {
-    about: "⚓ Convertisseur d'images maritime — redimensionnez, convertissez et optimisez des images en ligne de commande.",
     after_help: "ENTRÉE: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nSORTIE: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  EXEMPLES CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  EXEMPLES EN RENOMMANT L'EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → qualité 80, largeur 800px, WebP\n    SeaMaestro1920jpgq85.exe          → largeur 1920px, JPEG, qualité 85\n    SeaMaestro_w300_h300_png_bw.exe   → rognage 300×300, PNG, niveaux de gris",
     h_resize: "TAILLE",
     h_misc: "DIVERS",
@@ -1789,7 +1782,6 @@ pub const FR: Messages = Messages {
 // ΕΛΛΗΝΙΚΑ (GREEK) - Дух Эгейского моря, мифов и средиземноморских моряков
 // =====================================================================
 pub const EL: Messages = Messages {
-    about: "⚓ Ναυτικός μετατροπέας εικόνων — αλλαγή μεγέθους, μετατροπή και βελτιστοποίηση εικόνων από το τερματικό.",
     after_help: "ΕΙΣΟΔΟΣ: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nΕΞΟΔΟΣ: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  ΠΑΡΑΔΕΙΓΜΑΤΑ ΜΕΤΟΝΟΜΑΣΙΑΣ EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → ποιότητα 80, πλάτος 800px, WebP\n    SeaMaestro1920jpgq85.exe          → πλάτος 1920px, JPEG, ποιότητα 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 περικοπή, PNG, ασπρόμαυρο",
     h_resize: "ΜΕΓΕΘΟΣ",
     h_misc: "ΔΙΑΦΟΡΑ",
@@ -2061,7 +2053,6 @@ pub const EL: Messages = Messages {
 // FILIPINO (TAGALOG) - Язык экипажей торгового флота, "Taglish", морской сленг
 // =====================================================================
 pub const FIL: Messages = Messages {
-    about: "⚓ Maritime image resizer — pampaliit, converter, at optimizer ng mga imahe gamit ang command line.",
     after_help: "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\nOUTPUT: webp jpeg avif png jxl ico tiff qoi bmp gif pdf\n\n  MGA HALIMBAWA SA CLI:\n    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    seamaestro --size 50pct --format avif photo.heic\n    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    cat photo.jpg | seamaestro --format webp > out.webp\n    seamaestro --size 1200 --format pdf --quality 85 photo.jpg\n    seamaestro --merge --format pdf --quality 85 *.jpg\n\n  MGA HALIMBAWA SA PAG-RENAME NG EXE (Windows):\n    SeaMaestro_q80_w800_webp.exe      → quality 80, 800px ang lapad, WebP\n    SeaMaestro1920jpgq85.exe          → 1920px ang lapad, JPEG, quality 85\n    SeaMaestro_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale",
     h_resize: "SIZE",
     h_misc: "IBA PA",

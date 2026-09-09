@@ -185,7 +185,7 @@ fn cli_command() -> clap::Command {
     let m = msg();
     let mut cmd = Cli::command();
     cmd = cmd
-        .about(m.about)
+        .about(format!("{}\n{}\n{} Version: {}\n🖂  seamaestro@proton.me\n⎇  https://github.com/SeaMaestro/SeaMaestroResize", m.banner_title, m.banner_tagline, m.banner_by, env!("CARGO_PKG_VERSION")))
         .after_help(m.after_help);
     cmd = cmd
         .mut_arg("size", |a| a.help(m.size_help).help_heading(m.h_resize))
@@ -236,7 +236,6 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 #[command(
     name = "SeaMaestro",
     version,
-    about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
     after_help = "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
