@@ -127,6 +127,7 @@ impl Config {
             shanty: false,
             keep_exif: false,
             merge: false,
+            output_is_dir: false,
         };
 
         let cleaned: String = stem
@@ -289,6 +290,7 @@ mod tests {
             shanty: false,
             keep_exif: false,
             merge: false,
+            output_is_dir: false,
         }
     }
 

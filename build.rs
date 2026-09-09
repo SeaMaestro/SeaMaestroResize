@@ -16,8 +16,8 @@ fn windows_resources() {
 
     res.set("FileDescription", "SeaMaestro Multiformat Image Resizer");
     res.set("ProductName", "SeaMaestro Image Resizer");
-    res.set("InternalName", "SeaMaestroResize");
-    res.set("OriginalFilename", "SeaMaestroResize.exe");
+    res.set("InternalName", "SeaMaestro");
+    res.set("OriginalFilename", "SeaMaestro.exe");
     res.set("CompanyName", "Independent Developer — Capt. Volodymyr Gumanyuk");
     let version = format!("{}.0", env!("CARGO_PKG_VERSION"));
     res.set("FileVersion", &version);

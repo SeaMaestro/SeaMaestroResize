@@ -234,7 +234,7 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 #[derive(Parser)]
 #[command(
-    name = "SeaMaestroResize",
+    name = "SeaMaestro",
     version,
     about = "⚓ Maritime image resizer — resize, convert, and optimize images from the command line.",
     after_help = "INPUT: JPEG PNG WebP AVIF JXL ICO TIFF QOI BMP GIF SVG SVGZ TGA PNM PBM PGM PPM PAM DDS HDR EXR FF HEIC/HEIF  RAW(CR2 NEF ARW DNG...)\n\
@@ -247,9 +247,9 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     seamaestro --merge vacation_folder\n    \
     cat photo.jpg | seamaestro --format webp > out.webp\n\n  \
     EXE RENAME EXAMPLES (Windows):\n    \
-    SeaMaestroResize_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
-    SeaMaestroResize1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    \
-    SeaMaestroResize_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale"
+    SeaMaestro_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
+    SeaMaestro1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    \
+    SeaMaestro_w300_h300_png_bw.exe   → 300×300 cover crop, PNG, grayscale"
 )]
 struct Cli {
     #[arg(long, help_heading = "RESIZE", verbatim_doc_comment)]
@@ -299,6 +299,7 @@ pub(crate) struct Config {
     shanty: bool,
     keep_exif: bool,
     merge: bool,
+    output_is_dir: bool,
 }
 
 enum Size {
@@ -450,6 +451,7 @@ fn run() -> Result<Config> {
             shanty: cli.shanty,
             keep_exif: cli.keep_exif,
             merge: cli.merge,
+            output_is_dir: false,
         };
         if let Some(ref s) = cli.size {
             if s == "42" {
@@ -488,8 +490,7 @@ fn run() -> Result<Config> {
             config.format = ImageFormat::Pdf;
         }
         if entries.len() > 1 && config.output.is_some() && !config.merge {
-            eprintln!("  {}", msg().output_ignored);
-            config.output = None;
+            config.output_is_dir = true;
         }
         banner(&config);
         if let Some(buf) = stdin_buf {
@@ -520,7 +521,7 @@ fn run() -> Result<Config> {
         .unwrap_or_default()
         .to_string_lossy();
 
-    if !stem.contains("SeaMaestroResize") {
+    if !stem.contains("SeaMaestro") {
         #[cfg(target_os = "windows")] {
             eprintln!("{}", boxed(msg().rename_windows));
         }
@@ -531,7 +532,7 @@ fn run() -> Result<Config> {
             lang: lang::Lang::En,
             target_size: None, quality: 85, format: ImageFormat::Jpeg,
             grayscale: false, lossless: false, progressive: false,
-            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false,
+            sharpen: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false, output_is_dir: false,
         });
     }
 
@@ -957,7 +958,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         let base = compute_output_path(input, config, output_dir, Some(rel));
         let path_collision = used_paths.contains(&path_key(&base)) || (check_disk && base.exists());
 
-        let final_path = if config.output.is_none() && path_collision {
+        let final_path = if (config.output.is_none() || config.output_is_dir) && path_collision {
             let stem = input.file_stem().unwrap_or_default().to_string_lossy();
             let ext = config.format.extension();
             let suffix = build_suffix(config);
@@ -1167,14 +1168,17 @@ fn compute_output_path(
     output_dir: &Path,
     rel_path: Option<&Path>,
 ) -> PathBuf {
-    if let Some(ref out) = config.output {
-        return PathBuf::from(out);
-    }
-
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let ext = config.format.extension();
     let suffix = build_suffix(config);
     let out_filename = format!("{}{}.{}", stem, suffix, ext);
+
+    if let Some(ref out) = config.output {
+        if config.output_is_dir {
+            return PathBuf::from(out).join(out_filename.as_str());
+        }
+        return PathBuf::from(out);
+    }
 
     if let Some(rel) = rel_path {
         let rel = rel.to_path_buf();
@@ -1456,8 +1460,8 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     let (raw, file_permit) = read_input(input)?;
     drop(file_permit);
 
-    let out_path = if let Some(ref out) = config.output {
-        PathBuf::from(out)
+    let out_path = if config.output.is_some() && !config.output_is_dir {
+        PathBuf::from(config.output.as_deref().unwrap())
     } else {
         final_path.to_path_buf()
     };
@@ -2112,11 +2116,11 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             let any_removable = is_on_removable_drive(root);
             let is_loose = root_entries.iter().all(|e| e.direct_file);
             let base_dir = if any_removable {
-                exe_dir().join("SeaMaestro_Merged")
+                exe_dir().join("SeaMaestroMerged")
             } else if is_loose {
-                root.join("SeaMaestro_Merged")
+                root.join("SeaMaestroMerged")
             } else {
-                root.parent().unwrap_or(root).join("SeaMaestro_Merged")
+                root.parent().unwrap_or(root).join("SeaMaestroMerged")
             };
 
             let unique = base_to_unique.entry(base_dir.clone()).or_insert_with(|| {

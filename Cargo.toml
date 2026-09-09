@@ -6,7 +6,7 @@ strip = true
 panic = "unwind"
 
 [package]
-name = "SeaMaestroResize"
+name = "SeaMaestro"
 version = "2.4.12"
 edition = "2021"
 

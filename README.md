@@ -1,4 +1,4 @@
-# SeaMaestroResize
+# SeaMaestro
 
 ⚓ Multiformat batch image resizer and converter for Windows.
 A single static executable — no installer, no external DLLs, no MSVC runtime.
@@ -8,7 +8,7 @@ Download, run, done.
 
 ## The idea
 
-No installer, no config files, no dependencies. Copy `SeaMaestroResize.exe`
+No installer, no config files, no dependencies. Copy `SeaMaestro.exe`
 anywhere, rename it to bake in your settings, and drop photos onto it. That's
 the whole workflow.
 
@@ -18,7 +18,7 @@ the whole workflow.
   `SeaMaestroResized`, preserving the folder structure (each subfolder keeps its
   name with a `_Resized` suffix).
 - Drop onto a **merge-renamed exe** → one PDF per folder, rebuilding the tree
-  under a `SeaMaestro_Merged` folder with **Path Compression**.
+  under a `SeaMaestroMerged` folder with **Path Compression**.
 
 ## Features
 
@@ -114,12 +114,12 @@ enable static CRT on a fresh clone, create a local `.cargo/config.toml`
 rustflags = ["-C", "target-feature=+crt-static"]
 ```
 
-Output: `target/release/SeaMaestroResize.exe`
+Output: `target/release/SeaMaestro.exe`
 
 ## Usage
 
 ```text
-SeaMaestroResize [OPTIONS] <FILES...>
+SeaMaestro [OPTIONS] <FILES...>
 ```
 
 ## CLI options
@@ -157,10 +157,10 @@ seamaestro --format pdf logo.svg
 ## PDF & merge
 
 ```text
-SeaMaestroResize --format pdf photo.jpg             → photo_q85.pdf
-SeaMaestroResize --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
-SeaMaestroResize --merge vacation_folder            → vacation_folder_Merged\ (one PDF per folder)
-SeaMaestroResize --merge --lossless --bw folder     → folder_Merged\ (FlateDecode, grayscale)
+SeaMaestro --format pdf photo.jpg             → photo_q85.pdf
+SeaMaestro --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
+SeaMaestro --merge vacation_folder            → vacation_folder_Merged\ (one PDF per folder)
+SeaMaestro --merge --lossless --bw folder     → folder_Merged\ (FlateDecode, grayscale)
 ```
 
 Single PDF keeps the normal output name, e.g. `photo_q85.pdf`.
@@ -227,10 +227,10 @@ Rename the executable to bake in settings. Tokens may be separated by `_`,
 
 Examples:
 
-`SeaMaestroResize_q80_w800_webp.exe` — quality 80, 800px wide, WebP
-`SeaMaestroResize1920jpgq85_DE.exe` — 1920px wide, JPEG, quality 85, German language
-`SeaMaestroResize_w300_h300_png_bw.exe` — 300×300 cover crop, PNG, grayscale
-`SeaMaestroResize_merge.exe` — one PDF per folder, mirroring the tree
+`SeaMaestro_q80_w800_webp.exe` — quality 80, 800px wide, WebP
+`SeaMaestro1920jpgq85_DE.exe` — 1920px wide, JPEG, quality 85, German language
+`SeaMaestro_w300_h300_png_bw.exe` — 300×300 cover crop, PNG, grayscale
+`SeaMaestro_merge.exe` — one PDF per folder, mirroring the tree
 
 ## EXIF behavior
 
@@ -246,7 +246,7 @@ is already auto-rotated) and updates pixel dimensions to the resized size.
 
 ## License
 
-SeaMaestroResize is licensed under the MIT License.
+SeaMaestro is licensed under the MIT License.
 
 ## Code signing policy
 
