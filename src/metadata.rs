@@ -58,29 +58,38 @@ pub(crate) fn webp_embed_metadata(webp: Vec<u8>, icc: Option<&[u8]>, exif: Optio
     Ok(out)
 }
 
-pub(crate) fn encode_tiff_icc(
+pub(crate) fn encode_tiff(
     width: u32,
     height: u32,
     pixels: &[u8],
     channels: u8,
-    icc: &[u8],
+    icc: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     let mut buf = std::io::Cursor::new(Vec::new());
     {
-        let mut encoder = tiff::encoder::TiffEncoder::new(&mut buf)?;
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut buf)?.with_compression(
+            tiff::encoder::Compression::Deflate(tiff::encoder::DeflateLevel::Balanced),
+        );
         match channels {
+            1 => {
+                let mut image = encoder.new_image::<tiff::encoder::colortype::Gray8>(width, height)?;
+                if let Some(profile) = icc.filter(|p| !p.is_empty()) {
+                    image.encoder().write_tag(tiff::tags::Tag::IccProfile, profile)?;
+                }
+                image.write_data(pixels)?;
+            }
             3 => {
                 let mut image = encoder.new_image::<tiff::encoder::colortype::RGB8>(width, height)?;
-                image
-                    .encoder()
-                    .write_tag(tiff::tags::Tag::IccProfile, icc)?;
+                if let Some(profile) = icc.filter(|p| !p.is_empty()) {
+                    image.encoder().write_tag(tiff::tags::Tag::IccProfile, profile)?;
+                }
                 image.write_data(pixels)?;
             }
             4 => {
                 let mut image = encoder.new_image::<tiff::encoder::colortype::RGBA8>(width, height)?;
-                image
-                    .encoder()
-                    .write_tag(tiff::tags::Tag::IccProfile, icc)?;
+                if let Some(profile) = icc.filter(|p| !p.is_empty()) {
+                    image.encoder().write_tag(tiff::tags::Tag::IccProfile, profile)?;
+                }
                 image.write_data(pixels)?;
             }
             _ => return Err(anyhow::anyhow!("unsupported TIFF channel count: {}", channels)),

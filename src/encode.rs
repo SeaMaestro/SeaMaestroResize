@@ -6,7 +6,7 @@ use libjxl_sys::*;
 use crate::msg;
 use crate::Config;
 use crate::ImageFormat;
-use crate::metadata::{encode_tiff_icc, normalize_exif, webp_embed_metadata};
+use crate::metadata::{encode_tiff, normalize_exif, webp_embed_metadata};
 use crate::pdf::single_page_pdf;
 
 fn write_jpeg_exif(comp: &mut mozjpeg::compress::CompressStarted<Vec<u8>>, blob: &[u8]) {
@@ -329,13 +329,14 @@ fn encode_png_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>, exif: Option
 }
 
 fn encode_tiff_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>) -> Result<Vec<u8>> {
-    if let Some(profile) = icc.filter(|p| !p.is_empty()) {
-        if let Some(rgb) = img.as_rgb8() {
-            return encode_tiff_icc(rgb.width(), rgb.height(), rgb.as_raw(), 3, profile);
-        }
-        if let Some(rgba) = img.as_rgba8() {
-            return encode_tiff_icc(rgba.width(), rgba.height(), rgba.as_raw(), 4, profile);
-        }
+    if let Some(gray) = img.as_luma8() {
+        return encode_tiff(gray.width(), gray.height(), gray.as_raw(), 1, icc);
+    }
+    if let Some(rgb) = img.as_rgb8() {
+        return encode_tiff(rgb.width(), rgb.height(), rgb.as_raw(), 3, icc);
+    }
+    if let Some(rgba) = img.as_rgba8() {
+        return encode_tiff(rgba.width(), rgba.height(), rgba.as_raw(), 4, icc);
     }
     let mut buf = std::io::Cursor::new(Vec::new());
     img.write_to(&mut buf, image::ImageFormat::Tiff)?;
