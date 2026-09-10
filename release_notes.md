@@ -1,3 +1,28 @@
+## SeaMaestro v2.5.0
+
+## ✨ What's New
+
+**Full branding in `--help`** — the about section now shows the complete
+SeaMaestro identity: banner title, tagline, author, version, contact email and
+repository URL.
+
+**`--version` flag removed** — the redundant `-V`/`--version` flag is gone;
+the version is now shown directly in the about section.
+
+**Smart Scan (`--scan`)** — a filter for document photos: flattens uneven
+lighting and shadows into a crisp white background, keeps text black and
+preserves colored stamps/signatures. Combines with `pdf`/`merge`.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
 ## SeaMaestro v2.4.12
 
 ## ✨ What's New

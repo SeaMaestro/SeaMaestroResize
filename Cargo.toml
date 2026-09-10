@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestro"
-version = "2.4.12"
+version = "2.5.0"
 edition = "2021"
 
 [dependencies]

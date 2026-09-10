@@ -1,6 +1,6 @@
 {
   "name": "seamaestroresize",
-  "version-string": "2.4.12",
+  "version-string": "2.5.0",
   "dependencies": [
     "pkgconf",
     {
