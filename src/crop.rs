@@ -30,28 +30,23 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
         .to_luma8();
     let luma = small.as_raw();
 
-    let r = (dw.min(dh) / 16).max(1) as usize;
-    let blur = box_blur_gray(luma, dw as usize, dh as usize, r);
-
-    let n = (dw * dh) as usize;
-    let mut norm = vec![0f32; n];
-    for i in 0..n {
-        let v = luma[i] as f32 / (blur[i] as f32).max(1.0);
-        norm[i] = v.clamp(0.0, 1.0);
-    }
+    let smooth = box_blur_gray(luma, dw as usize, dh as usize, 2);
 
     let mut hist = [0u32; 256];
-    for &v in &norm {
-        hist[(v * 255.0) as usize] += 1;
+    for &v in &smooth {
+        hist[v as usize] += 1;
     }
-    let t = otsu(&hist) as f32 / 255.0;
+    let t = otsu(&hist);
 
+    let n = (dw * dh) as usize;
     let mut mask = vec![0u8; n];
     for i in 0..n {
-        if norm[i] > t {
+        if smooth[i] > t {
             mask[i] = 1;
         }
     }
+
+    let mask = morph_close(&mask, dw as usize, dh as usize);
 
     let comp = largest_component(&mask, dw as usize, dh as usize)?;
 
@@ -62,15 +57,19 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     }
 
     let hull_f: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+
     let corners = simplify_to_4(&hull_f);
-    if corners.len() != 4 {
-        return None;
-    }
-    let c = [corners[0], corners[1], corners[2], corners[3]];
-    let ordered = order_corners(&c);
+    let mut ordered = if corners.len() == 4 {
+        order_corners(&[corners[0], corners[1], corners[2], corners[3]])
+    } else {
+        min_area_rect(&hull_f)
+    };
 
     if !validate(&ordered, dw as f32, dh as f32) {
-        return None;
+        ordered = min_area_rect(&hull_f);
+        if !validate(&ordered, dw as f32, dh as f32) {
+            return None;
+        }
     }
 
     let inv_scale = 1.0 / scale;
@@ -344,6 +343,91 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
 
 fn cross_f(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+}
+
+fn morph_close(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut dilated = vec![0u8; w * h];
+    let mut closed = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let mut hit = false;
+            'outer: for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    if mask[yy * w + xx] == 1 {
+                        hit = true;
+                        break 'outer;
+                    }
+                }
+            }
+            dilated[y * w + x] = if hit { 1 } else { 0 };
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let mut hole = false;
+            'outer: for dy in -1i32..=1 {
+                for dx in -1i32..=1 {
+                    let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
+                    let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
+                    if dilated[yy * w + xx] == 0 {
+                        hole = true;
+                        break 'outer;
+                    }
+                }
+            }
+            closed[y * w + x] = if hole { 0 } else { 1 };
+        }
+    }
+    closed
+}
+
+fn min_area_rect(hull: &[(f32, f32)]) -> [(f32, f32); 4] {
+    let n = hull.len();
+    if n < 3 {
+        return [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
+    }
+    let mut best: Option<(f32, [(f32, f32); 4])> = None;
+    for i in 0..n {
+        let a = hull[i];
+        let b = hull[(i + 1) % n];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 {
+            continue;
+        }
+        let ux = dx / len;
+        let uy = dy / len;
+        let vx = -uy;
+        let vy = ux;
+        let mut min_u = f32::MAX;
+        let mut max_u = f32::MIN;
+        let mut min_v = f32::MAX;
+        let mut max_v = f32::MIN;
+        for &(px, py) in hull {
+            let pu = px * ux + py * uy;
+            let pv = px * vx + py * vy;
+            min_u = min_u.min(pu);
+            max_u = max_u.max(pu);
+            min_v = min_v.min(pv);
+            max_v = max_v.max(pv);
+        }
+        let area = (max_u - min_u) * (max_v - min_v);
+        let corner = |u: f32, v: f32| (u * ux + v * vx, u * uy + v * vy);
+        let rect = [
+            corner(min_u, min_v),
+            corner(max_u, min_v),
+            corner(max_u, max_v),
+            corner(min_u, max_v),
+        ];
+        if best.is_none_or(|(ba, _)| area < ba) {
+            best = Some((area, rect));
+        }
+    }
+    let rect = best.map(|(_, r)| r).unwrap_or([(0.0, 0.0); 4]);
+    order_corners(&rect)
 }
 
 fn homography(src: &[(f32, f32); 4], dst: &[(f32, f32); 4]) -> [f32; 9] {
