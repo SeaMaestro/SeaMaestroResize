@@ -128,6 +128,7 @@ mod util;
 mod pdf;
 mod svg_pdf;
 mod scan;
+mod crop;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::env;
@@ -197,6 +198,7 @@ fn cli_command() -> clap::Command {
         .mut_arg("progressive", |a| a.help(m.progressive_help).help_heading(m.h_resize))
         .mut_arg("sharpen", |a| a.help(m.sharpen_help).help_heading(m.h_resize))
         .mut_arg("scan", |a| a.help(m.scan_help).help_heading(m.h_resize))
+        .mut_arg("crop", |a| a.help(m.crop_help).help_heading(m.h_resize))
         .mut_arg("no_pause", |a| a.help(m.no_pause_help).help_heading(m.h_misc))
         .mut_arg("output", |a| a.help(m.output_help).help_heading(m.h_misc))
         .mut_arg("shanty", |a| a.help(m.shanty_help).help_heading(m.h_misc))
@@ -268,6 +270,8 @@ struct Cli {
     sharpen: bool,
     #[arg(long, help_heading = "RESIZE")]
     scan: bool,
+    #[arg(long, help_heading = "RESIZE")]
+    crop: bool,
     #[arg(long, help_heading = "MISC")]
     no_pause: bool,
     #[arg(long, help_heading = "MISC")]
@@ -297,6 +301,7 @@ pub(crate) struct Config {
     pub(crate) progressive: bool,
     sharpen: bool,
     scan: bool,
+    crop: bool,
     no_pause: bool,
     output: Option<String>,
     shanty: bool,
@@ -450,6 +455,7 @@ fn run() -> Result<Config> {
             progressive: cli.progressive,
             sharpen: cli.sharpen,
             scan: cli.scan,
+            crop: cli.crop,
             no_pause: cli.no_pause,
             output: cli.output.clone(),
             shanty: cli.shanty,
@@ -536,7 +542,7 @@ fn run() -> Result<Config> {
             lang: lang::Lang::En,
             target_size: None, quality: 85, format: ImageFormat::Jpeg,
             grayscale: false, lossless: false, progressive: false,
-            sharpen: false, scan: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false, output_is_dir: false,
+            sharpen: false, scan: false, crop: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false, output_is_dir: false,
         });
     }
 
@@ -1162,6 +1168,7 @@ fn build_suffix(config: &Config) -> String {
         parts.push(format!("q{}", config.quality));
     }
     if config.grayscale { parts.push("bw".to_string()); }
+    if config.crop { parts.push("crop".to_string()); }
     if config.scan { parts.push("scan".to_string()); }
     if parts.is_empty() { String::new() } else { format!("_{}", parts.join("_")) }
 }
@@ -1326,6 +1333,7 @@ fn exif_orientation(raw: &[u8]) -> Option<u32> {
 enum Stage {
     DepthDownscale,
     AutoOrient,
+    Crop,
     Grayscale,
     Resize,
     Sharpen,
@@ -1336,6 +1344,7 @@ fn build_stages(config: &Config) -> Vec<Stage> {
     let mut stages = Vec::new();
     stages.push(Stage::DepthDownscale);
     stages.push(Stage::AutoOrient);
+    if config.crop { stages.push(Stage::Crop); }
     if config.scan { stages.push(Stage::Scan); }
     if config.grayscale { stages.push(Stage::Grayscale); }
     if config.target_size.is_some() { stages.push(Stage::Resize); }
@@ -1357,6 +1366,7 @@ fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orie
                 }
             }
             Stage::Sharpen => sharpen_par(img, 3),
+            Stage::Crop => crate::crop::deskew(img),
             Stage::Scan => crate::scan::smart_scan(img),
         };
     }
@@ -1408,7 +1418,7 @@ fn jpeg_sof_info(raw: &[u8]) -> Option<(u32, u32, bool)> {
 }
 
 fn passthrough_jpeg_pdf(raw: &[u8], config: &Config) -> Option<crate::pdf::PdfPage> {
-    if config.target_size.is_some() || config.grayscale || config.sharpen || config.scan {
+    if config.target_size.is_some() || config.grayscale || config.sharpen || config.scan || config.crop {
         return None;
     }
     if !config.lossless && config.quality != 100 {
@@ -1485,7 +1495,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.sharpen && !config.scan && matches!(config.format, ImageFormat::Pdf) {
+    if !config.sharpen && !config.scan && !config.crop && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 ensure_dir(&out_path)?;
@@ -1813,6 +1823,9 @@ fn banner(config: &Config) {
     }
     if config.sharpen {
         eprintln!("  ║  {:<13}{}  ║", m.label_sharpen, pad_right(m.on, 45));
+    }
+    if config.crop {
+        eprintln!("  ║  {:<13}{}  ║", m.label_crop, pad_right(m.on, 45));
     }
     if config.scan {
         eprintln!("  ║  {:<13}{}  ║", m.label_scan, pad_right(m.on, 45));
@@ -2257,7 +2270,7 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.sharpen && !config.scan {
+    if !config.sharpen && !config.scan && !config.crop {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 return Ok(crate::pdf::PdfPage::Vector(vp));

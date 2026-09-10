@@ -1,6 +1,6 @@
 # SeaMaestro
 
-⚓ Multiformat batch image resizer and converter for Windows.
+🔱 Multiformat image resizer and converter for Windows.
 A single static executable — no installer, no external DLLs, no MSVC runtime.
 Download, run, done.
 
@@ -134,6 +134,7 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--progressive` | Progressive JPEG |
 | `--sharpen` | Sharpen after resize (sigma=1.0, threshold=3) |
 | `--scan` | Smart Scan filter for document photos: flatten lighting, white background, keep colored stamps (combine with `--format pdf`/`--merge`) |
+| `--crop` | Auto-crop & deskew: detect the document, straighten perspective, crop background |
 | `--keep-exif` | Keep EXIF metadata (cleared by default) |
 | `--merge` | One PDF per folder, mirroring the tree (Path Compression; implies `--format pdf`) |
 | `--output <FILE>` | Output file name/path (single file only) |
@@ -223,6 +224,7 @@ Rename the executable to bake in settings. Tokens may be separated by `_`,
 | `progressive` `prog` | Progressive JPEG |
 | `sharp` | Sharpen |
 | `scan` | Smart Scan filter (combine with `pdf`/`merge`) |
+| `crop` | Auto-crop & deskew |
 | `exif` | Keep EXIF |
 | `shanty` | Sea shanties |
 | `merge` | One PDF per folder, mirroring the tree (Path Compression) |

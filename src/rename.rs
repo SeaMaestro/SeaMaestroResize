@@ -99,6 +99,10 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
             config.scan = true;
             return true;
         }
+        "crop" => {
+            config.crop = true;
+            return true;
+        }
         "merge" => {
             config.merge = true;
             return true;
@@ -127,6 +131,7 @@ impl Config {
             progressive: false,
             sharpen: false,
             scan: false,
+            crop: false,
             no_pause: false,
             output: None,
             shanty: false,
@@ -211,7 +216,7 @@ fn get_bare_re() -> &'static Regex {
 }
 
 const KEYWORDS_ORDERED: &[&str] = &[
-    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "exif", "merge",
+    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge",
 ];
 
 const LANG_KEYWORDS_ORDERED: &[&str] = &[
@@ -291,6 +296,7 @@ mod tests {
             progressive: false,
             sharpen: false,
             scan: false,
+            crop: false,
             no_pause: false,
             output: None,
             shanty: false,
