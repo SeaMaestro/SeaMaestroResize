@@ -39,7 +39,7 @@ the whole workflow.
   each disk keeps its own output; removable USB drives are never written back
   (output lands next to the program).
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
-- **Grayscale** (`--bw`) and **sharpen** (`--sharpen`).
+- **Grayscale** (`--bw`), **sharpen** (`--sharpen`), and **Smart Scan** (`--scan`).
 - **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF, AVIF.
 - **EXIF passthrough** (`--keep-exif`) with orientation normalization and
   resized pixel-dimension update; EXIF is cleared by default.
@@ -133,6 +133,7 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--lossless` | Lossless WebP / JXL / PDF (quality ignored) |
 | `--progressive` | Progressive JPEG |
 | `--sharpen` | Sharpen after resize (sigma=1.0, threshold=3) |
+| `--scan` | Smart Scan filter for document photos: flatten lighting, white background, keep colored stamps (combine with `--format pdf`/`--merge`) |
 | `--keep-exif` | Keep EXIF metadata (cleared by default) |
 | `--merge` | One PDF per folder, mirroring the tree (Path Compression; implies `--format pdf`) |
 | `--output <FILE>` | Output file name/path (single file only) |
@@ -221,6 +222,7 @@ Rename the executable to bake in settings. Tokens may be separated by `_`,
 | `lossless` | Lossless WebP/JXL/PDF |
 | `progressive` `prog` | Progressive JPEG |
 | `sharp` | Sharpen |
+| `scan` | Smart Scan filter (combine with `pdf`/`merge`) |
 | `exif` | Keep EXIF |
 | `shanty` | Sea shanties |
 | `merge` | One PDF per folder, mirroring the tree (Path Compression) |
