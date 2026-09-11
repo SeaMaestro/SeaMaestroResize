@@ -36,6 +36,7 @@ const SCORE_MODE_ENV: &str = "SEAMAESTRO_CROP_SCORE";
 const STEP_THR_ENV: &str = "SEAMAESTRO_CROP_STEP_THR";
 const CONTRAST_W_ENV: &str = "SEAMAESTRO_CROP_CONTRAST_W";
 const TIEBREAK_REL_ENV: &str = "SEAMAESTRO_CROP_TIEBREAK";
+const WARP_RES_TOL_PX: f32 = 1.0;
 
 pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
     let (w, h) = (img.width(), img.height());
@@ -46,7 +47,7 @@ pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
         Some(c) => c,
         None => return img,
     };
-    warp(&img, &corners)
+    warp(&img, &corners).unwrap_or(img)
 }
 
 struct Hypothesis {
@@ -175,6 +176,12 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     detect_by_threshold(&soft, &mag_sharp, dwi, dhi, &mut sc, &mut hyp, &vctx);
 
     if hyp.is_empty() {
+        if crop_debug() {
+            eprintln!(
+                "  [crop] proxy {}x{} strong={} hypotheses=0",
+                dwi, dhi, strong
+            );
+        }
         return None;
     }
 
@@ -441,7 +448,9 @@ fn push_poly_hypotheses(
         let q = order_corners(&[corners[0], corners[1], corners[2], corners[3]]);
         push_quad(q, source, w, h, mag, out, vctx);
     }
-    push_quad(min_area_rect(&hull_f), source, w, h, mag, out, vctx);
+    if let Some(q) = min_area_rect(&hull_f) {
+        push_quad(q, source, w, h, mag, out, vctx);
+    }
 }
 
 fn push_quad(
@@ -1327,10 +1336,10 @@ fn morph_close_into(src: &[u8], w: usize, h: usize, tmp: &mut [u8], dst: &mut [u
     }
 }
 
-fn min_area_rect(hull: &[(f32, f32)]) -> [(f32, f32); 4] {
+fn min_area_rect(hull: &[(f32, f32)]) -> Option<[(f32, f32); 4]> {
     let n = hull.len();
     if n < 3 {
-        return [(0.0, 0.0), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
+        return None;
     }
     let mut best: Option<(f32, [(f32, f32); 4])> = None;
     for i in 0..n {
@@ -1370,23 +1379,27 @@ fn min_area_rect(hull: &[(f32, f32)]) -> [(f32, f32); 4] {
             best = Some((area, rect));
         }
     }
-    let rect = best.map(|(_, r)| r).unwrap_or([(0.0, 0.0); 4]);
-    order_corners(&rect)
+    let rect = best.map(|(_, r)| r)?;
+    Some(order_corners(&rect))
 }
 
-fn homography(src: &[(f32, f32); 4], dst: &[(f32, f32); 4]) -> [f32; 9] {
+fn homography(from: &[(f32, f32); 4], to: &[(f32, f32); 4]) -> ([f32; 9], bool) {
     let mut a = [[0f32; 9]; 8];
     for i in 0..4 {
-        let (x, y) = src[i];
-        let (xp, yp) = dst[i];
+        let (x, y) = from[i];
+        let (xp, yp) = to[i];
         a[2 * i] = [x, y, 1.0, 0.0, 0.0, 0.0, -xp * x, -xp * y, xp];
         a[2 * i + 1] = [0.0, 0.0, 0.0, x, y, 1.0, -yp * x, -yp * y, yp];
     }
-    let h = solve_gauss(a);
-    [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0]
+    let (h, degenerate) = solve_gauss(a);
+    (
+        [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1.0],
+        degenerate,
+    )
 }
 
-fn solve_gauss(mut a: [[f32; 9]; 8]) -> [f32; 8] {
+fn solve_gauss(mut a: [[f32; 9]; 8]) -> ([f32; 8], bool) {
+    let mut degenerate = false;
     for col in 0..8 {
         let mut piv = col;
         for r in (col + 1)..8 {
@@ -1395,6 +1408,7 @@ fn solve_gauss(mut a: [[f32; 9]; 8]) -> [f32; 8] {
             }
         }
         if a[piv][col].abs() < 1e-9 {
+            degenerate = true;
             continue;
         }
         a.swap(col, piv);
@@ -1417,18 +1431,83 @@ fn solve_gauss(mut a: [[f32; 9]; 8]) -> [f32; 8] {
     for i in 0..8 {
         x[i] = a[i][8];
     }
-    x
+    (x, degenerate)
 }
 
-fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> image::DynamicImage {
+// Residual = max |h(from[i]) - to[i]| in SOURCE px over the 4 corners.
+// It is a solver self-check, not a geometric one: 4-point DLT satisfies its own
+// system exactly for ANY correspondence set, so this catches numerical failure
+// (ill-conditioned f32 solve without Hartley normalization) and it CANNOT catch a
+// corner-ORDER error - that is validate_reason's job (convex + sign consistent,
+// a bowtie is rejected there). Rationale and measured distribution: G0_GATE.md
+fn warp_residual(
+    h: &[f32; 9],
+    from: &[(f32, f32); 4],
+    to: &[(f32, f32); 4],
+) -> (f32, f32, f32) {
+    let mut worst = 0.0f32;
+    let mut sum = 0.0f32;
+    let mut diag = 0.0f32;
+    for i in 0..4 {
+        let dx = to[i].0 - to[(i + 1) % 4].0;
+        let dy = to[i].1 - to[(i + 1) % 4].1;
+        diag = diag.max((dx * dx + dy * dy).sqrt());
+    }
+    for i in 0..4 {
+        let (u, v) = from[i];
+        let w = h[6] * u + h[7] * v + h[8];
+        if !w.is_finite() || w.abs() < 1e-30 {
+            return (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        }
+        let x = (h[0] * u + h[1] * v + h[2]) / w;
+        let y = (h[3] * u + h[4] * v + h[5]) / w;
+        if !x.is_finite() || !y.is_finite() {
+            return (f32::INFINITY, f32::INFINITY, f32::INFINITY);
+        }
+        let d = dist((x, y), to[i]);
+        worst = worst.max(d);
+        sum += d;
+    }
+    let rel = if diag > 0.0 { worst / diag } else { f32::INFINITY };
+    (worst, sum / 4.0, rel)
+}
+
+fn warp_degeneracy(h: &[f32; 9], dw: f32, dh: f32) -> (f32, f32) {
+    let mut denom_min = f32::INFINITY;
+    let mut jac_min = f32::INFINITY;
+    for (u, v) in [(0.0f32, 0.0f32), (dw, 0.0), (dw, dh), (0.0, dh)] {
+        let w = h[6] * u + h[7] * v + h[8];
+        denom_min = denom_min.min(w.abs());
+        let nx = h[0] * u + h[1] * v + h[2];
+        let ny = h[3] * u + h[4] * v + h[5];
+        let a = h[0] * w - nx * h[6];
+        let b = h[1] * w - nx * h[7];
+        let c = h[3] * w - ny * h[6];
+        let d = h[4] * w - ny * h[7];
+        let w2 = (w * w).max(1e-30);
+        jac_min = jac_min.min((a * d - b * c).abs() / (w2 * w2).max(1e-30));
+    }
+    (denom_min, jac_min)
+}
+
+fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::DynamicImage> {
     let top = dist(corners[0], corners[1]);
     let bottom = dist(corners[2], corners[3]);
     let left = dist(corners[0], corners[3]);
     let right = dist(corners[1], corners[2]);
-    let dw = ((top + bottom) / 2.0).round() as u32;
-    let dh = ((left + right) / 2.0).round() as u32;
-    let dw = dw.clamp(1, 32768);
-    let dh = dh.clamp(1, 32768);
+    let dwf = ((top + bottom) / 2.0).round();
+    let dhf = ((left + right) / 2.0).round();
+    if !(dwf >= 2.0) || !(dhf >= 2.0) {
+        if crop_debug() {
+            eprintln!(
+                "  [crop] warp fallback size dw={:.3e} dh={:.3e} -> original",
+                dwf, dhf
+            );
+        }
+        return None;
+    }
+    let dw = (dwf as u32).clamp(2, 32768);
+    let dh = (dhf as u32).clamp(2, 32768);
 
     let dst = [
         (0.0f32, 0.0f32),
@@ -1436,7 +1515,31 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> image::DynamicI
         (dw as f32, dh as f32),
         (0.0, dh as f32),
     ];
-    let h = homography(&dst, corners);
+    let (h, gauss_degenerate) = homography(&dst, corners);
+    let (res, res_mean, res_rel) = warp_residual(&h, &dst, corners);
+    if crop_debug() {
+        let (denom_min, jac_min) = warp_degeneracy(&h, dw as f32, dh as f32);
+        eprintln!(
+            "  [crop] warp dst={}x{} gauss_degen={} denom_min={:.3e} jac_min={:.3e} res={:.3e} res_rel={:.3e} res_mean={:.3e}",
+            dw,
+            dh,
+            u8::from(gauss_degenerate),
+            denom_min,
+            jac_min,
+            res,
+            res_rel,
+            res_mean
+        );
+    }
+    if !res.is_finite() || res > WARP_RES_TOL_PX {
+        if crop_debug() {
+            eprintln!(
+                "  [crop]   warp_fallback res={:.3e} tol={:.1e} -> original",
+                res, WARP_RES_TOL_PX
+            );
+        }
+        return None;
+    }
 
     let src_rgb = img.to_rgb8();
     let (sw, sh) = (src_rgb.width() as i32, src_rgb.height() as i32);
@@ -1475,5 +1578,7 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> image::DynamicI
         }
     });
 
-    image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(dw, dh, out).unwrap())
+    Some(image::DynamicImage::ImageRgb8(
+        image::RgbImage::from_raw(dw, dh, out)?,
+    ))
 }
