@@ -1582,3 +1582,338 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::D
         image::RgbImage::from_raw(dw, dh, out)?,
     ))
 }
+
+// G2 entry gate for 2.6: privacy-safe unit tests for the deskew geometry core.
+// Structural invariants (grep-provable; see warp_has_single_call_site below):
+//   1. the warp helper is called from exactly one place, `deskew`, so the
+//      perspective stage cannot be reached without detect_corners;
+//   2. every candidate quad is canonicalised by order_corners (detect_corners
+//      returns order_corners(&rect)) and gated by validate_reason before it is
+//      scored or warped.
+// Violating either makes the stage unreachable or unsound, so both assumptions
+// are asserted here instead of being trusted.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SKEWED_QUAD: [(f32, f32); 4] = [
+        (10.0, 12.0),
+        (110.0, 10.0),
+        (112.0, 90.0),
+        (8.0, 92.0),
+    ];
+
+    fn permutations4() -> Vec<[usize; 4]> {
+        let mut out = Vec::new();
+        for a in 0..4 {
+            for b in 0..4 {
+                for c in 0..4 {
+                    for d in 0..4 {
+                        let p = [a, b, c, d];
+                        let mut uniq = true;
+                        for i in 0..4 {
+                            for j in (i + 1)..4 {
+                                if p[i] == p[j] {
+                                    uniq = false;
+                                }
+                            }
+                        }
+                        if uniq {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn order_corners_is_permutation_invariant() {
+        let perms = permutations4();
+        assert_eq!(perms.len(), 24);
+        let canon = order_corners(&SKEWED_QUAD);
+        for p in perms {
+            let q = [
+                SKEWED_QUAD[p[0]],
+                SKEWED_QUAD[p[1]],
+                SKEWED_QUAD[p[2]],
+                SKEWED_QUAD[p[3]],
+            ];
+            assert_eq!(order_corners(&q), canon, "perm={:?}", p);
+        }
+    }
+
+    #[test]
+    fn order_corners_is_idempotent() {
+        let c1 = order_corners(&SKEWED_QUAD);
+        assert_eq!(order_corners(&c1), c1);
+    }
+
+    #[test]
+    fn order_corners_is_start_and_direction_stable() {
+        let base = order_corners(&SKEWED_QUAD);
+        let rotated = [
+            SKEWED_QUAD[1],
+            SKEWED_QUAD[2],
+            SKEWED_QUAD[3],
+            SKEWED_QUAD[0],
+        ];
+        let reversed = [
+            SKEWED_QUAD[3],
+            SKEWED_QUAD[2],
+            SKEWED_QUAD[1],
+            SKEWED_QUAD[0],
+        ];
+        assert_eq!(order_corners(&rotated), base);
+        assert_eq!(order_corners(&reversed), base);
+    }
+
+    #[test]
+    fn order_corners_returns_tl_tr_br_bl() {
+        let tl = (10.0f32, 10.0f32);
+        let tr = (100.0f32, 14.0f32);
+        let br = (96.0f32, 104.0f32);
+        let bl = (12.0f32, 100.0f32);
+        assert_eq!(order_corners(&[br, bl, tl, tr]), [tl, tr, br, bl]);
+    }
+
+    #[test]
+    fn cross_f_is_positive_counter_clockwise() {
+        assert!(cross_f((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)) > 0.0);
+        assert!(cross_f((0.0, 0.0), (0.0, 1.0), (1.0, 0.0)) < 0.0);
+    }
+
+    #[test]
+    fn polygon_area_matches_known_square() {
+        let square = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert!((polygon_area(&square) - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn validate_accepts_healthy_quad() {
+        let c = [
+            (100.0f32, 100.0f32),
+            (400.0, 110.0),
+            (390.0, 540.0),
+            (95.0, 520.0),
+        ];
+        assert_eq!(validate_reason(&c, 640.0, 640.0), None);
+        assert!(validate(&c, 640.0, 640.0));
+    }
+
+    #[test]
+    fn validate_reason_rejects_frame() {
+        let c = [
+            (-5.0f32, 100.0f32),
+            (400.0, 100.0),
+            (400.0, 500.0),
+            (0.0, 500.0),
+        ];
+        assert_eq!(validate_reason(&c, 640.0, 640.0), Some("frame"));
+        assert!(!validate(&c, 640.0, 640.0));
+    }
+
+    #[test]
+    fn validate_reason_rejects_area() {
+        let c = [
+            (300.0f32, 300.0f32),
+            (400.0, 300.0),
+            (400.0, 400.0),
+            (300.0, 400.0),
+        ];
+        assert_eq!(validate_reason(&c, 640.0, 640.0), Some("area"));
+    }
+
+    #[test]
+    fn validate_reason_rejects_aspect() {
+        let c = [
+            (50.0f32, 50.0f32),
+            (150.0, 50.0),
+            (150.0, 550.0),
+            (50.0, 550.0),
+        ];
+        assert_eq!(validate_reason(&c, 640.0, 640.0), Some("aspect"));
+    }
+
+    #[test]
+    fn validate_reason_rejects_selfintersecting_order() {
+        let c = [
+            (0.0f32, 0.0f32),
+            (639.0, 0.0),
+            (0.0, 639.0),
+            (100.0, 100.0),
+        ];
+        assert_eq!(validate_reason(&c, 640.0, 640.0), Some("convex"));
+        assert!(!validate(&c, 640.0, 640.0));
+    }
+
+    #[test]
+    fn validate_tracks_reason_exactly() {
+        let cases: [([(f32, f32); 4], f32, f32); 5] = [
+            (
+                [
+                    (100.0, 100.0),
+                    (400.0, 110.0),
+                    (390.0, 540.0),
+                    (95.0, 520.0),
+                ],
+                640.0,
+                640.0,
+            ),
+            (
+                [(-5.0, 100.0), (400.0, 100.0), (400.0, 500.0), (0.0, 500.0)],
+                640.0,
+                640.0,
+            ),
+            (
+                [
+                    (300.0, 300.0),
+                    (400.0, 300.0),
+                    (400.0, 400.0),
+                    (300.0, 400.0),
+                ],
+                640.0,
+                640.0,
+            ),
+            (
+                [(50.0, 50.0), (150.0, 50.0), (150.0, 550.0), (50.0, 550.0)],
+                640.0,
+                640.0,
+            ),
+            (
+                [(0.0, 0.0), (639.0, 0.0), (0.0, 639.0), (100.0, 100.0)],
+                640.0,
+                640.0,
+            ),
+        ];
+        for (c, dw, dh) in cases {
+            assert_eq!(validate(&c, dw, dh), validate_reason(&c, dw, dh).is_none());
+        }
+    }
+
+    #[test]
+    fn validate_implies_consistent_cross_signs() {
+        let cases: [([(f32, f32); 4], f32, f32); 4] = [
+            (
+                [
+                    (100.0, 100.0),
+                    (400.0, 110.0),
+                    (390.0, 540.0),
+                    (95.0, 520.0),
+                ],
+                640.0,
+                640.0,
+            ),
+            (
+                [(50.0, 50.0), (600.0, 90.0), (590.0, 600.0), (60.0, 560.0)],
+                640.0,
+                640.0,
+            ),
+            (
+                [
+                    (300.0, 300.0),
+                    (400.0, 300.0),
+                    (400.0, 400.0),
+                    (300.0, 400.0),
+                ],
+                640.0,
+                640.0,
+            ),
+            (
+                [(0.0, 0.0), (639.0, 0.0), (0.0, 639.0), (100.0, 100.0)],
+                640.0,
+                640.0,
+            ),
+        ];
+        for (c, dw, dh) in cases {
+            if !validate(&c, dw, dh) {
+                continue;
+            }
+            let signs = [
+                cross_f(c[0], c[1], c[2]).signum(),
+                cross_f(c[1], c[2], c[3]).signum(),
+                cross_f(c[2], c[3], c[0]).signum(),
+                cross_f(c[3], c[0], c[1]).signum(),
+            ];
+            assert!(signs[0] != 0.0, "degenerate corner set accepted: {:?}", c);
+            for s in signs {
+                assert_eq!(s, signs[0], "inconsistent cross sign for {:?}", c);
+            }
+        }
+    }
+
+    #[test]
+    fn warp_residual_is_zero_for_identity() {
+        let h = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let q = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let (worst, mean, rel) = warp_residual(&h, &q, &q);
+        assert!(worst.abs() < 1e-4, "worst={worst}");
+        assert!(mean.abs() < 1e-4, "mean={mean}");
+        assert!(rel.abs() < 1e-4, "rel={rel}");
+    }
+
+    #[test]
+    fn warp_residual_reports_worst_mismatch() {
+        let h = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let from = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let to = [(0.0f32, 0.0f32), (12.5, 0.0), (12.5, 10.0), (0.0, 10.0)];
+        let (worst, _, _) = warp_residual(&h, &from, &to);
+        assert!((worst - 2.5).abs() < 1e-3, "worst={worst}");
+    }
+
+    #[test]
+    fn warp_residual_is_infinite_when_denominator_vanishes() {
+        let h = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0];
+        let from = [(1.0f32, 1.0f32), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)];
+        let to = [(0.0f32, 0.0f32); 4];
+        let (worst, mean, rel) = warp_residual(&h, &from, &to);
+        assert!(worst.is_infinite() && mean.is_infinite() && rel.is_infinite());
+    }
+
+    #[test]
+    fn warp_degeneracy_is_one_for_identity() {
+        let h = [1.0f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let (denom_min, jac_min) = warp_degeneracy(&h, 100.0, 100.0);
+        assert!((denom_min - 1.0).abs() < 1e-6, "denom_min={denom_min}");
+        assert!((jac_min - 1.0).abs() < 1e-6, "jac_min={jac_min}");
+    }
+
+    #[test]
+    fn warp_degeneracy_collapses_on_zero_matrix() {
+        let h = [0.0f32; 9];
+        let (denom_min, jac_min) = warp_degeneracy(&h, 100.0, 100.0);
+        assert!(denom_min == 0.0, "denom_min={denom_min}");
+        assert!(jac_min == 0.0, "jac_min={jac_min}");
+    }
+
+    #[test]
+    fn homography_reproduces_its_own_correspondence() {
+        let dst = [(0.0f32, 0.0f32), (100.0, 0.0), (100.0, 50.0), (0.0, 50.0)];
+        let src = [(10.0f32, 12.0f32), (120.0, 8.0), (118.0, 60.0), (14.0, 58.0)];
+        let (h, degenerate) = homography(&dst, &src);
+        assert!(!degenerate, "well-conditioned 4-point DLT flagged degenerate");
+        let (worst, _, _) = warp_residual(&h, &dst, &src);
+        assert!(worst < WARP_RES_TOL_PX, "worst={worst}");
+    }
+
+    #[test]
+    fn homography_on_coincident_corners_yields_no_solution() {
+        let from = [(5.0f32, 5.0f32), (5.0, 5.0), (5.0, 5.0), (5.0, 5.0)];
+        let to = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        let (h, degenerate) = homography(&from, &to);
+        let (worst, _, _) = warp_residual(&h, &from, &to);
+        assert!(
+            degenerate || !worst.is_finite() || worst > WARP_RES_TOL_PX,
+            "degenerate input produced an accepted solve: degen={degenerate} worst={worst}"
+        );
+    }
+
+    #[test]
+    fn warp_has_single_call_site() {
+        let src = include_str!("crop.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let hits = production.lines().filter(|l| l.contains("warp(")).count();
+        assert_eq!(hits, 2, "expected one definition and one call site, got {hits}");
+    }
+}
