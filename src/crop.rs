@@ -7,6 +7,36 @@ const ASPECT_MIN: f32 = 0.4;
 const ASPECT_MAX: f32 = 2.5;
 const MIN_COMPONENT: usize = 64;
 
+const COMP_MIN_FRAC: usize = 600;
+const MAX_HYPOTHESES: usize = 96;
+const EDGE_TOP_COMPONENTS: usize = 8;
+const EDGE_DILATE_RX: usize = 2;
+const EDGE_DILATE_RY: usize = 2;
+const APPROX_EPS: [f32; 3] = [0.012, 0.02, 0.032];
+const EDGE_SUP_SAMPLES: usize = 32;
+const EDGE_SUP_OFFSETS: [f32; 3] = [-1.0, 0.0, 1.0];
+const EDGE_SUP_STRONG_FRAC: f32 = 0.35;
+const EDGE_SUP_RUN_MIN: usize = 16;
+const EDGE_SUP_FRAC_MIN: usize = 22;
+const FRAME_EPS: f32 = 3.0;
+const CANNY_HI_FRAC: f32 = 0.90;
+const CANNY_HI_FLOOR: u8 = 24;
+const CANNY_LO_RATIO: f32 = 0.40;
+const STEP_K: [i32; 3] = [3, 6, 10];
+const STEP_SHIFT: i32 = 4;
+const RING_OFF: i32 = 8;
+const RING_SAMPLES_PER_SIDE: usize = 24;
+const REGION_CONTRAST_FLOOR: f32 = 0.25;
+const REGION_CONTRAST_W_DEFAULT: f32 = 0.75;
+const AREA_PRIOR_PEAK: f32 = 0.30;
+const AREA_PRIOR_BELOW: f32 = 1.0;
+const AREA_PRIOR_ABOVE: f32 = 0.10;
+const TIEBREAK_REL_DEFAULT: f32 = 0.90;
+const SCORE_MODE_ENV: &str = "SEAMAESTRO_CROP_SCORE";
+const STEP_THR_ENV: &str = "SEAMAESTRO_CROP_STEP_THR";
+const CONTRAST_W_ENV: &str = "SEAMAESTRO_CROP_CONTRAST_W";
+const TIEBREAK_REL_ENV: &str = "SEAMAESTRO_CROP_TIEBREAK";
+
 pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
     let (w, h) = (img.width(), img.height());
     if w < 16 || h < 16 {
@@ -19,6 +49,96 @@ pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
     warp(&img, &corners)
 }
 
+struct Hypothesis {
+    quad: [(f32, f32); 4],
+    area_ratio: f32,
+    ok_edges: u32,
+    frame_touch: bool,
+    score: f32,
+    source: &'static str,
+    step_ok: u32,
+    ring_fg: f32,
+    ring_bg: f32,
+}
+
+struct VerifyCtx<'a> {
+    luma: &'a [u8],
+    strong: u8,
+    otsu: u8,
+    step_thr: u8,
+    contrast_w: f32,
+    enabled: bool,
+}
+
+struct Scratch {
+    mask: Vec<u8>,
+    edge: Vec<u8>,
+    tmp: Vec<u8>,
+    closed: Vec<u8>,
+    parent: Vec<u32>,
+    rank: Vec<u8>,
+    area: Vec<u32>,
+    seed: Vec<u32>,
+    visited: Vec<u8>,
+    contour: Vec<(i32, i32)>,
+    poly: Vec<(f32, f32)>,
+    keep: Vec<bool>,
+    pstack: Vec<(usize, usize)>,
+    stack: Vec<(usize, usize)>,
+}
+
+impl Scratch {
+    fn new(n: usize) -> Self {
+        Self {
+            mask: vec![0u8; n],
+            edge: vec![0u8; n],
+            tmp: vec![0u8; n],
+            closed: vec![0u8; n],
+            parent: vec![0u32; n],
+            rank: vec![0u8; n],
+            area: vec![0u32; n],
+            seed: vec![0u32; n],
+            visited: vec![0u8; n],
+            contour: Vec::with_capacity(4096),
+            poly: Vec::with_capacity(4096),
+            keep: Vec::with_capacity(4096),
+            pstack: Vec::with_capacity(1024),
+            stack: Vec::with_capacity(4096),
+        }
+    }
+}
+
+fn crop_debug() -> bool {
+    match std::env::var("SEAMAESTRO_CROP_DEBUG") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+fn region_score_enabled() -> bool {
+    match std::env::var(SCORE_MODE_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "region" | "new" | "1"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn env_u8(key: &str, default: u8) -> u8 {
+    match std::env::var(key) {
+        Ok(v) => v.trim().parse::<u8>().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+fn env_f32(key: &str, default: f32) -> f32 {
+    match std::env::var(key) {
+        Ok(v) => v.trim().parse::<f32>().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
 fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f32); 4]> {
     let long = w.max(h);
     let scale = (DETECT_LONG_EDGE as f32 / long as f32).min(1.0);
@@ -28,52 +148,575 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     let small = img
         .resize_exact(dw, dh, image::imageops::FilterType::Triangle)
         .to_luma8();
+    let (dwi, dhi) = (dw as usize, dh as usize);
+    let n = dwi * dhi;
     let luma = small.as_raw();
 
-    let smooth = box_blur_gray(luma, dw as usize, dh as usize, 2);
+    let sharp = box_blur_gray(luma, dwi, dhi, 0);
+    let soft = box_blur_gray(luma, dwi, dhi, 1);
 
-    let mut hist = [0u32; 256];
-    for &v in &smooth {
-        hist[v as usize] += 1;
-    }
-    let t = otsu(&hist);
+    let mag_sharp = sobel_l1(&sharp, dwi, dhi);
+    let mag_soft = sobel_l1(&soft, dwi, dhi);
+    let strong = strong_threshold(&mag_sharp);
 
-    let n = (dw * dh) as usize;
-    let mut mask = vec![0u8; n];
-    for i in 0..n {
-        if smooth[i] > t {
-            mask[i] = 1;
-        }
-    }
+    let vctx = VerifyCtx {
+        luma: &soft,
+        strong,
+        otsu: otsu(&hist256(&soft)),
+        step_thr: env_u8(STEP_THR_ENV, strong.max(6)),
+        contrast_w: env_f32(CONTRAST_W_ENV, REGION_CONTRAST_W_DEFAULT),
+        enabled: region_score_enabled(),
+    };
 
-    let mask = morph_close(&mask, dw as usize, dh as usize);
+    let mut sc = Scratch::new(n);
+    let mut hyp: Vec<Hypothesis> = Vec::with_capacity(MAX_HYPOTHESES);
 
-    let comp = largest_component(&mask, dw as usize, dh as usize)?;
+    detect_by_edges(&mag_soft, &mag_sharp, dwi, dhi, &mut sc, &mut hyp, &vctx);
+    detect_by_threshold(&soft, &mag_sharp, dwi, dhi, &mut sc, &mut hyp, &vctx);
 
-    let mut pts: Vec<(i32, i32)> = comp.iter().map(|&(x, y)| (x as i32, y as i32)).collect();
-    let hull = convex_hull(&mut pts);
-    if hull.len() < 4 {
+    if hyp.is_empty() {
         return None;
     }
 
-    let hull_f: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    hyp.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
-    let corners = simplify_to_4(&hull_f);
-    let mut ordered = if corners.len() == 4 {
-        order_corners(&[corners[0], corners[1], corners[2], corners[3]])
-    } else {
-        min_area_rect(&hull_f)
-    };
-
-    if !validate(&ordered, dw as f32, dh as f32) {
-        ordered = min_area_rect(&hull_f);
-        if !validate(&ordered, dw as f32, dh as f32) {
-            return None;
+    if crop_debug() {
+        eprintln!(
+            "  [crop] proxy {}x{} strong={} hypotheses={}",
+            dwi,
+            dhi,
+            strong,
+            hyp.len()
+        );
+        if vctx.enabled {
+            eprintln!(
+                "  [crop] mode=region otsu={} step_thr={} contrast_w={:.2}",
+                vctx.otsu, vctx.step_thr, vctx.contrast_w
+            );
+        }
+        for (i, c) in hyp.iter().take(12).enumerate() {
+            if vctx.enabled {
+                eprintln!(
+                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2}",
+                    i,
+                    c.source,
+                    c.area_ratio,
+                    c.ok_edges,
+                    u8::from(c.frame_touch),
+                    c.score,
+                    c.step_ok,
+                    c.ring_fg,
+                    c.ring_bg
+                );
+            } else {
+                eprintln!(
+                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4}",
+                    i,
+                    c.source,
+                    c.area_ratio,
+                    c.ok_edges,
+                    u8::from(c.frame_touch),
+                    c.score
+                );
+            }
         }
     }
 
     let inv_scale = 1.0 / scale;
-    Some(ordered.map(|(x, y)| (x * inv_scale, y * inv_scale)))
+    let pick = if vctx.enabled {
+        let tol = hyp[0].score * env_f32(TIEBREAK_REL_ENV, TIEBREAK_REL_DEFAULT);
+        hyp.iter()
+            .filter(|c| c.score >= tol)
+            .max_by(|a, b| {
+                a.area_ratio
+                    .partial_cmp(&b.area_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|c| c.quad)
+            .unwrap_or(hyp[0].quad)
+    } else {
+        hyp[0].quad
+    };
+    Some(pick.map(|(x, y)| (x * inv_scale, y * inv_scale)))
+}
+
+fn detect_by_edges(
+    mag_soft: &[u8],
+    mag_sharp: &[u8],
+    w: usize,
+    h: usize,
+    sc: &mut Scratch,
+    out: &mut Vec<Hypothesis>,
+    vctx: &VerifyCtx,
+) {
+    let n = w * h;
+    let hi = hist_pct(&hist256(mag_soft), CANNY_HI_FRAC).max(CANNY_HI_FLOOR);
+    let lo = ((hi as f32) * CANNY_LO_RATIO) as u8;
+    let dbg = crop_debug();
+    canny_hysteresis(mag_soft, w, h, lo, hi, &mut sc.edge, &mut sc.stack);
+    let mask_px = sc.edge.iter().filter(|&&v| v != 0).count();
+    dilate_rect(
+        &sc.edge,
+        w,
+        h,
+        EDGE_DILATE_RX,
+        EDGE_DILATE_RY,
+        &mut sc.tmp,
+        &mut sc.closed,
+    );
+    let comps = label_components(
+        &sc.closed,
+        w,
+        h,
+        &mut sc.parent,
+        &mut sc.rank,
+        &mut sc.area,
+        &mut sc.seed,
+    );
+    if dbg {
+        eprintln!(
+            "  [crop] edge hi={} lo={} mask_px={} comps={}",
+            hi,
+            lo,
+            mask_px,
+            comps.len()
+        );
+    }
+    sc.visited.clear();
+    sc.visited.resize(n, 0);
+    for &(size, root) in comps.iter().take(EDGE_TOP_COMPONENTS) {
+        let seed = sc.seed[root as usize];
+        if seed == u32::MAX {
+            continue;
+        }
+        let s = seed as usize;
+        let before = out.len();
+        trace_contour(
+            &sc.closed,
+            w,
+            h,
+            ((s % w) as i32, (s / w) as i32),
+            &mut sc.visited,
+            &mut sc.contour,
+        );
+        if sc.contour.len() >= 8 {
+            push_poly_hypotheses("edge", w, h, mag_sharp, sc, out, vctx);
+        }
+        if dbg {
+            eprintln!(
+                "  [crop] edge comp size={} contour={} pushed={}",
+                size,
+                sc.contour.len(),
+                out.len() - before
+            );
+        }
+    }
+}
+
+fn detect_by_threshold(
+    soft: &[u8],
+    mag_sharp: &[u8],
+    w: usize,
+    h: usize,
+    sc: &mut Scratch,
+    out: &mut Vec<Hypothesis>,
+    vctx: &VerifyCtx,
+) {
+    let n = w * h;
+    let base_t = otsu(&hist256(soft)) as i32;
+    let thresholds = [
+        base_t,
+        base_t - 30,
+        base_t + 30,
+        base_t - 60,
+        base_t + 60,
+        128,
+        96,
+        160,
+        64,
+        192,
+    ];
+    let min_px = (n / COMP_MIN_FRAC).max(MIN_COMPONENT);
+    let dbg = crop_debug();
+
+    for &t_raw in &thresholds {
+        let t = t_raw.clamp(0, 255) as u8;
+        for (i, &v) in soft.iter().enumerate() {
+            sc.mask[i] = u8::from(v > t);
+        }
+        morph_close_into(&sc.mask, w, h, &mut sc.tmp, &mut sc.closed);
+        let comps = label_components(
+            &sc.closed,
+            w,
+            h,
+            &mut sc.parent,
+            &mut sc.rank,
+            &mut sc.area,
+            &mut sc.seed,
+        );
+        let before = out.len();
+        let top = comps.first().map(|c| c.0).unwrap_or(0);
+        let mut contour_len = 0usize;
+        if let Some(&(count, root)) = comps.first() {
+            if (count as usize) >= min_px {
+                let seed = sc.seed[root as usize];
+                if seed != u32::MAX {
+                    let s = seed as usize;
+                    sc.visited.clear();
+                    sc.visited.resize(n, 0);
+                    trace_contour(
+                        &sc.closed,
+                        w,
+                        h,
+                        ((s % w) as i32, (s / w) as i32),
+                        &mut sc.visited,
+                        &mut sc.contour,
+                    );
+                    contour_len = sc.contour.len();
+                    if contour_len >= 8 {
+                        push_poly_hypotheses("sweep", w, h, mag_sharp, sc, out, vctx);
+                    }
+                }
+            }
+        }
+        if dbg {
+            eprintln!(
+                "  [crop] sweep t={:<3} top={:<7} min={:<6} contour={:<6} pushed={}",
+                t,
+                top,
+                min_px,
+                contour_len,
+                out.len() - before
+            );
+        }
+    }
+}
+
+fn push_poly_hypotheses(
+    source: &'static str,
+    w: usize,
+    h: usize,
+    mag: &[u8],
+    sc: &mut Scratch,
+    out: &mut Vec<Hypothesis>,
+    vctx: &VerifyCtx,
+) {
+    let per = contour_perimeter(&sc.contour);
+    if per < 8.0 {
+        return;
+    }
+    let dbg = crop_debug();
+    let mut eps4 = 0usize;
+
+    for &eps_r in APPROX_EPS.iter() {
+        let eps = per * eps_r;
+        approx_polygon(&sc.contour, eps, &mut sc.keep, &mut sc.pstack, &mut sc.poly);
+        let mut poly = sc.poly.clone();
+        dedup_closed(&mut poly, eps.max(1.0));
+        if poly.len() > 4 && poly.len() <= 7 {
+            poly = simplify_to_4(&poly);
+        }
+        if poly.len() == 4 {
+            eps4 += 1;
+            let q = order_corners(&[poly[0], poly[1], poly[2], poly[3]]);
+            push_quad(q, source, w, h, mag, out, vctx);
+        }
+    }
+
+    let mut ip: Vec<(i32, i32)> = sc.contour.clone();
+    let hull = convex_hull(&mut ip);
+    if dbg {
+        eprintln!("  [crop]   poly eps4={} hull_n={}", eps4, hull.len());
+    }
+    if hull.len() < 4 {
+        return;
+    }
+    let hull_f: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
+    let corners = simplify_to_4(&hull_f);
+    if corners.len() == 4 {
+        let q = order_corners(&[corners[0], corners[1], corners[2], corners[3]]);
+        push_quad(q, source, w, h, mag, out, vctx);
+    }
+    push_quad(min_area_rect(&hull_f), source, w, h, mag, out, vctx);
+}
+
+fn push_quad(
+    quad: [(f32, f32); 4],
+    source: &'static str,
+    w: usize,
+    h: usize,
+    mag: &[u8],
+    out: &mut Vec<Hypothesis>,
+    vctx: &VerifyCtx,
+) {
+    if out.len() >= MAX_HYPOTHESES {
+        return;
+    }
+    if !validate(&quad, w as f32, h as f32) {
+        if crop_debug() {
+            if let Some(reason) = validate_reason(&quad, w as f32, h as f32) {
+                eprintln!(
+                    "  [crop]   reject {:<7} area={:.3}",
+                    reason,
+                    polygon_area(&quad) / (w * h) as f32
+                );
+            }
+        }
+        return;
+    }
+    let area_ratio = polygon_area(&quad) / (w * h) as f32;
+    let (ok_edges, _) = edge_stats(&quad, mag, w, h, vctx.strong);
+    let frame_touch = frame_hugging(&quad, w as f32, h as f32);
+    let mut step_ok = 0u32;
+    let mut ring_fg = 0.0f32;
+    let mut ring_bg = 0.0f32;
+    let mut score = 0.05 + 0.30 * (ok_edges as f32 / 4.0);
+    if vctx.enabled {
+        let (s_ok, s_stats) = step_stats(&quad, vctx.luma, w, h, vctx.step_thr);
+        let (fg, bg, contrast) = ring_exterior_contrast(&quad, vctx.luma, w, h, vctx.otsu);
+        step_ok = s_ok;
+        ring_fg = fg;
+        ring_bg = bg;
+        let support: f32 = s_stats
+            .iter()
+            .map(|&(cnt, _)| (cnt as f32 / EDGE_SUP_SAMPLES as f32).min(1.0))
+            .sum::<f32>()
+            / 4.0;
+        score = 0.05 + 0.30 * support;
+        score *= (REGION_CONTRAST_FLOOR + vctx.contrast_w * contrast.clamp(0.0, 1.0)).clamp(0.05, 1.0);
+        let area_prior = if area_ratio < AREA_PRIOR_PEAK {
+            1.0 - (AREA_PRIOR_PEAK - area_ratio) * AREA_PRIOR_BELOW
+        } else {
+            1.0 - (area_ratio - AREA_PRIOR_PEAK) * AREA_PRIOR_ABOVE
+        };
+        score *= area_prior.clamp(0.15, 1.0);
+    } else {
+        score *= (1.0 - (area_ratio - 0.55).abs() * 0.6).max(0.15);
+    }
+    if frame_touch {
+        score *= 0.25;
+    }
+    out.push(Hypothesis {
+        quad,
+        area_ratio,
+        ok_edges,
+        frame_touch,
+        score,
+        source,
+        step_ok,
+        ring_fg,
+        ring_bg,
+    });
+}
+
+fn frame_hugging(q: &[(f32, f32); 4], w: f32, h: f32) -> bool {
+    let mut hits = 0;
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) & 3];
+        let left = a.0 <= FRAME_EPS && b.0 <= FRAME_EPS;
+        let right = a.0 >= w - FRAME_EPS && b.0 >= w - FRAME_EPS;
+        let top = a.1 <= FRAME_EPS && b.1 <= FRAME_EPS;
+        let bottom = a.1 >= h - FRAME_EPS && b.1 >= h - FRAME_EPS;
+        if left || right || top || bottom {
+            hits += 1;
+        }
+    }
+    hits >= 3
+}
+
+fn edge_stats(
+    q: &[(f32, f32); 4],
+    mag: &[u8],
+    w: usize,
+    h: usize,
+    strong: u8,
+) -> (u32, [(usize, usize); 4]) {
+    let mut ok = 0u32;
+    let mut stats = [(0usize, 0usize); 4];
+    for e in 0..4 {
+        let a = q[e];
+        let b = q[(e + 1) & 3];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let nx = -dy / len;
+        let ny = dx / len;
+        let sx = dx / EDGE_SUP_SAMPLES as f32;
+        let sy = dy / EDGE_SUP_SAMPLES as f32;
+        let mut cnt = 0usize;
+        let mut run = 0usize;
+        let mut best_run = 0usize;
+        for s in 0..EDGE_SUP_SAMPLES {
+            let px = a.0 + sx * (s as f32 + 0.5);
+            let py = a.1 + sy * (s as f32 + 0.5);
+            let mut v = 0u8;
+            for &o in EDGE_SUP_OFFSETS.iter() {
+                let x = px + nx * o;
+                let y = py + ny * o;
+                if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+                    continue;
+                }
+                let m = mag[y as usize * w + x as usize];
+                if m > v {
+                    v = m;
+                }
+            }
+            if v >= strong {
+                cnt += 1;
+                run += 1;
+                if run > best_run {
+                    best_run = run;
+                }
+            } else {
+                run = 0;
+            }
+        }
+        stats[e] = (cnt, best_run);
+        if cnt >= EDGE_SUP_FRAC_MIN && best_run >= EDGE_SUP_RUN_MIN {
+            ok += 1;
+        }
+    }
+    (ok, stats)
+}
+
+fn sample_luma(luma: &[u8], w: usize, h: usize, x: f32, y: f32) -> Option<u8> {
+    if x < 0.0 || y < 0.0 || x >= w as f32 || y >= h as f32 {
+        return None;
+    }
+    Some(luma[y as usize * w + x as usize])
+}
+
+fn side_plateau_support(
+    a: (f32, f32),
+    b: (f32, f32),
+    luma: &[u8],
+    w: usize,
+    h: usize,
+    thr: u8,
+) -> (usize, usize) {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+    let nx = -dy / len;
+    let ny = dx / len;
+    let sx = dx / EDGE_SUP_SAMPLES as f32;
+    let sy = dy / EDGE_SUP_SAMPLES as f32;
+    let mut cnt = 0usize;
+    let mut run = 0usize;
+    let mut best_run = 0usize;
+    for s in 0..EDGE_SUP_SAMPLES {
+        let px = a.0 + sx * (s as f32 + 0.5);
+        let py = a.1 + sy * (s as f32 + 0.5);
+        let mut best = 0u8;
+        for t in -STEP_SHIFT..=STEP_SHIFT {
+            let tf = t as f32;
+            for k in STEP_K.iter() {
+                let kf = *k as f32;
+                let m = sample_luma(luma, w, h, px + nx * (tf - kf), py + ny * (tf - kf));
+                let p = sample_luma(luma, w, h, px + nx * (tf + kf), py + ny * (tf + kf));
+                if let (Some(m), Some(p)) = (m, p) {
+                    let d = m.abs_diff(p);
+                    if d > best {
+                        best = d;
+                    }
+                }
+            }
+        }
+        if best >= thr {
+            cnt += 1;
+            run += 1;
+            if run > best_run {
+                best_run = run;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    (cnt, best_run)
+}
+
+fn step_stats(
+    q: &[(f32, f32); 4],
+    luma: &[u8],
+    w: usize,
+    h: usize,
+    thr: u8,
+) -> (u32, [(usize, usize); 4]) {
+    let mut ok = 0u32;
+    let mut stats = [(0usize, 0usize); 4];
+    for e in 0..4 {
+        let (cnt, best_run) = side_plateau_support(q[e], q[(e + 1) & 3], luma, w, h, thr);
+        stats[e] = (cnt, best_run);
+        if cnt >= EDGE_SUP_FRAC_MIN && best_run >= EDGE_SUP_RUN_MIN {
+            ok += 1;
+        }
+    }
+    (ok, stats)
+}
+
+fn ring_exterior_contrast(
+    q: &[(f32, f32); 4],
+    luma: &[u8],
+    w: usize,
+    h: usize,
+    otsu_t: u8,
+) -> (f32, f32, f32) {
+    let cx = (q[0].0 + q[1].0 + q[2].0 + q[3].0) * 0.25;
+    let cy = (q[0].1 + q[1].1 + q[2].1 + q[3].1) * 0.25;
+    let off = RING_OFF as f32;
+    let mut in_hit = 0usize;
+    let mut in_cnt = 0usize;
+    let mut out_hit = 0usize;
+    let mut out_cnt = 0usize;
+    for e in 0..4 {
+        let a = q[e];
+        let b = q[(e + 1) & 3];
+        let dx = b.0 - a.0;
+        let dy = b.1 - a.1;
+        let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+        let mut nx = -dy / len;
+        let mut ny = dx / len;
+        let mx = (a.0 + b.0) * 0.5;
+        let my = (a.1 + b.1) * 0.5;
+        if nx * (mx - cx) + ny * (my - cy) < 0.0 {
+            nx = -nx;
+            ny = -ny;
+        }
+        let sx = dx / RING_SAMPLES_PER_SIDE as f32;
+        let sy = dy / RING_SAMPLES_PER_SIDE as f32;
+        for s in 0..RING_SAMPLES_PER_SIDE {
+            let px = a.0 + sx * (s as f32 + 0.5);
+            let py = a.1 + sy * (s as f32 + 0.5);
+            if let Some(v) = sample_luma(luma, w, h, px - nx * off, py - ny * off) {
+                in_cnt += 1;
+                if v > otsu_t {
+                    in_hit += 1;
+                }
+            }
+            if let Some(v) = sample_luma(luma, w, h, px + nx * off, py + ny * off) {
+                out_cnt += 1;
+                if v > otsu_t {
+                    out_hit += 1;
+                }
+            }
+        }
+    }
+    if in_cnt < 8 || out_cnt < 8 {
+        return (0.0, 0.0, 0.0);
+    }
+    let fg = in_hit as f32 / in_cnt as f32;
+    let bg = out_hit as f32 / out_cnt as f32;
+    (fg, bg, fg - bg)
+}
+
+fn strong_threshold(mag: &[u8]) -> u8 {
+    let hi = hist_pct(&hist256(mag), CANNY_HI_FRAC).max(CANNY_HI_FLOOR);
+    (((hi as f32) * EDGE_SUP_STRONG_FRAC) as u8).max(6)
 }
 
 fn box_blur_gray(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
@@ -104,44 +747,24 @@ fn box_blur_gray(src: &[u8], w: usize, h: usize, r: usize) -> Vec<u8> {
     out
 }
 
-fn otsu(hist: &[u32; 256]) -> u8 {
-    let total: u32 = hist.iter().sum();
-    if total == 0 {
-        return 128;
-    }
-    let mut sum = 0u64;
-    for (i, &h) in hist.iter().enumerate() {
-        sum += (i as u64) * (h as u64);
-    }
-    let mut sum_b = 0u64;
-    let mut w_b = 0u64;
-    let mut best = 0f64;
-    let mut best_t = 0u8;
-    for (t, &h) in hist.iter().enumerate() {
-        w_b += h as u64;
-        if w_b == 0 {
-            continue;
-        }
-        let w_f = total as u64 - w_b;
-        if w_f == 0 {
-            break;
-        }
-        sum_b += (t as u64) * (h as u64);
-        let m_b = sum_b as f64 / w_b as f64;
-        let m_f = (sum - sum_b) as f64 / w_f as f64;
-        let var = (w_b as f64) * (w_f as f64) * (m_b - m_f) * (m_b - m_f);
-        if var > best {
-            best = var;
-            best_t = t as u8;
-        }
-    }
-    best_t
-}
-
-fn largest_component(mask: &[u8], w: usize, h: usize) -> Option<Vec<(usize, usize)>> {
+fn label_components(
+    mask: &[u8],
+    w: usize,
+    h: usize,
+    parent: &mut Vec<u32>,
+    rank: &mut Vec<u8>,
+    area: &mut Vec<u32>,
+    seed: &mut Vec<u32>,
+) -> Vec<(u32, u32)> {
     let n = w * h;
-    let mut parent: Vec<usize> = (0..n).collect();
-    let mut rank = vec![0u8; n];
+    parent.clear();
+    parent.extend(0..n as u32);
+    rank.clear();
+    rank.resize(n, 0);
+    area.clear();
+    area.resize(n, 0);
+    seed.clear();
+    seed.resize(n, u32::MAX);
 
     for y in 0..h {
         for x in 0..w {
@@ -149,66 +772,155 @@ fn largest_component(mask: &[u8], w: usize, h: usize) -> Option<Vec<(usize, usiz
             if mask[i] == 0 {
                 continue;
             }
-            if x + 1 < w && mask[i + 1] == 1 {
-                union(&mut parent, &mut rank, i, i + 1);
+            if x + 1 < w && mask[i + 1] != 0 {
+                union(parent, rank, i, i + 1);
             }
-            if y + 1 < h && mask[i + w] == 1 {
-                union(&mut parent, &mut rank, i, i + w);
+            if y + 1 < h {
+                if mask[i + w] != 0 {
+                    union(parent, rank, i, i + w);
+                }
+                if x > 0 && mask[i + w - 1] != 0 {
+                    union(parent, rank, i, i + w - 1);
+                }
+                if x + 1 < w && mask[i + w + 1] != 0 {
+                    union(parent, rank, i, i + w + 1);
+                }
             }
         }
     }
 
-    let mut sizes = vec![0usize; n];
     for (i, &m) in mask.iter().enumerate() {
-        if m == 1 {
-            let r = find(&mut parent, i);
-            sizes[r] += 1;
+        if m == 0 {
+            continue;
+        }
+        let r = find(parent, i) as usize;
+        area[r] += 1;
+        if (i as u32) < seed[r] {
+            seed[r] = i as u32;
         }
     }
-    let mut root = usize::MAX;
-    let mut best = 0usize;
-    for (i, &s) in sizes.iter().enumerate() {
-        if s > best {
-            best = s;
-            root = i;
+
+    let mut out: Vec<(u32, u32)> = Vec::new();
+    for (i, &a) in area.iter().enumerate() {
+        if a > 0 {
+            out.push((a, i as u32));
         }
     }
-    if best < MIN_COMPONENT {
-        return None;
-    }
-    let mut comp = Vec::with_capacity(best);
-    for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
-            if mask[i] == 1 && find(&mut parent, i) == root {
-                comp.push((x, y));
-            }
-        }
-    }
-    Some(comp)
+    out.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
+    out
 }
 
-fn find(parent: &mut [usize], mut x: usize) -> usize {
-    while parent[x] != x {
-        parent[x] = parent[parent[x]];
-        x = parent[x];
+fn find(parent: &mut [u32], mut x: usize) -> u32 {
+    while parent[x] != x as u32 {
+        parent[x] = parent[parent[x] as usize];
+        x = parent[x] as usize;
     }
-    x
+    x as u32
 }
 
-fn union(parent: &mut [usize], rank: &mut [u8], a: usize, b: usize) {
-    let ra = find(parent, a);
-    let rb = find(parent, b);
+fn union(parent: &mut [u32], rank: &mut [u8], a: usize, b: usize) {
+    let ra = find(parent, a) as usize;
+    let rb = find(parent, b) as usize;
     if ra == rb {
         return;
     }
     if rank[ra] < rank[rb] {
-        parent[ra] = rb;
+        parent[ra] = rb as u32;
     } else if rank[ra] > rank[rb] {
-        parent[rb] = ra;
+        parent[rb] = ra as u32;
     } else {
-        parent[rb] = ra;
+        parent[rb] = ra as u32;
         rank[ra] += 1;
+    }
+}
+
+fn contour_perimeter(pts: &[(i32, i32)]) -> f32 {
+    let n = pts.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut sum = 0f32;
+    for i in 0..n {
+        let a = pts[i];
+        let b = pts[(i + 1) % n];
+        let dx = (b.0 - a.0) as f32;
+        let dy = (b.1 - a.1) as f32;
+        sum += (dx * dx + dy * dy).sqrt();
+    }
+    sum
+}
+
+fn dedup_closed(poly: &mut Vec<(f32, f32)>, eps: f32) {
+    let mut guard = 0usize;
+    let mut i = 0usize;
+    while i < poly.len() && poly.len() > 3 && guard < 64 {
+        let j = (i + 1) % poly.len();
+        if dist(poly[i], poly[j]) < eps {
+            poly.remove(j);
+            guard += 1;
+        } else {
+            i += 1;
+        }
+    }
+}
+
+fn point_seg_dist(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let l2 = dx * dx + dy * dy;
+    if l2 < 1e-9 {
+        return dist(p, a);
+    }
+    let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0);
+    dist(p, (a.0 + t * dx, a.1 + t * dy))
+}
+
+fn approx_polygon(
+    pts: &[(i32, i32)],
+    eps: f32,
+    keep: &mut Vec<bool>,
+    stack: &mut Vec<(usize, usize)>,
+    out: &mut Vec<(f32, f32)>,
+) {
+    out.clear();
+    let n = pts.len();
+    if n < 4 {
+        for &(x, y) in pts.iter() {
+            out.push((x as f32, y as f32));
+        }
+        return;
+    }
+    keep.clear();
+    keep.resize(n, false);
+    keep[0] = true;
+    keep[n - 1] = true;
+    stack.clear();
+    stack.push((0, n - 1));
+    while let Some((a, b)) = stack.pop() {
+        if b <= a + 1 {
+            continue;
+        }
+        let pa = (pts[a].0 as f32, pts[a].1 as f32);
+        let pb = (pts[b].0 as f32, pts[b].1 as f32);
+        let mut best = 0f32;
+        let mut bi = a;
+        for (i, &pt) in pts.iter().enumerate().take(b).skip(a + 1) {
+            let d = point_seg_dist((pt.0 as f32, pt.1 as f32), pa, pb);
+            if d > best {
+                best = d;
+                bi = i;
+            }
+        }
+        if best > eps {
+            keep[bi] = true;
+            stack.push((a, bi));
+            stack.push((bi, b));
+        }
+    }
+    for i in 0..n {
+        if keep[i] {
+            out.push((pts[i].0 as f32, pts[i].1 as f32));
+        }
     }
 }
 
@@ -272,6 +984,68 @@ fn triangle_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     (ab.0 * ac.1 - ab.1 * ac.0).abs() * 0.5
 }
 
+fn trace_contour(
+    mask: &[u8],
+    w: usize,
+    h: usize,
+    start: (i32, i32),
+    visited: &mut [u8],
+    out: &mut Vec<(i32, i32)>,
+) {
+    const DX: [i32; 8] = [1, 1, 0, -1, -1, -1, 0, 1];
+    const DY: [i32; 8] = [0, 1, 1, 1, 0, -1, -1, -1];
+    out.clear();
+    if start.0 < 0 || start.1 < 0 || start.0 >= w as i32 || start.1 >= h as i32 {
+        return;
+    }
+    if mask[start.1 as usize * w + start.0 as usize] == 0 {
+        return;
+    }
+    let limit = w * h;
+    let mut p = start;
+    let mut d_in = 0i32;
+    let mut first_from: (i32, i32) = (-1, -1);
+    let mut first_to: (i32, i32) = (-1, -1);
+    let mut steps = 0usize;
+    loop {
+        let idx = p.1 as usize * w + p.0 as usize;
+        if visited[idx] == 0 {
+            visited[idx] = 1;
+            out.push(p);
+        }
+        let d_back = (d_in + 4) & 7;
+        let mut found = -1i32;
+        for k in 1..=8 {
+            let d = (d_back + k) & 7;
+            let nx = p.0 + DX[d as usize];
+            let ny = p.1 + DY[d as usize];
+            if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                continue;
+            }
+            if mask[ny as usize * w + nx as usize] != 0 {
+                found = d;
+                break;
+            }
+        }
+        if found < 0 {
+            break;
+        }
+        let np = (p.0 + DX[found as usize], p.1 + DY[found as usize]);
+        if first_from.0 < 0 {
+            first_from = p;
+            first_to = np;
+        } else if p == first_from && np == first_to {
+            break;
+        }
+        d_in = found;
+        p = np;
+        steps += 1;
+        if steps > limit {
+            break;
+        }
+    }
+}
+
 fn order_corners(c: &[(f32, f32); 4]) -> [(f32, f32); 4] {
     let mut tl = 0;
     let mut tr = 0;
@@ -295,15 +1069,19 @@ fn order_corners(c: &[(f32, f32); 4]) -> [(f32, f32); 4] {
 }
 
 fn validate(c: &[(f32, f32); 4], dw: f32, dh: f32) -> bool {
+    validate_reason(c, dw, dh).is_none()
+}
+
+fn validate_reason(c: &[(f32, f32); 4], dw: f32, dh: f32) -> Option<&'static str> {
     for &(x, y) in c {
         if x < 0.0 || y < 0.0 || x > dw || y > dh {
-            return false;
+            return Some("frame");
         }
     }
     let area = polygon_area(c);
     let ratio = area / (dw * dh);
     if !(AREA_MIN..=AREA_MAX).contains(&ratio) {
-        return false;
+        return Some("area");
     }
     let top = dist(c[0], c[1]);
     let bottom = dist(c[2], c[3]);
@@ -313,7 +1091,7 @@ fn validate(c: &[(f32, f32); 4], dw: f32, dh: f32) -> bool {
     let height = (left + right) / 2.0;
     let aspect = width / height.max(1.0);
     if !(ASPECT_MIN..=ASPECT_MAX).contains(&aspect) {
-        return false;
+        return Some("aspect");
     }
     let s1 = cross_f(c[0], c[1], c[2]);
     let s2 = cross_f(c[1], c[2], c[3]);
@@ -321,9 +1099,9 @@ fn validate(c: &[(f32, f32); 4], dw: f32, dh: f32) -> bool {
     let s4 = cross_f(c[3], c[0], c[1]);
     let sign = s1.signum();
     if sign == 0.0 || s2.signum() != sign || s3.signum() != sign || s4.signum() != sign {
-        return false;
+        return Some("convex");
     }
-    true
+    None
 }
 
 fn polygon_area(c: &[(f32, f32); 4]) -> f32 {
@@ -341,13 +1119,180 @@ fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     (dx * dx + dy * dy).sqrt()
 }
 
+fn dilate_rect(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    rx: usize,
+    ry: usize,
+    tmp: &mut [u8],
+    dst: &mut [u8],
+) {
+    for y in 0..h {
+        for x in 0..w {
+            let x0 = x.saturating_sub(rx);
+            let x1 = (x + rx).min(w - 1);
+            let mut m = 0u8;
+            for xx in x0..=x1 {
+                let v = src[y * w + xx];
+                if v > m {
+                    m = v;
+                }
+            }
+            tmp[y * w + x] = m;
+        }
+    }
+    for y in 0..h {
+        let y0 = y.saturating_sub(ry);
+        let y1 = (y + ry).min(h - 1);
+        for x in 0..w {
+            let mut m = 0u8;
+            for yy in y0..=y1 {
+                let v = tmp[yy * w + x];
+                if v > m {
+                    m = v;
+                }
+            }
+            dst[y * w + x] = m;
+        }
+    }
+}
+
+fn canny_hysteresis(
+    mag: &[u8],
+    w: usize,
+    h: usize,
+    lo: u8,
+    hi: u8,
+    out: &mut [u8],
+    stack: &mut Vec<(usize, usize)>,
+) {
+    let n = w * h;
+    for i in 0..n {
+        out[i] = if mag[i] >= hi {
+            1
+        } else if mag[i] >= lo {
+            2
+        } else {
+            0
+        };
+    }
+    stack.clear();
+    for y in 0..h {
+        for x in 0..w {
+            if out[y * w + x] == 1 {
+                stack.push((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = stack.pop() {
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                    continue;
+                }
+                let i = ny as usize * w + nx as usize;
+                if out[i] == 2 {
+                    out[i] = 1;
+                    stack.push((nx as usize, ny as usize));
+                }
+            }
+        }
+    }
+    for v in out.iter_mut() {
+        *v = u8::from(*v == 1);
+    }
+}
+
 fn cross_f(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
 }
 
-fn morph_close(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
-    let mut dilated = vec![0u8; w * h];
-    let mut closed = vec![0u8; w * h];
+fn sobel_l1(src: &[u8], w: usize, h: usize) -> Vec<u8> {
+    let mut out = vec![0u8; w * h];
+    if w < 3 || h < 3 {
+        return out;
+    }
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            let a = src[i - w - 1] as i32;
+            let b = src[i - w] as i32;
+            let c = src[i - w + 1] as i32;
+            let d = src[i - 1] as i32;
+            let f = src[i + 1] as i32;
+            let g = src[i + w - 1] as i32;
+            let hh = src[i + w] as i32;
+            let k = src[i + w + 1] as i32;
+            let gx = -a + c - 2 * d + 2 * f - g + k;
+            let gy = -a - 2 * b - c + g + 2 * hh + k;
+            out[i] = (((gx.abs() + gy.abs()) >> 3).min(255)) as u8;
+        }
+    }
+    out
+}
+
+fn hist256(src: &[u8]) -> [u32; 256] {
+    let mut hist = [0u32; 256];
+    for &v in src.iter() {
+        hist[v as usize] += 1;
+    }
+    hist
+}
+
+fn hist_pct(hist: &[u32; 256], frac: f32) -> u8 {
+    let total: u64 = hist.iter().map(|&v| v as u64).sum();
+    if total == 0 {
+        return 0;
+    }
+    let goal = (total as f64 * frac as f64) as u64;
+    let mut acc = 0u64;
+    for (i, &v) in hist.iter().enumerate() {
+        acc += v as u64;
+        if acc >= goal {
+            return i as u8;
+        }
+    }
+    255
+}
+
+fn otsu(hist: &[u32; 256]) -> u8 {
+    let total: u32 = hist.iter().sum();
+    if total == 0 {
+        return 128;
+    }
+    let mut sum = 0u64;
+    for (i, &h) in hist.iter().enumerate() {
+        sum += (i as u64) * (h as u64);
+    }
+    let mut sum_b = 0u64;
+    let mut w_b = 0u64;
+    let mut best = 0f64;
+    let mut best_t = 0u8;
+    for (t, &h) in hist.iter().enumerate() {
+        w_b += h as u64;
+        if w_b == 0 {
+            continue;
+        }
+        let w_f = total as u64 - w_b;
+        if w_f == 0 {
+            break;
+        }
+        sum_b += (t as u64) * (h as u64);
+        let m_b = sum_b as f64 / w_b as f64;
+        let m_f = (sum - sum_b) as f64 / w_f as f64;
+        let var = (w_b as f64) * (w_f as f64) * (m_b - m_f) * (m_b - m_f);
+        if var > best {
+            best = var;
+            best_t = t as u8;
+        }
+    }
+    best_t
+}
+
+fn morph_close_into(src: &[u8], w: usize, h: usize, tmp: &mut [u8], dst: &mut [u8]) {
     for y in 0..h {
         for x in 0..w {
             let mut hit = false;
@@ -355,13 +1300,13 @@ fn morph_close(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
                 for dx in -1i32..=1 {
                     let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
                     let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                    if mask[yy * w + xx] == 1 {
+                    if src[yy * w + xx] != 0 {
                         hit = true;
                         break 'outer;
                     }
                 }
             }
-            dilated[y * w + x] = if hit { 1 } else { 0 };
+            tmp[y * w + x] = u8::from(hit);
         }
     }
     for y in 0..h {
@@ -371,16 +1316,15 @@ fn morph_close(mask: &[u8], w: usize, h: usize) -> Vec<u8> {
                 for dx in -1i32..=1 {
                     let xx = (x as i32 + dx).clamp(0, w as i32 - 1) as usize;
                     let yy = (y as i32 + dy).clamp(0, h as i32 - 1) as usize;
-                    if dilated[yy * w + xx] == 0 {
+                    if tmp[yy * w + xx] == 0 {
                         hole = true;
                         break 'outer;
                     }
                 }
             }
-            closed[y * w + x] = if hole { 0 } else { 1 };
+            dst[y * w + x] = u8::from(!hole);
         }
     }
-    closed
 }
 
 fn min_area_rect(hull: &[(f32, f32)]) -> [(f32, f32); 4] {
