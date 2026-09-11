@@ -178,8 +178,8 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     if hyp.is_empty() {
         if crop_debug() {
             eprintln!(
-                "  [crop] proxy {}x{} strong={} hypotheses=0",
-                dwi, dhi, strong
+                "  [crop] proxy {}x{} img={}x{} strong={} hypotheses=0",
+                dwi, dhi, w, h, strong
             );
         }
         return None;
@@ -193,9 +193,11 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
 
     if crop_debug() {
         eprintln!(
-            "  [crop] proxy {}x{} strong={} hypotheses={}",
+            "  [crop] proxy {}x{} img={}x{} strong={} hypotheses={}",
             dwi,
             dhi,
+            w,
+            h,
             strong,
             hyp.len()
         );
@@ -205,10 +207,23 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 vctx.otsu, vctx.step_thr, vctx.contrast_w
             );
         }
+        let dbg_inv_scale = 1.0 / scale;
         for (i, c) in hyp.iter().take(12).enumerate() {
+            let q = c.quad;
+            let quad = format!(
+                "quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                q[0].0 * dbg_inv_scale,
+                q[0].1 * dbg_inv_scale,
+                q[1].0 * dbg_inv_scale,
+                q[1].1 * dbg_inv_scale,
+                q[2].0 * dbg_inv_scale,
+                q[2].1 * dbg_inv_scale,
+                q[3].0 * dbg_inv_scale,
+                q[3].1 * dbg_inv_scale
+            );
             if vctx.enabled {
                 eprintln!(
-                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2}",
+                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} {}",
                     i,
                     c.source,
                     c.area_ratio,
@@ -217,17 +232,19 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                     c.score,
                     c.step_ok,
                     c.ring_fg,
-                    c.ring_bg
+                    c.ring_bg,
+                    quad
                 );
             } else {
                 eprintln!(
-                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4}",
+                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} {}",
                     i,
                     c.source,
                     c.area_ratio,
                     c.ok_edges,
                     u8::from(c.frame_touch),
-                    c.score
+                    c.score,
+                    quad
                 );
             }
         }
