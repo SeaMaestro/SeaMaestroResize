@@ -1236,6 +1236,24 @@ fn cross_f(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
 }
 
+fn hull_is_quad(c: &[(f32, f32); 4]) -> bool {
+    for i in 0..4 {
+        let p = c[i];
+        let a = c[(i + 1) % 4];
+        let b = c[(i + 2) % 4];
+        let d = c[(i + 3) % 4];
+        let s1 = cross_f(a, b, p);
+        let s2 = cross_f(b, d, p);
+        let s3 = cross_f(d, a, p);
+        let nonneg = s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0;
+        let nonpos = s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0;
+        if nonneg || nonpos {
+            return false;
+        }
+    }
+    true
+}
+
 fn sobel_l1(src: &[u8], w: usize, h: usize) -> Vec<u8> {
     let mut out = vec![0u8; w * h];
     if w < 3 || h < 3 {
@@ -1532,6 +1550,12 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::D
         (dw as f32, dh as f32),
         (0.0, dh as f32),
     ];
+    if !hull_is_quad(corners) {
+        if crop_debug() {
+            eprintln!("  [crop] warp_fallback reason=hull -> original");
+        }
+        return None;
+    }
     let (h, gauss_degenerate) = homography(&dst, corners);
     let (res, res_mean, res_rel) = warp_residual(&h, &dst, corners);
     if crop_debug() {
@@ -1699,6 +1723,35 @@ mod tests {
     fn cross_f_is_positive_counter_clockwise() {
         assert!(cross_f((0.0, 0.0), (1.0, 0.0), (0.0, 1.0)) > 0.0);
         assert!(cross_f((0.0, 0.0), (0.0, 1.0), (1.0, 0.0)) < 0.0);
+    }
+
+    #[test]
+    fn hull_is_quad_accepts_convex_quad() {
+        let square = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        assert!(hull_is_quad(&square));
+        let diamond = [(0.0f32, 10.0f32), (10.0, 0.0), (20.0, 10.0), (10.0, 20.0)];
+        assert!(hull_is_quad(&diamond));
+    }
+
+    #[test]
+    fn hull_is_quad_rejects_interior_point() {
+        let c = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (5.0, 5.0)];
+        assert!(!hull_is_quad(&c));
+    }
+
+    #[test]
+    fn hull_is_quad_rejects_collinear_points() {
+        let c = [(0.0f32, 0.0f32), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)];
+        assert!(!hull_is_quad(&c));
+    }
+
+    #[test]
+    fn hull_is_quad_is_permutation_invariant() {
+        let c = [(0.0f32, 0.0f32), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        for p in permutations4() {
+            let q = [c[p[0]], c[p[1]], c[p[2]], c[p[3]]];
+            assert!(hull_is_quad(&q), "perm={:?}", p);
+        }
     }
 
     #[test]
