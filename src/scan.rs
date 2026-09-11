@@ -3,7 +3,7 @@ use rayon::prelude::*;
 const DOWNSAMPLE: usize = 16;
 const BLUR_RADIUS: usize = 2;
 const BLACK_PT: f32 = 0.25;
-const WHITE_PT: f32 = 0.85;
+const WHITE_PT: f32 = 0.95;
 const TOP_FRACTION: f32 = 0.90;
 const CHROMA_RADIUS: usize = 1;
 
