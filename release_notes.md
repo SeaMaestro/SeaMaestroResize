@@ -18,6 +18,10 @@ preserves colored stamps/signatures. Combines with `pdf`/`merge`.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
+VirusTotal — clean: 0/71 security vendors flagged the file.
+SHA-256: d5bffd1d358bb57a684a42cb3326be108bb4ce01401cb4852ac604c67abada26
+Size: 33.24 MB (PE executable, 64-bit)
+
 License
 MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
 
