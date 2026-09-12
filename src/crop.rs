@@ -328,7 +328,7 @@ fn detect_by_edges(
             &mut sc.contour,
         );
         if sc.contour.len() >= 8 {
-            push_poly_hypotheses("edge", w, h, mag_sharp, sc, out, vctx);
+            push_poly_hypotheses("edge", w, h, mag_sharp, sc, out, vctx, false);
         }
         if dbg {
             eprintln!(
@@ -402,7 +402,7 @@ fn detect_by_threshold(
                     );
                     contour_len = sc.contour.len();
                     if contour_len >= 8 {
-                        push_poly_hypotheses("sweep", w, h, mag_sharp, sc, out, vctx);
+                        push_poly_hypotheses("sweep", w, h, mag_sharp, sc, out, vctx, false);
                     }
                 }
             }
@@ -418,6 +418,76 @@ fn detect_by_threshold(
             );
         }
     }
+    if crop_debug() {
+        detect_dark_diagnostics(soft, mag_sharp, w, h, sc, out, vctx);
+    }
+}
+
+fn detect_dark_diagnostics(
+    soft: &[u8],
+    mag_sharp: &[u8],
+    w: usize,
+    h: usize,
+    sc: &mut Scratch,
+    out: &mut Vec<Hypothesis>,
+    vctx: &VerifyCtx,
+) {
+    let n = w * h;
+    let base_t = otsu(&hist256(soft)) as i32;
+    let mut thresholds: Vec<i32> = (96..=200).step_by(4).collect();
+    thresholds.extend_from_slice(&[
+        base_t,
+        base_t - 30,
+        base_t + 30,
+        base_t - 60,
+        base_t + 60,
+        192,
+    ]);
+    let min_px = (n / COMP_MIN_FRAC).max(MIN_COMPONENT);
+    for &t_raw in &thresholds {
+        let t = t_raw.clamp(0, 255) as u8;
+        for (i, &v) in soft.iter().enumerate() {
+            sc.mask[i] = u8::from(v < t);
+        }
+        morph_close_into(&sc.mask, w, h, &mut sc.tmp, &mut sc.closed);
+        let comps = label_components(
+            &sc.closed,
+            w,
+            h,
+            &mut sc.parent,
+            &mut sc.rank,
+            &mut sc.area,
+            &mut sc.seed,
+        );
+        let top = comps.first().map(|c| c.0).unwrap_or(0);
+        let mut contour_len = 0usize;
+        if let Some(&(count, root)) = comps.first() {
+            if (count as usize) >= min_px {
+                let seed = sc.seed[root as usize];
+                if seed != u32::MAX {
+                    let s = seed as usize;
+                    sc.visited.clear();
+                    sc.visited.resize(n, 0);
+                    trace_contour(
+                        &sc.closed,
+                        w,
+                        h,
+                        ((s % w) as i32, (s / w) as i32),
+                        &mut sc.visited,
+                        &mut sc.contour,
+                    );
+                    contour_len = sc.contour.len();
+                    if contour_len >= 8 {
+                        push_poly_hypotheses("dark", w, h, mag_sharp, sc, out, vctx, true);
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "  [crop] dark t={:<3} top={:<7} min={:<6} contour={:<6}",
+            t, top, min_px, contour_len
+        );
+    }
 }
 
 fn push_poly_hypotheses(
@@ -428,6 +498,7 @@ fn push_poly_hypotheses(
     sc: &mut Scratch,
     out: &mut Vec<Hypothesis>,
     vctx: &VerifyCtx,
+    dry: bool,
 ) {
     let per = contour_perimeter(&sc.contour);
     if per < 8.0 {
@@ -439,34 +510,94 @@ fn push_poly_hypotheses(
     for &eps_r in APPROX_EPS.iter() {
         let eps = per * eps_r;
         approx_polygon(&sc.contour, eps, &mut sc.keep, &mut sc.pstack, &mut sc.poly);
+        let raw_n = sc.poly.len();
         let mut poly = sc.poly.clone();
         dedup_closed(&mut poly, eps.max(1.0));
+        let dedup_n = poly.len();
         if poly.len() > 4 && poly.len() <= 7 {
             poly = simplify_to_4(&poly);
+        }
+        if dbg {
+            let dmin = if poly.len() == 4 {
+                min_pair_dist(&[poly[0], poly[1], poly[2], poly[3]])
+            } else {
+                0.0
+            };
+            let pts: String = poly
+                .iter()
+                .map(|p| format!("{:.2},{:.2};", p.0, p.1))
+                .collect();
+            eprintln!(
+                "  [crop] poly {} {} stage=eps eps_r={} per={:.1} raw={} dedup={} n={} dmin={:.4} pts=[{}]",
+                source,
+                if dry { "dry" } else { "wet" },
+                eps_r,
+                per,
+                raw_n,
+                dedup_n,
+                poly.len(),
+                dmin,
+                pts
+            );
         }
         if poly.len() == 4 {
             eps4 += 1;
             let q = order_corners(&[poly[0], poly[1], poly[2], poly[3]]);
-            push_quad(q, source, w, h, mag, out, vctx);
+            push_quad(q, source, w, h, mag, out, vctx, dry);
         }
     }
 
     let mut ip: Vec<(i32, i32)> = sc.contour.clone();
     let hull = convex_hull(&mut ip);
     if dbg {
-        eprintln!("  [crop]   poly eps4={} hull_n={}", eps4, hull.len());
+        eprintln!(
+            "  [crop] poly {} {} stage=hull eps4={} hull_n={}",
+            source,
+            if dry { "dry" } else { "wet" },
+            eps4,
+            hull.len()
+        );
     }
     if hull.len() < 4 {
         return;
     }
     let hull_f: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
     let corners = simplify_to_4(&hull_f);
+    if dbg {
+        let pts: String = corners
+            .iter()
+            .map(|p| format!("{:.2},{:.2};", p.0, p.1))
+            .collect();
+        let dmin = if corners.len() == 4 {
+            min_pair_dist(&[corners[0], corners[1], corners[2], corners[3]])
+        } else {
+            0.0
+        };
+        eprintln!(
+            "  [crop] poly {} {} stage=hull4 n={} dmin={:.4} pts=[{}]",
+            source,
+            if dry { "dry" } else { "wet" },
+            corners.len(),
+            dmin,
+            pts
+        );
+    }
     if corners.len() == 4 {
         let q = order_corners(&[corners[0], corners[1], corners[2], corners[3]]);
-        push_quad(q, source, w, h, mag, out, vctx);
+        push_quad(q, source, w, h, mag, out, vctx, dry);
     }
     if let Some(q) = min_area_rect(&hull_f) {
-        push_quad(q, source, w, h, mag, out, vctx);
+        if dbg {
+            let pts: String = q.iter().map(|p| format!("{:.2},{:.2};", p.0, p.1)).collect();
+            eprintln!(
+                "  [crop] poly {} {} stage=rect dmin={:.4} pts=[{}]",
+                source,
+                if dry { "dry" } else { "wet" },
+                min_pair_dist(&q),
+                pts
+            );
+        }
+        push_quad(q, source, w, h, mag, out, vctx, dry);
     }
 }
 
@@ -478,18 +609,31 @@ fn push_quad(
     mag: &[u8],
     out: &mut Vec<Hypothesis>,
     vctx: &VerifyCtx,
+    dry: bool,
 ) {
-    if out.len() >= MAX_HYPOTHESES {
+    if !dry && out.len() >= MAX_HYPOTHESES {
         return;
     }
     if !validate(&quad, w as f32, h as f32) {
         if crop_debug() {
             if let Some(reason) = validate_reason(&quad, w as f32, h as f32) {
-                eprintln!(
-                    "  [crop]   reject {:<7} area={:.3}",
-                    reason,
-                    polygon_area(&quad) / (w * h) as f32
-                );
+                let pts: String = quad
+                    .iter()
+                    .map(|p| format!("{:.2},{:.2};", p.0, p.1))
+                    .collect();
+                let dmin = min_pair_dist(&quad);
+                let a = polygon_area(&quad) / (w * h) as f32;
+                if dry {
+                    eprintln!(
+                        "  [crop]   reject dry {:<7} area={:.3} dmin={:.4} src={} pts=[{}]",
+                        reason, a, dmin, source, pts
+                    );
+                } else {
+                    eprintln!(
+                        "  [crop]   reject {:<7} area={:.3} dmin={:.4} src={} pts=[{}]",
+                        reason, a, dmin, source, pts
+                    );
+                }
             }
         }
         return;
@@ -525,6 +669,49 @@ fn push_quad(
     }
     if frame_touch {
         score *= 0.25;
+    }
+    if dry {
+        if crop_debug() {
+            if vctx.enabled {
+                eprintln!(
+                    "  [crop]   {:<7} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                    source,
+                    area_ratio,
+                    ok_edges,
+                    u8::from(frame_touch),
+                    score,
+                    step_ok,
+                    ring_fg,
+                    ring_bg,
+                    quad[0].0,
+                    quad[0].1,
+                    quad[1].0,
+                    quad[1].1,
+                    quad[2].0,
+                    quad[2].1,
+                    quad[3].0,
+                    quad[3].1
+                );
+            } else {
+                eprintln!(
+                    "  [crop]   {:<7} area={:.3} edges={} frame={} score={:.4} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                    source,
+                    area_ratio,
+                    ok_edges,
+                    u8::from(frame_touch),
+                    score,
+                    quad[0].0,
+                    quad[0].1,
+                    quad[1].0,
+                    quad[1].1,
+                    quad[2].0,
+                    quad[2].1,
+                    quad[3].0,
+                    quad[3].1
+                );
+            }
+        }
+        return;
     }
     out.push(Hypothesis {
         quad,
@@ -1137,6 +1324,19 @@ fn polygon_area(c: &[(f32, f32); 4]) -> f32 {
         s += c[i].0 * c[j].1 - c[j].0 * c[i].1;
     }
     s.abs() * 0.5
+}
+
+fn min_pair_dist(c: &[(f32, f32); 4]) -> f32 {
+    let mut m = f32::MAX;
+    for i in 0..4 {
+        for j in (i + 1)..4 {
+            let d = dist(c[i], c[j]);
+            if d < m {
+                m = d;
+            }
+        }
+    }
+    m
 }
 
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
