@@ -47,6 +47,26 @@ const HYP_DBG_DEFAULT: u8 = 20;
 const PICK_MODE_ENV: &str = "SEAMAESTRO_CROP_PICK";
 const SHEET_CONTRAST_W: f32 = 0.5;
 const WARP_RES_TOL_PX: f32 = 1.0;
+const EDGE_REFINE_ENV: &str = "SEAMAESTRO_CROP_EDGE";
+const EDGE_REFINE_RAYS: usize = 72;
+const EDGE_REFINE_STEP: f32 = 2.0;
+const EDGE_REFINE_WIN: usize = 6;
+const EDGE_REFINE_JUMP_MIN: f32 = 8.0;
+const EDGE_REFINE_JUMP_MAD_K: f32 = 2.0;
+const EDGE_REFINE_GRID: usize = 41;
+const EDGE_REFINE_TAIL_MAX: f32 = 0.5;
+const EDGE_REFINE_RAY_RATIO_LO: f32 = 0.45;
+const EDGE_REFINE_RAY_RATIO_HI: f32 = 1.60;
+const EDGE_REFINE_PTS_MIN: usize = 8;
+const EDGE_REFINE_SIDE_RATIO_LO: f32 = 0.45;
+const EDGE_REFINE_SIDE_RATIO_HI: f32 = 1.02;
+const EDGE_REFINE_AREA_LO: f32 = 0.45;
+const EDGE_REFINE_AREA_HI: f32 = 1.02;
+const EDGE_REFINE_DMIN_FRAC: f32 = 0.05;
+const EDGE_REFINE_MATCH_FRAC: f32 = 0.35;
+const EDGE_REFINE_EDGE_TOL_FRAC: f32 = 0.10;
+const EDGE_REFINE_MAX_REACH: f32 = 1.05;
+
 
 pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
     let (w, h) = (img.width(), img.height());
@@ -274,6 +294,37 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
         );
     }
     let pick = hyp[pick_idx].quad;
+    let pick = if edge_refine_enabled() {
+        match refine_pick_by_ray_edge(&soft, dwi, dhi, &pick) {
+            Some(rq) => {
+                if crop_debug() {
+                    eprintln!(
+                        "  [crop] edge refine proxy area={:.3}->{:.3} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                        hyp[pick_idx].area_ratio,
+                        polygon_area(&rq) / (dwi * dhi) as f32,
+                        rq[0].0,
+                        rq[0].1,
+                        rq[1].0,
+                        rq[1].1,
+                        rq[2].0,
+                        rq[2].1,
+                        rq[3].0,
+                        rq[3].1
+                    );
+                }
+                rq
+            }
+            None => {
+                if crop_debug() {
+                    eprintln!("  [crop] edge refine no-op -> pick kept");
+                }
+                pick
+            }
+        }
+    } else {
+        pick
+    };
+
     Some(pick.map(|(x, y)| (x * inv_scale, y * inv_scale)))
 }
 
@@ -426,6 +477,356 @@ fn pick_index_mode(
     }
     (0, "legacy_score")
 }
+
+fn edge_refine_enabled() -> bool {
+    match std::env::var(EDGE_REFINE_ENV) {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+fn quad_center(q: &[(f32, f32); 4]) -> (f32, f32) {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    for p in q.iter() {
+        x += p.0;
+        y += p.1;
+    }
+    (x / 4.0, y / 4.0)
+}
+
+fn quad_orientation(q: &[(f32, f32); 4]) -> f32 {
+    let mut s = 0.0;
+    for i in 0..4 {
+        let j = (i + 1) & 3;
+        s += q[i].0 * q[j].1 - q[j].0 * q[i].1;
+    }
+    if s >= 0.0 {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn quad_contains(q: &[(f32, f32); 4], sgn: f32, x: f32, y: f32) -> bool {
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) & 3];
+        let cr = (b.0 - a.0) * (y - a.1) - (b.1 - a.1) * (x - a.0);
+        if cr * sgn < 0.0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn ray_quad_exit(q: &[(f32, f32); 4], cx: f32, cy: f32, dx: f32, dy: f32) -> f32 {
+    let mut best = -1.0f32;
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) & 3];
+        let ex = b.0 - a.0;
+        let ey = b.1 - a.1;
+        let den = dx * ey - dy * ex;
+        if den.abs() < 1e-12 {
+            continue;
+        }
+        let px = a.0 - cx;
+        let py = a.1 - cy;
+        let t = (px * ey - py * ex) / den;
+        let u = (px * dy - py * dx) / den;
+        if t > best && (-0.0005..=1.0005).contains(&u) {
+            best = t;
+        }
+    }
+    best
+}
+
+fn ray_frame_exit(cx: f32, cy: f32, dx: f32, dy: f32, w: usize, h: usize) -> f32 {
+    let mut t = f32::MAX;
+    if dx > 1e-9 {
+        t = t.min((w as f32 - 1.0 - cx) / dx);
+    } else if dx < -1e-9 {
+        t = t.min((0.0 - cx) / dx);
+    }
+    if dy > 1e-9 {
+        t = t.min((h as f32 - 1.0 - cy) / dy);
+    } else if dy < -1e-9 {
+        t = t.min((0.0 - cy) / dy);
+    }
+    t
+}
+
+fn median_in_place(v: &mut [f32]) -> f32 {
+    if v.is_empty() {
+        return f32::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        (v[n / 2 - 1] + v[n / 2]) / 2.0
+    }
+}
+
+fn fit_principal_line(pts: &[(f32, f32)]) -> Option<(f32, f32, f32, f32)> {
+    if pts.len() < 2 {
+        return None;
+    }
+    let n = pts.len() as f32;
+    let mx = pts.iter().map(|p| p.0).sum::<f32>() / n;
+    let my = pts.iter().map(|p| p.1).sum::<f32>() / n;
+    let mut sxx = 0.0f32;
+    let mut syy = 0.0f32;
+    let mut sxy = 0.0f32;
+    for p in pts.iter() {
+        let dx = p.0 - mx;
+        let dy = p.1 - my;
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+    }
+    if sxx + syy <= 1e-6 {
+        return None;
+    }
+    let th = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    Some((mx, my, th.cos(), th.sin()))
+}
+
+fn line_cross(l1: (f32, f32, f32, f32), l2: (f32, f32, f32, f32)) -> Option<(f32, f32)> {
+    let den = l1.2 * l2.3 - l1.3 * l2.2;
+    if den.abs() < 1e-6 {
+        return None;
+    }
+    let t = ((l2.0 - l1.0) * l2.3 - (l2.1 - l1.1) * l2.2) / den;
+    Some((l1.0 + t * l1.2, l1.1 + t * l1.3))
+}
+
+fn nearest_edge_index(q: &[(f32, f32); 4], p: (f32, f32)) -> Option<(usize, f32)> {
+    let mut best: Option<(usize, f32)> = None;
+    for i in 0..4 {
+        let a = q[i];
+        let b = q[(i + 1) & 3];
+        let ex = b.0 - a.0;
+        let ey = b.1 - a.1;
+        let l2 = ex * ex + ey * ey;
+        if l2 <= 1e-6 {
+            continue;
+        }
+        let t = ((p.0 - a.0) * ex + (p.1 - a.1) * ey) / l2;
+        if !(-0.05..=1.05).contains(&t) {
+            continue;
+        }
+        let tc = t.clamp(0.0, 1.0);
+        let qx = a.0 + ex * tc;
+        let qy = a.1 + ey * tc;
+        let d = ((p.0 - qx) * (p.0 - qx) + (p.1 - qy) * (p.1 - qy)).sqrt();
+        if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best
+}
+
+
+fn refine_pick_by_ray_edge(
+    luma: &[u8],
+    w: usize,
+    h: usize,
+    pick: &[(f32, f32); 4],
+) -> Option<[(f32, f32); 4]> {
+    if w < 16 || h < 16 || luma.len() < w * h {
+        return None;
+    }
+    let pick_area = polygon_area(pick);
+    if !(pick_area > 1.0) {
+        return None;
+    }
+    let (cx, cy) = quad_center(pick);
+    let sgn = quad_orientation(pick);
+    let mut bx0 = f32::MAX;
+    let mut bx1 = f32::MIN;
+    let mut by0 = f32::MAX;
+    let mut by1 = f32::MIN;
+    for p in pick.iter() {
+        bx0 = bx0.min(p.0);
+        bx1 = bx1.max(p.0);
+        by0 = by0.min(p.1);
+        by1 = by1.max(p.1);
+    }
+    bx0 = bx0.max(0.0);
+    by0 = by0.max(0.0);
+    bx1 = bx1.min((w - 1) as f32);
+    by1 = by1.min((h - 1) as f32);
+    if bx1 <= bx0 || by1 <= by0 {
+        return None;
+    }
+    let grid = EDGE_REFINE_GRID as f32;
+    let mut paper: Vec<f32> = Vec::with_capacity(EDGE_REFINE_GRID * EDGE_REFINE_GRID);
+    for iy in 0..EDGE_REFINE_GRID {
+        let yy = by0 + (by1 - by0) * (iy as f32 + 0.5) / grid;
+        for ix in 0..EDGE_REFINE_GRID {
+            let xx = bx0 + (bx1 - bx0) * (ix as f32 + 0.5) / grid;
+            if !quad_contains(pick, sgn, xx, yy) {
+                continue;
+            }
+            let xi = (xx.round() as i32).clamp(0, w as i32 - 1) as usize;
+            let yi = (yy.round() as i32).clamp(0, h as i32 - 1) as usize;
+            paper.push(luma[yi * w + xi] as f32);
+        }
+    }
+    if paper.len() < 16 {
+        return None;
+    }
+    let internal = median_in_place(&mut paper);
+    let mut dev: Vec<f32> = paper.iter().map(|v| (v - internal).abs()).collect();
+    let mad = median_in_place(&mut dev);
+    let jump_thr = EDGE_REFINE_JUMP_MIN.max(EDGE_REFINE_JUMP_MAD_K * mad);
+    let tail_lim = (2.0 * mad).max(4.0);
+
+    let diag_pick = dist(pick[0], pick[2])
+        .max(dist(pick[1], pick[3]))
+        .max(1e-6);
+    let edge_tol = EDGE_REFINE_EDGE_TOL_FRAC * diag_pick;
+
+    let mut side_pts: [Vec<(f32, f32)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let mut side_ratio: [Vec<f32>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    let win = EDGE_REFINE_WIN;
+    let winf = win as f32;
+    for k in 0..EDGE_REFINE_RAYS {
+        let th = std::f32::consts::TAU * (k as f32 + 0.5) / EDGE_REFINE_RAYS as f32;
+        let (dx, dy) = (th.cos(), th.sin());
+        let rp = ray_quad_exit(pick, cx, cy, dx, dy);
+        if !(rp > 0.0) {
+            continue;
+        }
+        let re = ray_frame_exit(cx, cy, dx, dy, w, h);
+        if !re.is_finite() {
+            continue;
+        }
+        let steps = (re / EDGE_REFINE_STEP).floor() as i32;
+        if steps < (4 * win) as i32 {
+            continue;
+        }
+        let n = steps as usize;
+        let mut prof = vec![0f32; n + 1];
+        for (i, v) in prof.iter_mut().enumerate() {
+            let px = cx + i as f32 * EDGE_REFINE_STEP * dx;
+            let py = cy + i as f32 * EDGE_REFINE_STEP * dy;
+            let xi = (px.round() as i32).clamp(0, w as i32 - 1) as usize;
+            let yi = (py.round() as i32).clamp(0, h as i32 - 1) as usize;
+            *v = luma[yi * w + xi] as f32;
+        }
+        let mut in_sum: f32 = prof[..win].iter().sum();
+        let mut out_sum: f32 = prof[win..2 * win].iter().sum();
+        let mut best_t: i32 = -1;
+        let mut best_c = 0.0f32;
+        let mut best_d = f32::MAX;
+        let mut best_in = 0.0f32;
+        let reach = ((rp * EDGE_REFINE_MAX_REACH) / EDGE_REFINE_STEP).floor() as i32;
+        let hi = (n as i32 - win as i32).min(reach);
+        for t in win as i32..=hi {
+            let in_avg = in_sum / winf;
+            let out_avg = out_sum / winf;
+            let c = (in_avg - out_avg).abs();
+            if c >= jump_thr {
+                let dd = (t as f32 * EDGE_REFINE_STEP - rp).abs();
+                if c > best_c + 1e-4 || (c >= best_c - 1e-4 && dd < best_d) {
+                    best_c = c;
+                    best_d = dd;
+                    best_t = t;
+                    best_in = in_avg;
+                }
+            }
+            let ti = t as usize;
+            in_sum += prof[ti] - prof[ti - win];
+            if t + win as i32 <= n as i32 {
+                out_sum += prof[ti + win] - prof[ti];
+            }
+        }
+        if best_t < 0 {
+            continue;
+        }
+        let mut same = 0usize;
+        let mut tot = 0usize;
+        for i in best_t as usize..=n {
+            tot += 1;
+            if (prof[i] - best_in).abs() <= tail_lim {
+                same += 1;
+            }
+        }
+        let tf = if tot > 0 {
+            same as f32 / tot as f32
+        } else {
+            1.0
+        };
+        if tf > EDGE_REFINE_TAIL_MAX {
+            continue;
+        }
+        let rs = best_t as f32 * EDGE_REFINE_STEP;
+        let rt = rs / rp;
+        if !(EDGE_REFINE_RAY_RATIO_LO..=EDGE_REFINE_RAY_RATIO_HI).contains(&rt) {
+            continue;
+        }
+        let hit = (cx + rs * dx, cy + rs * dy);
+        if let Some((j, d)) = nearest_edge_index(pick, hit) {
+            if d <= edge_tol {
+                side_pts[j].push(hit);
+                side_ratio[j].push(rt);
+            }
+        }
+    }
+
+    let mut lines = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 4];
+    for j in 0..4 {
+        if side_pts[j].len() < EDGE_REFINE_PTS_MIN {
+            return None;
+        }
+        let m = median_in_place(&mut side_ratio[j]);
+        if !(EDGE_REFINE_SIDE_RATIO_LO..=EDGE_REFINE_SIDE_RATIO_HI).contains(&m) {
+            return None;
+        }
+        lines[j] = fit_principal_line(&side_pts[j])?;
+    }
+
+    let mut quad = [(0.0f32, 0.0f32); 4];
+    for j in 0..4 {
+        let (x, y) = line_cross(lines[(j + 3) & 3], lines[j])?;
+        if !x.is_finite() || !y.is_finite() {
+            return None;
+        }
+        quad[j] = (x, y);
+    }
+    if !hull_is_quad(&quad) {
+        return None;
+    }
+    if validate_reason(&quad, w as f32, h as f32).is_some() {
+        return None;
+    }
+    let ratio = polygon_area(&quad) / pick_area;
+    if !(EDGE_REFINE_AREA_LO..=EDGE_REFINE_AREA_HI).contains(&ratio) {
+        return None;
+    }
+    let diag = dist(quad[0], quad[2]).max(dist(quad[1], quad[3]));
+    if min_pair_dist(&quad) < EDGE_REFINE_DMIN_FRAC * diag {
+        return None;
+    }
+    let quad = order_corners(&quad);
+    let mut worst = 0.0f32;
+    for i in 0..4 {
+        let d = dist(quad[i], pick[i]);
+        if d > worst {
+            worst = d;
+        }
+    }
+    if worst > EDGE_REFINE_MATCH_FRAC * diag_pick {
+        return None;
+    }
+    Some(quad)
+}
+
+
 
 fn detect_by_edges(
     mag_soft: &[u8],
@@ -2617,6 +3018,123 @@ mod tests {
             "degenerate input produced an accepted solve: degen={degenerate} worst={worst}"
         );
     }
+
+    fn synth_paper(
+        w: usize,
+        h: usize,
+        rect: (usize, usize, usize, usize),
+        paper: u8,
+        bg: u8,
+    ) -> Vec<u8> {
+        let mut v = vec![bg; w * h];
+        for y in rect.1..rect.3 {
+            for x in rect.0..rect.2 {
+                v[y * w + x] = paper;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn edge_refine_shrinks_pick_to_paper_edge() {
+        let (w, h) = (160usize, 200usize);
+        let img = synth_paper(w, h, (16, 20, 144, 180), 200, 40);
+        let pick = [
+            (8.0f32, 12.0f32),
+            (152.0, 12.0),
+            (152.0, 188.0),
+            (8.0, 188.0),
+        ];
+        let res = refine_pick_by_ray_edge(&img, w, h, &pick).expect("expected a shrink proposal");
+        let expect = [
+            (16.0f32, 20.0f32),
+            (144.0, 20.0),
+            (144.0, 180.0),
+            (16.0, 180.0),
+        ];
+        for i in 0..4 {
+            assert!(
+                (res[i].0 - expect[i].0).abs() <= 3.0,
+                "corner {i} x={} expected {}",
+                res[i].0,
+                expect[i].0
+            );
+            assert!(
+                (res[i].1 - expect[i].1).abs() <= 3.0,
+                "corner {i} y={} expected {}",
+                res[i].1,
+                expect[i].1
+            );
+        }
+        assert!(polygon_area(&res) < polygon_area(&pick));
+        assert_eq!(res, order_corners(&res));
+        assert!(validate(&res, w as f32, h as f32));
+    }
+
+    #[test]
+    fn edge_refine_is_no_op_without_edge_signal() {
+        let (w, h) = (160usize, 200usize);
+        let img = vec![205u8; w * h];
+        let pick = [
+            (20.0f32, 24.0f32),
+            (140.0, 24.0),
+            (140.0, 176.0),
+            (20.0, 176.0),
+        ];
+        assert!(refine_pick_by_ray_edge(&img, w, h, &pick).is_none());
+    }
+
+    #[test]
+    fn edge_refine_rejects_degenerate_point_quad() {
+        let (w, h) = (256usize, 256usize);
+        let img = synth_paper(w, h, (78, 78, 178, 178), 210, 30);
+        let pick = [
+            (28.0f32, 28.0f32),
+            (228.0, 28.0),
+            (228.0, 228.0),
+            (28.0, 228.0),
+        ];
+        assert!(refine_pick_by_ray_edge(&img, w, h, &pick).is_none());
+    }
+
+    #[test]
+    fn edge_refine_rejects_widening_beyond_pick() {
+        let (w, h) = (240usize, 240usize);
+        let mut img = synth_paper(w, h, (40, 40, 200, 200), 210, 30);
+        for y in 78..162 {
+            for x in 78..162 {
+                img[y * w + x] = 40;
+            }
+        }
+        let pick = [
+            (90.0f32, 90.0f32),
+            (150.0, 90.0),
+            (150.0, 150.0),
+            (90.0, 150.0),
+        ];
+        assert!(refine_pick_by_ray_edge(&img, w, h, &pick).is_none());
+    }
+
+    #[test]
+    fn edge_refine_requires_support_on_every_side() {
+        let (w, h) = (160usize, 240usize);
+        let img = synth_paper(w, h, (40, 0, 120, 240), 200, 40);
+        let pick = [
+            (30.0f32, 10.0f32),
+            (130.0, 10.0),
+            (130.0, 230.0),
+            (30.0, 230.0),
+        ];
+        assert!(refine_pick_by_ray_edge(&img, w, h, &pick).is_none());
+    }
+
+    #[test]
+    fn edge_refine_is_safe_on_degenerate_pick() {
+        let img = vec![128u8; 64 * 64];
+        let pick = [(10.0f32, 10.0f32), (10.0, 10.0), (10.0, 10.0), (10.0, 10.0)];
+        assert!(refine_pick_by_ray_edge(&img, 64, 64, &pick).is_none());
+    }
+
 
     #[test]
     fn warp_has_single_call_site() {
