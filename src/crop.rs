@@ -32,10 +32,20 @@ const AREA_PRIOR_PEAK: f32 = 0.30;
 const AREA_PRIOR_BELOW: f32 = 1.0;
 const AREA_PRIOR_ABOVE: f32 = 0.10;
 const TIEBREAK_REL_DEFAULT: f32 = 0.90;
+const REGION_PICK_MIN_RATIO: f32 = 1.9;
+const AREA_FRAGMENT_MAX: f32 = 0.25;
+const SHEET_BAND_ASPECT_MIN: f32 = 0.64;
+const SHEET_BAND_ASPECT_MAX: f32 = 0.80;
+const SHEET_WIDEN_RATIO: f32 = 1.20;
+const SHEET_MAX_AREA_FRAC: f32 = 0.90;
 const SCORE_MODE_ENV: &str = "SEAMAESTRO_CROP_SCORE";
 const STEP_THR_ENV: &str = "SEAMAESTRO_CROP_STEP_THR";
 const CONTRAST_W_ENV: &str = "SEAMAESTRO_CROP_CONTRAST_W";
 const TIEBREAK_REL_ENV: &str = "SEAMAESTRO_CROP_TIEBREAK";
+const HYP_DBG_ENV: &str = "SEAMAESTRO_CROP_DBG_HYPS";
+const HYP_DBG_DEFAULT: u8 = 20;
+const PICK_MODE_ENV: &str = "SEAMAESTRO_CROP_PICK";
+const SHEET_CONTRAST_W: f32 = 0.5;
 const WARP_RES_TOL_PX: f32 = 1.0;
 
 pub(crate) fn deskew(img: image::DynamicImage) -> image::DynamicImage {
@@ -56,6 +66,7 @@ struct Hypothesis {
     ok_edges: u32,
     frame_touch: bool,
     score: f32,
+    score_region: f32,
     source: &'static str,
     step_ok: u32,
     ring_fg: f32,
@@ -201,14 +212,16 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             strong,
             hyp.len()
         );
-        if vctx.enabled {
-            eprintln!(
-                "  [crop] mode=region otsu={} step_thr={} contrast_w={:.2}",
-                vctx.otsu, vctx.step_thr, vctx.contrast_w
-            );
-        }
+        eprintln!(
+            "  [crop] mode={} otsu={} step_thr={} contrast_w={:.2}",
+            if vctx.enabled { "region" } else { "legacy" },
+            vctx.otsu,
+            vctx.step_thr,
+            vctx.contrast_w
+        );
         let dbg_inv_scale = 1.0 / scale;
-        for (i, c) in hyp.iter().take(12).enumerate() {
+        let dbg_hyp_max = env_u8(HYP_DBG_ENV, HYP_DBG_DEFAULT) as usize;
+        for (i, c) in hyp.iter().take(dbg_hyp_max).enumerate() {
             let q = c.quad;
             let quad = format!(
                 "quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
@@ -221,51 +234,197 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 q[3].0 * dbg_inv_scale,
                 q[3].1 * dbg_inv_scale
             );
-            if vctx.enabled {
-                eprintln!(
-                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} {}",
-                    i,
-                    c.source,
-                    c.area_ratio,
-                    c.ok_edges,
-                    u8::from(c.frame_touch),
-                    c.score,
-                    c.step_ok,
-                    c.ring_fg,
-                    c.ring_bg,
-                    quad
-                );
-            } else {
-                eprintln!(
-                    "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} {}",
-                    i,
-                    c.source,
-                    c.area_ratio,
-                    c.ok_edges,
-                    u8::from(c.frame_touch),
-                    c.score,
-                    quad
-                );
-            }
+            eprintln!(
+                "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} {}",
+                i,
+                c.source,
+                c.area_ratio,
+                c.ok_edges,
+                u8::from(c.frame_touch),
+                c.score,
+                c.step_ok,
+                c.ring_fg,
+                c.ring_bg,
+                quad
+            );
         }
     }
 
     let inv_scale = 1.0 / scale;
-    let pick = if vctx.enabled {
-        let tol = hyp[0].score * env_f32(TIEBREAK_REL_ENV, TIEBREAK_REL_DEFAULT);
-        hyp.iter()
-            .filter(|c| c.score >= tol)
-            .max_by(|a, b| {
-                a.area_ratio
-                    .partial_cmp(&b.area_ratio)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|c| c.quad)
-            .unwrap_or(hyp[0].quad)
-    } else {
-        hyp[0].quad
-    };
+    let region_idx = region_pick_index(&hyp);
+    let (pick_idx, pick_reason) = pick_index(&hyp, vctx.enabled, dwi as f32, dhi as f32);
+    if crop_debug() {
+        let pq = hyp[pick_idx].quad;
+        eprintln!(
+            "  [crop] pick reason={} idx={} area={:.3} winner_area={:.3} region_area={:.3} ratio={:.2} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+            pick_reason,
+            pick_idx,
+            hyp[pick_idx].area_ratio,
+            hyp[0].area_ratio,
+            hyp[region_idx].area_ratio,
+            hyp[region_idx].area_ratio / hyp[0].area_ratio.max(1e-6),
+            pq[0].0 * inv_scale,
+            pq[0].1 * inv_scale,
+            pq[1].0 * inv_scale,
+            pq[1].1 * inv_scale,
+            pq[2].0 * inv_scale,
+            pq[2].1 * inv_scale,
+            pq[3].0 * inv_scale,
+            pq[3].1 * inv_scale
+        );
+    }
+    let pick = hyp[pick_idx].quad;
     Some(pick.map(|(x, y)| (x * inv_scale, y * inv_scale)))
+}
+
+fn region_score(
+    area_ratio: f32,
+    s_stats: &[(usize, usize); 4],
+    contrast: f32,
+    contrast_w: f32,
+) -> f32 {
+    let support: f32 = s_stats
+        .iter()
+        .map(|&(cnt, _)| (cnt as f32 / EDGE_SUP_SAMPLES as f32).min(1.0))
+        .sum::<f32>()
+        / 4.0;
+    let mut score = 0.05 + 0.30 * support;
+    score *= (REGION_CONTRAST_FLOOR + contrast_w * contrast.clamp(0.0, 1.0)).clamp(0.05, 1.0);
+    let area_prior = if area_ratio < AREA_PRIOR_PEAK {
+        1.0 - (AREA_PRIOR_PEAK - area_ratio) * AREA_PRIOR_BELOW
+    } else {
+        1.0 - (area_ratio - AREA_PRIOR_PEAK) * AREA_PRIOR_ABOVE
+    };
+    score * area_prior.clamp(0.15, 1.0)
+}
+
+fn region_pick_index(hyp: &[Hypothesis]) -> usize {
+    let mut top = 0.0f32;
+    for c in hyp {
+        if c.score_region > top {
+            top = c.score_region;
+        }
+    }
+    let tol = top * env_f32(TIEBREAK_REL_ENV, TIEBREAK_REL_DEFAULT);
+    let mut idx = 0usize;
+    let mut area = f32::MIN;
+    for (i, c) in hyp.iter().enumerate() {
+        if c.score_region >= tol && c.area_ratio >= area {
+            idx = i;
+            area = c.area_ratio;
+        }
+    }
+    if area == f32::MIN {
+        0
+    } else {
+        idx
+    }
+}
+
+fn quad_aspect(q: &[(f32, f32); 4]) -> f32 {
+    let w = ((q[1].0 - q[0].0).powi(2) + (q[1].1 - q[0].1).powi(2)).sqrt();
+    let h = ((q[2].0 - q[1].0).powi(2) + (q[2].1 - q[1].1).powi(2)).sqrt();
+    if w <= 0.0 || h <= 0.0 {
+        return 0.0;
+    }
+    let a = w / h;
+    if a > 1.0 {
+        1.0 / a
+    } else {
+        a
+    }
+}
+
+fn sheet_widen_ok(q: &[(f32, f32); 4], area_ratio: f32, w: f32, h: f32) -> bool {
+    area_ratio < SHEET_MAX_AREA_FRAC && !frame_hugging(q, w, h)
+}
+
+fn sheet_largest_ok_index(hyp: &[Hypothesis], w: f32, h: f32) -> Option<usize> {
+    let mut idx = None;
+    let mut area = f32::MIN;
+    for (i, c) in hyp.iter().enumerate() {
+        if c.area_ratio > area && sheet_widen_ok(&c.quad, c.area_ratio, w, h) {
+            area = c.area_ratio;
+            idx = Some(i);
+        }
+    }
+    idx
+}
+
+fn sheet_band_max_index(hyp: &[Hypothesis], w: f32, h: f32) -> Option<usize> {
+    let mut idx = None;
+    let mut area = 0.0f32;
+    for (i, c) in hyp.iter().enumerate() {
+        let a = quad_aspect(&c.quad);
+        if a >= SHEET_BAND_ASPECT_MIN
+            && a <= SHEET_BAND_ASPECT_MAX
+            && c.area_ratio > area
+            && sheet_widen_ok(&c.quad, c.area_ratio, w, h)
+        {
+            area = c.area_ratio;
+            idx = Some(i);
+        }
+    }
+    idx
+}
+
+fn sheet_contrast_area_index(hyp: &[Hypothesis]) -> Option<usize> {
+    let mut idx = None;
+    let mut best = f32::MIN;
+    for (i, c) in hyp.iter().enumerate() {
+        let s = c.area_ratio + SHEET_CONTRAST_W * (c.ring_fg - c.ring_bg);
+        if s > best {
+            best = s;
+            idx = Some(i);
+        }
+    }
+    idx
+}
+
+fn pick_mode_area_contrast() -> bool {
+    match std::env::var(PICK_MODE_ENV) {
+        Ok(v) => matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "areactr" | "area_contrast" | "ctr"
+        ),
+        Err(_) => false,
+    }
+}
+
+fn pick_index(hyp: &[Hypothesis], region_mode: bool, w: f32, h: f32) -> (usize, &'static str) {
+    pick_index_mode(hyp, region_mode, pick_mode_area_contrast(), w, h)
+}
+
+fn pick_index_mode(
+    hyp: &[Hypothesis],
+    region_mode: bool,
+    area_contrast_mode: bool,
+    w: f32,
+    h: f32,
+) -> (usize, &'static str) {
+    if region_mode {
+        return (region_pick_index(hyp), "region_tiebreak");
+    }
+    if area_contrast_mode {
+        if let Some(idx) = sheet_contrast_area_index(hyp) {
+            return (idx, "legacy_area_contrast");
+        }
+    }
+    if hyp[0].area_ratio < AREA_FRAGMENT_MAX {
+        if let Some(idx) = sheet_largest_ok_index(hyp, w, h) {
+            return (idx, "legacy_fragment");
+        }
+    }
+    if let Some(band) = sheet_band_max_index(hyp, w, h) {
+        if hyp[band].area_ratio >= SHEET_WIDEN_RATIO * hyp[0].area_ratio.max(1e-6) {
+            return (band, "legacy_sheet_band");
+        }
+    }
+    let region_idx = region_pick_index(hyp);
+    if hyp[region_idx].area_ratio >= REGION_PICK_MIN_RATIO * hyp[0].area_ratio {
+        return (region_idx, "legacy_page_detector");
+    }
+    (0, "legacy_score")
 }
 
 fn detect_by_edges(
@@ -641,75 +800,39 @@ fn push_quad(
     let area_ratio = polygon_area(&quad) / (w * h) as f32;
     let (ok_edges, _) = edge_stats(&quad, mag, w, h, vctx.strong);
     let frame_touch = frame_hugging(&quad, w as f32, h as f32);
-    let mut step_ok = 0u32;
-    let mut ring_fg = 0.0f32;
-    let mut ring_bg = 0.0f32;
-    let mut score = 0.05 + 0.30 * (ok_edges as f32 / 4.0);
-    if vctx.enabled {
-        let (s_ok, s_stats) = step_stats(&quad, vctx.luma, w, h, vctx.step_thr);
-        let (fg, bg, contrast) = ring_exterior_contrast(&quad, vctx.luma, w, h, vctx.otsu);
-        step_ok = s_ok;
-        ring_fg = fg;
-        ring_bg = bg;
-        let support: f32 = s_stats
-            .iter()
-            .map(|&(cnt, _)| (cnt as f32 / EDGE_SUP_SAMPLES as f32).min(1.0))
-            .sum::<f32>()
-            / 4.0;
-        score = 0.05 + 0.30 * support;
-        score *= (REGION_CONTRAST_FLOOR + vctx.contrast_w * contrast.clamp(0.0, 1.0)).clamp(0.05, 1.0);
-        let area_prior = if area_ratio < AREA_PRIOR_PEAK {
-            1.0 - (AREA_PRIOR_PEAK - area_ratio) * AREA_PRIOR_BELOW
-        } else {
-            1.0 - (area_ratio - AREA_PRIOR_PEAK) * AREA_PRIOR_ABOVE
-        };
-        score *= area_prior.clamp(0.15, 1.0);
+    let (step_ok, s_stats) = step_stats(&quad, vctx.luma, w, h, vctx.step_thr);
+    let (ring_fg, ring_bg, contrast) = ring_exterior_contrast(&quad, vctx.luma, w, h, vctx.otsu);
+    let mut score_region = region_score(area_ratio, &s_stats, contrast, vctx.contrast_w);
+    let mut score = if vctx.enabled {
+        score_region
     } else {
-        score *= (1.0 - (area_ratio - 0.55).abs() * 0.6).max(0.15);
-    }
+        (0.05 + 0.30 * (ok_edges as f32 / 4.0)) * (1.0 - (area_ratio - 0.55).abs() * 0.6).max(0.15)
+    };
     if frame_touch {
         score *= 0.25;
+        score_region *= 0.25;
     }
     if dry {
         if crop_debug() {
-            if vctx.enabled {
-                eprintln!(
-                    "  [crop]   {:<7} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
-                    source,
-                    area_ratio,
-                    ok_edges,
-                    u8::from(frame_touch),
-                    score,
-                    step_ok,
-                    ring_fg,
-                    ring_bg,
-                    quad[0].0,
-                    quad[0].1,
-                    quad[1].0,
-                    quad[1].1,
-                    quad[2].0,
-                    quad[2].1,
-                    quad[3].0,
-                    quad[3].1
-                );
-            } else {
-                eprintln!(
-                    "  [crop]   {:<7} area={:.3} edges={} frame={} score={:.4} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
-                    source,
-                    area_ratio,
-                    ok_edges,
-                    u8::from(frame_touch),
-                    score,
-                    quad[0].0,
-                    quad[0].1,
-                    quad[1].0,
-                    quad[1].1,
-                    quad[2].0,
-                    quad[2].1,
-                    quad[3].0,
-                    quad[3].1
-                );
-            }
+            eprintln!(
+                "  [crop]   {:<7} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                source,
+                area_ratio,
+                ok_edges,
+                u8::from(frame_touch),
+                score,
+                step_ok,
+                ring_fg,
+                ring_bg,
+                quad[0].0,
+                quad[0].1,
+                quad[1].0,
+                quad[1].1,
+                quad[2].0,
+                quad[2].1,
+                quad[3].0,
+                quad[3].1
+            );
         }
         return;
     }
@@ -719,6 +842,7 @@ fn push_quad(
         ok_edges,
         frame_touch,
         score,
+        score_region,
         source,
         step_ok,
         ring_fg,
@@ -1867,6 +1991,321 @@ mod tests {
             }
         }
         out
+    }
+
+    fn hyp(area: f32, score: f32, score_region: f32) -> Hypothesis {
+        Hypothesis {
+            quad: [(20.0, 20.0), (80.0, 20.0), (80.0, 80.0), (20.0, 80.0)],
+            area_ratio: area,
+            ok_edges: 0,
+            frame_touch: false,
+            score,
+            score_region,
+            source: "test",
+            step_ok: 0,
+            ring_fg: 0.0,
+            ring_bg: 0.0,
+        }
+    }
+
+    fn hyp_q(quad: [(f32, f32); 4], area: f32, score: f32, score_region: f32) -> Hypothesis {
+        Hypothesis {
+            quad,
+            area_ratio: area,
+            ok_edges: 0,
+            frame_touch: false,
+            score,
+            score_region,
+            source: "test",
+            step_ok: 0,
+            ring_fg: 0.0,
+            ring_bg: 0.0,
+        }
+    }
+
+    fn quad_portrait(aspect: f32) -> [(f32, f32); 4] {
+        let w = 60.0 * aspect;
+        [
+            (20.0, 20.0),
+            (20.0 + w, 20.0),
+            (20.0 + w, 80.0),
+            (20.0, 80.0),
+        ]
+    }
+
+    fn pick(list: &[Hypothesis], region_mode: bool) -> (usize, &'static str) {
+        pick_index(list, region_mode, 100.0, 100.0)
+    }
+
+    fn pick_ctr(list: &[Hypothesis]) -> (usize, &'static str) {
+        pick_index_mode(list, false, true, 100.0, 100.0)
+    }
+
+    fn with_ring(mut h: Hypothesis, fg: f32, bg: f32) -> Hypothesis {
+        h.ring_fg = fg;
+        h.ring_bg = bg;
+        h
+    }
+
+    #[test]
+    fn sheet_contrast_area_index_prefers_sheet_over_bigger_desk() {
+        let list = [
+            with_ring(hyp(0.95, 0.02, 0.02), 0.50, 0.50),
+            with_ring(hyp(0.85, 0.04, 0.04), 0.92, 0.30),
+        ];
+        assert_eq!(sheet_contrast_area_index(&list), Some(1));
+    }
+
+    #[test]
+    fn sheet_contrast_area_index_prefers_larger_area_at_equal_contrast() {
+        let list = [
+            with_ring(hyp(0.60, 0.05, 0.05), 0.90, 0.30),
+            with_ring(hyp(0.80, 0.05, 0.05), 0.90, 0.30),
+        ];
+        assert_eq!(sheet_contrast_area_index(&list), Some(1));
+    }
+
+    #[test]
+    fn pick_index_area_contrast_mode_picks_contrasted_sheet() {
+        let list = [
+            with_ring(hyp(0.95, 0.02, 0.02), 0.50, 0.50),
+            with_ring(hyp(0.85, 0.04, 0.04), 0.92, 0.30),
+        ];
+        let (idx, reason) = pick_ctr(&list);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_area_contrast");
+    }
+
+    #[test]
+    fn pick_index_legacy_mode_ignores_contrast_widening() {
+        let list = [
+            with_ring(hyp(0.95, 0.02, 0.02), 0.50, 0.50),
+            with_ring(hyp(0.85, 0.04, 0.04), 0.92, 0.30),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "legacy_score");
+    }
+
+    #[test]
+    fn pick_index_keeps_winner_when_no_fragment_and_no_gate() {
+        let list = [hyp(0.60, 0.20, 0.19), hyp(0.70, 0.19, 0.05)];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "legacy_score");
+    }
+
+    #[test]
+    fn pick_index_prefers_region_pick_above_ratio_gate() {
+        let list = [hyp(0.30, 0.20, 0.05), hyp(0.62, 0.10, 0.19)];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_page_detector");
+    }
+
+    #[test]
+    fn pick_index_ignores_region_pick_below_ratio_gate() {
+        let list = [hyp(0.50, 0.20, 0.05), hyp(0.60, 0.10, 0.19)];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "legacy_score");
+    }
+
+    #[test]
+    fn quad_aspect_is_rotation_invariant() {
+        assert!((quad_aspect(&quad_portrait(0.71)) - 0.71).abs() < 1e-5);
+        let landscape = [(0.0f32, 0.0f32), (1.0, 0.0), (1.0, 0.71), (0.0, 0.71)];
+        assert!((quad_aspect(&landscape) - 0.71).abs() < 1e-5);
+        assert!((quad_aspect(&quad_portrait(1.0)) - 1.0).abs() < 1e-5);
+        let degenerate = [(0.0f32, 0.0f32), (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)];
+        assert_eq!(quad_aspect(&degenerate), 0.0);
+    }
+
+    #[test]
+    fn sheet_band_max_index_picks_largest_within_band() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
+            hyp_q(quad_portrait(0.71), 0.62, 0.10, 0.05),
+            hyp_q(quad_portrait(1.60), 0.90, 0.05, 0.02),
+        ];
+        assert_eq!(sheet_band_max_index(&list, 100.0, 100.0), Some(1));
+        let only_wide = [hyp_q(quad_portrait(1.60), 0.90, 0.05, 0.02)];
+        assert_eq!(sheet_band_max_index(&only_wide, 100.0, 100.0), None);
+    }
+
+    #[test]
+    fn sheet_band_accepts_landscape_sheet() {
+        let list = [
+            hyp_q(quad_portrait(0.50), 0.30, 0.30, 0.10),
+            hyp_q(quad_portrait(1.40), 0.62, 0.10, 0.05),
+        ];
+        assert_eq!(sheet_band_max_index(&list, 100.0, 100.0), Some(1));
+    }
+
+    #[test]
+    fn pick_index_widens_to_sheet_band_above_ratio() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
+            hyp_q(quad_portrait(0.71), 0.60, 0.10, 0.05),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_sheet_band");
+    }
+
+    #[test]
+    fn pick_index_keeps_winner_below_widen_ratio() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
+            hyp_q(quad_portrait(0.71), 0.34, 0.10, 0.05),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "legacy_score");
+    }
+
+    #[test]
+    fn pick_index_keeps_fragment_rule_first() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.20, 0.30, 0.10),
+            hyp_q(quad_portrait(0.71), 0.62, 0.10, 0.05),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_fragment");
+    }
+
+    #[test]
+    fn pick_index_region_mode_ignores_sheet_band() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.20, 0.30, 0.02),
+            hyp_q(quad_portrait(0.71), 0.60, 0.10, 0.0100),
+        ];
+        let (idx, reason) = pick(&list, true);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "region_tiebreak");
+    }
+
+    #[test]
+    fn pick_index_takes_largest_area_for_fragment() {
+        let list = [hyp(0.20, 0.30, 0.05), hyp(0.25, 0.10, 0.06), hyp(0.88, 0.01, 0.02)];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 2);
+        assert_eq!(reason, "legacy_fragment");
+    }
+
+    #[test]
+    fn pick_index_region_mode_uses_area_within_tolerance() {
+        let list = [hyp(0.74, 0.09, 0.0913), hyp(0.75, 0.09, 0.0888), hyp(0.20, 0.09, 0.02)];
+        let (idx, reason) = pick(&list, true);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "region_tiebreak");
+    }
+
+    #[test]
+    fn pick_index_region_mode_ignores_areas_below_tolerance() {
+        let list = [hyp(0.20, 0.09, 0.0300), hyp(0.90, 0.09, 0.0001)];
+        let (idx, reason) = pick(&list, true);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "region_tiebreak");
+    }
+
+    #[test]
+    fn pick_index_is_safe_on_single_hypothesis() {
+        let list = [hyp(0.90, 0.10, 0.10)];
+        assert_eq!(pick(&list, false).0, 0);
+        assert_eq!(pick(&list, true).0, 0);
+    }
+
+    #[test]
+    fn sheet_widen_ok_rejects_frame_sized_quad() {
+        let frame = [(0.0f32, 0.0f32), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
+        assert!(frame_hugging(&frame, 100.0, 100.0));
+        assert!(!sheet_widen_ok(&frame, 0.98, 100.0, 100.0));
+    }
+
+    #[test]
+    fn sheet_widen_ok_rejects_near_full_area_quad() {
+        let slanted = [(0.0f32, 6.0f32), (78.0, 0.0), (100.0, 124.0), (22.0, 130.0)];
+        assert!(!frame_hugging(&slanted, 100.0, 130.0));
+        assert!(!sheet_widen_ok(&slanted, 0.94, 100.0, 130.0));
+        assert!(sheet_widen_ok(&slanted, 0.74, 100.0, 130.0));
+    }
+
+    #[test]
+    fn sheet_widen_ok_rejects_frame_hugging_quad() {
+        let hugging = [(0.0f32, 0.0f32), (75.0, 0.0), (75.0, 100.0), (0.0, 100.0)];
+        let aspect = quad_aspect(&hugging);
+        assert!(aspect > SHEET_BAND_ASPECT_MIN && aspect < SHEET_BAND_ASPECT_MAX);
+        assert!(!frame_hugging(&quad_portrait(0.71), 100.0, 100.0));
+        assert!(frame_hugging(&hugging, 100.0, 100.0));
+        assert!(!sheet_widen_ok(&hugging, 0.75, 100.0, 100.0));
+    }
+
+    #[test]
+    fn sheet_widen_ok_accepts_inset_sheet() {
+        let inset = [(10.0f32, 12.0f32), (72.0, 8.0), (68.0, 96.0), (8.0, 92.0)];
+        assert!(!frame_hugging(&inset, 100.0, 100.0));
+        assert!(sheet_widen_ok(&inset, 0.51, 100.0, 100.0));
+    }
+
+    #[test]
+    fn pick_index_rejects_frame_hugging_band_candidate() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
+            hyp_q(
+                [(0.0f32, 0.0f32), (75.0, 0.0), (75.0, 100.0), (0.0, 100.0)],
+                0.75,
+                0.10,
+                0.05,
+            ),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 0);
+        assert_eq!(reason, "legacy_score");
+    }
+
+    #[test]
+    fn pick_index_accepts_inset_band_candidate() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
+            hyp_q(
+                [(10.0f32, 12.0f32), (72.0, 8.0), (68.0, 96.0), (8.0, 92.0)],
+                0.51,
+                0.10,
+                0.05,
+            ),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_sheet_band");
+    }
+
+    #[test]
+    fn pick_index_fragment_skips_frame_hugging_candidate() {
+        let list = [
+            hyp_q(quad_portrait(0.71), 0.20, 0.30, 0.10),
+            hyp_q(
+                [(8.0f32, 8.0f32), (70.0, 8.0), (70.0, 92.0), (8.0, 92.0)],
+                0.50,
+                0.10,
+                0.05,
+            ),
+            hyp_q(
+                [
+                    (0.0f32, 0.0f32),
+                    (100.0, 0.0),
+                    (100.0, 100.0),
+                    (0.0, 100.0),
+                ],
+                0.98,
+                0.09,
+                0.04,
+            ),
+        ];
+        let (idx, reason) = pick(&list, false);
+        assert_eq!(idx, 1);
+        assert_eq!(reason, "legacy_fragment");
     }
 
     #[test]
