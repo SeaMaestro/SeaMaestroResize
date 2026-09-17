@@ -143,6 +143,19 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--lang <CODE>` | en, ru, uk, de, es, fr, el, fil |
 | `--help` | Show help |
 
+**Auto-crop shooting advice.** `--crop` looks for the edge of the sheet, so it
+works best when the paper lies on a plain, contrasting surface. Two cases are
+outside what the detector can promise:
+
+- the sheet fills the whole frame (no background left to detect), and
+- paper and background share the same tone (white sheet on white cloth) — there
+  is no edge to find in brightness, so the crop keeps the full frame or trims
+  inside the sheet.
+
+Sheet orientation is never forced: the output keeps the way the photo was taken
+(EXIF `Orientation` is applied before cropping, so a page shot sideways stays
+sideways).
+
 ## Examples
 
 ```powershell
