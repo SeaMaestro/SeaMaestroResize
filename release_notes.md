@@ -1,3 +1,52 @@
+## SeaMaestro v2.5.1
+
+## ✨ What's New
+
+**Auto-crop & deskew (`--crop`)** — finds the document in a photo, straightens
+the perspective and cuts the background away. Combines with `--scan`, `--size`
+and `pdf`/`merge`; also available as a rename keyword (`SeaMaestro_crop.exe`).
+
+## 🐛 Bug Fixes
+
+**The whole page, not a fragment** — auto-crop used to lock onto a strong inner
+rectangle (a table, a form, a bright patch inside the sheet) and cut the rest
+of the page away. It now prefers the sheet itself, so footers, margins and
+headings survive.
+
+**No crop when in doubt** — if the winning quad turns out to be a small island
+of paper surrounded by the same paper (a fragment inside the sheet), the frame
+is kept as shot instead of returning a partial crop. A little extra background
+beats a lost corner of a document.
+
+**Degenerate geometry fallback** — if the detected quad is not a proper
+quadrilateral (duplicate vertex, self-intersection) or the perspective warp
+leaves too much residual, the original photo is used instead of a skewed
+result.
+
+**Smart Scan white point** — the adaptive white point was raised
+(0.85 → 0.95), so that background grain no longer survives as grey patches.
+
+## 📷 Better auto-crop results
+
+Shoot documents on a **contrasting background** — a dark desk, a coloured
+folder or a dark sheet under white paper. The detector needs the sheet edge to
+stand out; white paper on a white table can be undetectable, and in that case
+`--crop` deliberately leaves the photo untouched rather than guessing.
+Orientation is kept as shot — no forced rotation.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+SHA-256 and size are filled in after the CI build (`checksums.txt` in the
+release assets).
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
 ## SeaMaestro v2.5.0
 
 ## ✨ What's New
