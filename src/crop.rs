@@ -38,6 +38,9 @@ const SHEET_BAND_ASPECT_MIN: f32 = 0.64;
 const SHEET_BAND_ASPECT_MAX: f32 = 0.80;
 const SHEET_WIDEN_RATIO: f32 = 1.20;
 const SHEET_MAX_AREA_FRAC: f32 = 0.90;
+const FRAGMENT_AREA_MAX: f32 = 0.45;
+const FRAGMENT_BG_MIN: f32 = 0.70;
+const FRAGMENT_FG_MAX: f32 = 0.90;
 const SCORE_MODE_ENV: &str = "SEAMAESTRO_CROP_SCORE";
 const STEP_THR_ENV: &str = "SEAMAESTRO_CROP_STEP_THR";
 const CONTRAST_W_ENV: &str = "SEAMAESTRO_CROP_CONTRAST_W";
@@ -293,6 +296,16 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             pq[3].1 * inv_scale
         );
     }
+    if hull_is_quad(&hyp[pick_idx].quad) && winner_is_fragment(&hyp[pick_idx]) {
+        if crop_debug() {
+            eprintln!(
+                "  [crop] fragment guard idx={} area={:.3} fg={:.2} bg={:.2} -> keep frame",
+                pick_idx, hyp[pick_idx].area_ratio, hyp[pick_idx].ring_fg, hyp[pick_idx].ring_bg
+            );
+        }
+        return None;
+    }
+
     let pick = hyp[pick_idx].quad;
     let pick = if edge_refine_enabled() {
         match refine_pick_by_ray_edge(&soft, dwi, dhi, &pick) {
@@ -388,6 +401,14 @@ fn quad_aspect(q: &[(f32, f32); 4]) -> f32 {
 
 fn sheet_widen_ok(q: &[(f32, f32); 4], area_ratio: f32, w: f32, h: f32) -> bool {
     area_ratio < SHEET_MAX_AREA_FRAC && !frame_hugging(q, w, h)
+}
+
+fn winner_is_fragment(c: &Hypothesis) -> bool {
+    let ring_measured = c.ring_fg > 0.0 || c.ring_bg > 0.0;
+    ring_measured
+        && c.area_ratio < FRAGMENT_AREA_MAX
+        && (c.ring_fg <= c.ring_bg
+            || (c.ring_bg >= FRAGMENT_BG_MIN && c.ring_fg <= FRAGMENT_FG_MAX))
 }
 
 fn sheet_largest_ok_index(hyp: &[Hypothesis], w: f32, h: f32) -> Option<usize> {
@@ -2651,6 +2672,36 @@ mod tests {
     }
 
     #[test]
+    fn winner_is_fragment_flags_table_inside_sheet() {
+        let c = with_ring(hyp(0.320, 0.1724, 0.1724), 0.60, 0.96);
+        assert!(winner_is_fragment(&c));
+    }
+
+    #[test]
+    fn winner_is_fragment_flags_tight_margin_fragment() {
+        let c = with_ring(hyp(0.283, 0.1050, 0.1050), 0.80, 0.79);
+        assert!(winner_is_fragment(&c));
+    }
+
+    #[test]
+    fn winner_is_fragment_keeps_full_frame_sheet() {
+        let c = with_ring(hyp(0.867, 0.2227, 0.2227), 0.77, 0.98);
+        assert!(!winner_is_fragment(&c));
+    }
+
+    #[test]
+    fn winner_is_fragment_keeps_small_sheet_on_dark_desk() {
+        let c = with_ring(hyp(0.422, 0.1139, 0.1139), 1.00, 0.48);
+        assert!(!winner_is_fragment(&c));
+    }
+
+    #[test]
+    fn winner_is_fragment_ignores_unmeasured_ring() {
+        let c = hyp(0.134, 0.0436, 0.0436);
+        assert!(!winner_is_fragment(&c));
+    }
+
+    #[test]
     fn pick_index_rejects_frame_hugging_band_candidate() {
         let list = [
             hyp_q(quad_portrait(0.71), 0.30, 0.30, 0.10),
@@ -2783,6 +2834,38 @@ mod tests {
     fn hull_is_quad_rejects_collinear_points() {
         let c = [(0.0f32, 0.0f32), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)];
         assert!(!hull_is_quad(&c));
+    }
+
+    #[test]
+    fn hull_is_quad_rejects_duplicate_vertex() {
+        let c = [
+            (1356.0f32, 68.0f32),
+            (1356.0, 68.0),
+            (1972.0, 1312.0),
+            (108.0, 1440.0),
+        ];
+        assert!(!hull_is_quad(&c));
+    }
+
+    #[test]
+    fn fragment_guard_skips_degenerate_pick() {
+        let c = with_ring(
+            hyp_q(
+                [
+                    (1356.0f32, 68.0f32),
+                    (1356.0, 68.0),
+                    (1972.0, 1312.0),
+                    (108.0, 1440.0),
+                ],
+                0.381,
+                0.1724,
+                0.1724,
+            ),
+            0.97,
+            0.99,
+        );
+        assert!(winner_is_fragment(&c));
+        assert!(!hull_is_quad(&c.quad));
     }
 
     #[test]
