@@ -59,6 +59,10 @@ const PICK_MODE_ENV: &str = "SEAMAESTRO_CROP_PICK";
 const SHEET_CONTRAST_W: f32 = 0.5;
 const WARP_RES_TOL_PX: f32 = 1.0;
 const EDGE_REFINE_ENV: &str = "SEAMAESTRO_CROP_EDGE";
+const EDGE_REFINE_RES_ENV: &str = "SEAMAESTRO_CROP_EDGE_RES";
+const EDGE_REFINE_JUMP_ENV: &str = "SEAMAESTRO_CROP_EDGE_JUMP";
+const EDGE_REFINE_SEED_ACCEPT_ENV: &str = "SEAMAESTRO_CROP_EDGE_SEED";
+const REGION_EDGE_SEED_ACCEPT: f32 = 1.05;
 const EDGE_REFINE_RAYS: usize = 72;
 const EDGE_REFINE_STEP: f32 = 2.0;
 const EDGE_REFINE_WIN: usize = 6;
@@ -182,6 +186,13 @@ fn env_u8(key: &str, default: u8) -> u8 {
 fn env_f32(key: &str, default: f32) -> f32 {
     match std::env::var(key) {
         Ok(v) => v.trim().parse::<f32>().unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+fn env_u32(key: &str, default: u32) -> u32 {
+    match std::env::var(key) {
+        Ok(v) => v.trim().parse::<u32>().unwrap_or(default),
         Err(_) => default,
     }
 }
@@ -409,25 +420,80 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     }
 
     let pick = hyp[pick_idx].quad;
-    let pick = if edge_refine_enabled() {
-        match refine_pick_by_ray_edge(&soft, dwi, dhi, &pick) {
+    let (legacy_idx, legacy_reason) =
+        pick_index_mode(&hyp, false, pick_mode_area_contrast(), dwi as f32, dhi as f32);
+    let refine_on = edge_refine_enabled() || vctx.enabled;
+    let (seed, seed_src) = if vctx.enabled {
+        (hyp[legacy_idx].quad, "legacy")
+    } else {
+        (pick, "pick")
+    };
+    let pick = if refine_on {
+        let eres = env_u32(EDGE_REFINE_RES_ENV, 0);
+        let (edge_img, ew, eh, ekx, eky) = if eres > DETECT_LONG_EDGE {
+            let s = (eres as f32 / long as f32).min(1.0);
+            let ew = ((w as f32 * s).round() as u32).max(2);
+            let eh = ((h as f32 * s).round() as u32).max(2);
+            let g = img
+                .resize_exact(ew, eh, image::imageops::FilterType::Triangle)
+                .to_luma8();
+            (Some(g), ew as usize, eh as usize, ew as f32 / dwi as f32, eh as f32 / dhi as f32)
+        } else {
+            (None, dwi, dhi, 1.0, 1.0)
+        };
+        let edge_luma: &[u8] = match edge_img.as_ref() {
+            Some(g) => g.as_raw(),
+            None => &soft,
+        };
+        let ek = (ekx + eky) * 0.5;
+        let jump = env_f32(EDGE_REFINE_JUMP_ENV, EDGE_REFINE_JUMP_MIN);
+        let seed_hi: [(f32, f32); 4] = std::array::from_fn(|i| (seed[i].0 * ekx, seed[i].1 * eky));
+        let (refined, st) = refine_pick_by_ray_edge_scaled(edge_luma, ew, eh, &seed_hi, ek, jump);
+        if crop_debug() {
+            eprintln!(
+                "  [crop] edge refine seed={} reason={} res={} k={:.2} step={:.2} win={} jump={:.1} gate={} rays=[{} {} {} {} {} {} {}]",
+                seed_src,
+                legacy_reason,
+                eres,
+                ek,
+                st.step,
+                st.win,
+                st.jump_thr,
+                st.gate,
+                st.rays[0],
+                st.rays[1],
+                st.rays[2],
+                st.rays[3],
+                st.rays[4],
+                st.rays[5],
+                st.rays[6]
+            );
+        }
+        match refined {
             Some(rq) => {
+                let rq: [(f32, f32); 4] =
+                    std::array::from_fn(|i| (rq[i].0 / ekx, rq[i].1 / eky));
+                let accept = env_f32(EDGE_REFINE_SEED_ACCEPT_ENV, REGION_EDGE_SEED_ACCEPT);
+                let keep_region = vctx.enabled && polygon_area(&rq) > accept * polygon_area(&pick);
+                let chosen = if keep_region { pick } else { rq };
                 if crop_debug() {
                     eprintln!(
-                        "  [crop] edge refine proxy area={:.3}->{:.3} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
-                        hyp[pick_idx].area_ratio,
-                        polygon_area(&rq) / (dwi * dhi) as f32,
-                        rq[0].0,
-                        rq[0].1,
-                        rq[1].0,
-                        rq[1].1,
-                        rq[2].0,
-                        rq[2].1,
-                        rq[3].0,
-                        rq[3].1
+                        "  [crop] edge refine area={:.3}->{:.3} region={:.3} {} quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
+                        polygon_area(&seed) / (dwi * dhi) as f32,
+                        polygon_area(&chosen) / (dwi * dhi) as f32,
+                        hyp[region_idx].area_ratio,
+                        if keep_region { "rejected(region tighter)" } else { "accepted" },
+                        chosen[0].0,
+                        chosen[0].1,
+                        chosen[1].0,
+                        chosen[1].1,
+                        chosen[2].0,
+                        chosen[2].1,
+                        chosen[3].0,
+                        chosen[3].1
                     );
                 }
-                rq
+                chosen
             }
             None => {
                 if crop_debug() {
@@ -753,18 +819,48 @@ fn nearest_edge_index(q: &[(f32, f32); 4], p: (f32, f32)) -> Option<(usize, f32)
 }
 
 
+struct EdgeRefineStats {
+    rays: [usize; 7],
+    gate: &'static str,
+    step: f32,
+    win: usize,
+    jump_thr: f32,
+}
+
+#[cfg(test)]
 fn refine_pick_by_ray_edge(
     luma: &[u8],
     w: usize,
     h: usize,
     pick: &[(f32, f32); 4],
 ) -> Option<[(f32, f32); 4]> {
+    refine_pick_by_ray_edge_scaled(luma, w, h, pick, 1.0, EDGE_REFINE_JUMP_MIN).0
+}
+
+fn refine_pick_by_ray_edge_scaled(
+    luma: &[u8],
+    w: usize,
+    h: usize,
+    pick: &[(f32, f32); 4],
+    k: f32,
+    jump_min: f32,
+) -> (Option<[(f32, f32); 4]>, EdgeRefineStats) {
+    let k = k.max(0.25);
+    let step = (EDGE_REFINE_STEP * k).max(0.5);
+    let win = ((EDGE_REFINE_WIN as f32) * k).round().max(2.0) as usize;
+    let mut st = EdgeRefineStats {
+        rays: [0usize; 7],
+        gate: "",
+        step,
+        win,
+        jump_thr: jump_min,
+    };
     if w < 16 || h < 16 || luma.len() < w * h {
-        return None;
+        return (None, st);
     }
     let pick_area = polygon_area(pick);
     if !(pick_area > 1.0) {
-        return None;
+        return (None, st);
     }
     let (cx, cy) = quad_center(pick);
     let sgn = quad_orientation(pick);
@@ -783,7 +879,7 @@ fn refine_pick_by_ray_edge(
     bx1 = bx1.min((w - 1) as f32);
     by1 = by1.min((h - 1) as f32);
     if bx1 <= bx0 || by1 <= by0 {
-        return None;
+        return (None, st);
     }
     let grid = EDGE_REFINE_GRID as f32;
     let mut paper: Vec<f32> = Vec::with_capacity(EDGE_REFINE_GRID * EDGE_REFINE_GRID);
@@ -800,12 +896,13 @@ fn refine_pick_by_ray_edge(
         }
     }
     if paper.len() < 16 {
-        return None;
+        return (None, st);
     }
     let internal = median_in_place(&mut paper);
     let mut dev: Vec<f32> = paper.iter().map(|v| (v - internal).abs()).collect();
     let mad = median_in_place(&mut dev);
-    let jump_thr = EDGE_REFINE_JUMP_MIN.max(EDGE_REFINE_JUMP_MAD_K * mad);
+    let jump_thr = jump_min.max(EDGE_REFINE_JUMP_MAD_K * mad);
+    st.jump_thr = jump_thr;
     let tail_lim = (2.0 * mad).max(4.0);
 
     let diag_pick = dist(pick[0], pick[2])
@@ -815,28 +912,30 @@ fn refine_pick_by_ray_edge(
 
     let mut side_pts: [Vec<(f32, f32)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     let mut side_ratio: [Vec<f32>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
-    let win = EDGE_REFINE_WIN;
     let winf = win as f32;
     for k in 0..EDGE_REFINE_RAYS {
         let th = std::f32::consts::TAU * (k as f32 + 0.5) / EDGE_REFINE_RAYS as f32;
         let (dx, dy) = (th.cos(), th.sin());
         let rp = ray_quad_exit(pick, cx, cy, dx, dy);
         if !(rp > 0.0) {
+            st.rays[0] += 1;
             continue;
         }
         let re = ray_frame_exit(cx, cy, dx, dy, w, h);
         if !re.is_finite() {
+            st.rays[1] += 1;
             continue;
         }
-        let steps = (re / EDGE_REFINE_STEP).floor() as i32;
+        let steps = (re / step).floor() as i32;
         if steps < (4 * win) as i32 {
+            st.rays[2] += 1;
             continue;
         }
         let n = steps as usize;
         let mut prof = vec![0f32; n + 1];
         for (i, v) in prof.iter_mut().enumerate() {
-            let px = cx + i as f32 * EDGE_REFINE_STEP * dx;
-            let py = cy + i as f32 * EDGE_REFINE_STEP * dy;
+            let px = cx + i as f32 * step * dx;
+            let py = cy + i as f32 * step * dy;
             let xi = (px.round() as i32).clamp(0, w as i32 - 1) as usize;
             let yi = (py.round() as i32).clamp(0, h as i32 - 1) as usize;
             *v = luma[yi * w + xi] as f32;
@@ -847,7 +946,7 @@ fn refine_pick_by_ray_edge(
         let mut best_c = 0.0f32;
         let mut best_d = f32::MAX;
         let mut best_in = 0.0f32;
-        let reach = ((rp * EDGE_REFINE_MAX_REACH) / EDGE_REFINE_STEP).floor() as i32;
+        let reach = ((rp * EDGE_REFINE_MAX_REACH) / step).floor() as i32;
         let hi = (n as i32 - win as i32).min(reach);
         for t in win as i32..=hi {
             let in_avg = in_sum / winf;
@@ -869,6 +968,7 @@ fn refine_pick_by_ray_edge(
             }
         }
         if best_t < 0 {
+            st.rays[3] += 1;
             continue;
         }
         let mut same = 0usize;
@@ -885,55 +985,77 @@ fn refine_pick_by_ray_edge(
             1.0
         };
         if tf > EDGE_REFINE_TAIL_MAX {
+            st.rays[4] += 1;
             continue;
         }
-        let rs = best_t as f32 * EDGE_REFINE_STEP;
+        let rs = best_t as f32 * step;
         let rt = rs / rp;
         if !(EDGE_REFINE_RAY_RATIO_LO..=EDGE_REFINE_RAY_RATIO_HI).contains(&rt) {
+            st.rays[5] += 1;
             continue;
         }
         let hit = (cx + rs * dx, cy + rs * dy);
-        if let Some((j, d)) = nearest_edge_index(pick, hit) {
-            if d <= edge_tol {
+        match nearest_edge_index(pick, hit) {
+            Some((j, d)) if d <= edge_tol => {
                 side_pts[j].push(hit);
                 side_ratio[j].push(rt);
             }
+            _ => st.rays[6] += 1,
         }
     }
 
     let mut lines = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 4];
     for j in 0..4 {
         if side_pts[j].len() < EDGE_REFINE_PTS_MIN {
-            return None;
+            st.gate = "side_pts";
+            return (None, st);
         }
         let m = median_in_place(&mut side_ratio[j]);
         if !(EDGE_REFINE_SIDE_RATIO_LO..=EDGE_REFINE_SIDE_RATIO_HI).contains(&m) {
-            return None;
+            st.gate = "side_ratio";
+            return (None, st);
         }
-        lines[j] = fit_principal_line(&side_pts[j])?;
+        match fit_principal_line(&side_pts[j]) {
+            Some(l) => lines[j] = l,
+            None => {
+                st.gate = "fit";
+                return (None, st);
+            }
+        }
     }
 
     let mut quad = [(0.0f32, 0.0f32); 4];
     for j in 0..4 {
-        let (x, y) = line_cross(lines[(j + 3) & 3], lines[j])?;
+        let (x, y) = match line_cross(lines[(j + 3) & 3], lines[j]) {
+            Some(p) => p,
+            None => {
+                st.gate = "cross";
+                return (None, st);
+            }
+        };
         if !x.is_finite() || !y.is_finite() {
-            return None;
+            st.gate = "cross_finite";
+            return (None, st);
         }
         quad[j] = (x, y);
     }
     if !hull_is_quad(&quad) {
-        return None;
+        st.gate = "hull";
+        return (None, st);
     }
     if validate_reason(&quad, w as f32, h as f32).is_some() {
-        return None;
+        st.gate = "validate";
+        return (None, st);
     }
     let ratio = polygon_area(&quad) / pick_area;
     if !(EDGE_REFINE_AREA_LO..=EDGE_REFINE_AREA_HI).contains(&ratio) {
-        return None;
+        st.gate = "area";
+        return (None, st);
     }
     let diag = dist(quad[0], quad[2]).max(dist(quad[1], quad[3]));
     if min_pair_dist(&quad) < EDGE_REFINE_DMIN_FRAC * diag {
-        return None;
+        st.gate = "dmin";
+        return (None, st);
     }
     let quad = order_corners(&quad);
     let mut worst = 0.0f32;
@@ -944,9 +1066,11 @@ fn refine_pick_by_ray_edge(
         }
     }
     if worst > EDGE_REFINE_MATCH_FRAC * diag_pick {
-        return None;
+        st.gate = "match";
+        return (None, st);
     }
-    Some(quad)
+    st.gate = "ok";
+    (Some(quad), st)
 }
 
 
@@ -3533,6 +3657,59 @@ mod tests {
             (20.0, 176.0),
         ];
         assert!(refine_pick_by_ray_edge(&img, w, h, &pick).is_none());
+    }
+
+    #[test]
+    fn edge_refine_scaled_keeps_geometry_at_double_resolution() {
+        let (w, h) = (160usize, 200usize);
+        let img = synth_paper(w, h, (16, 20, 144, 180), 200, 40);
+        let pick = [
+            (8.0f32, 12.0f32),
+            (152.0, 12.0),
+            (152.0, 188.0),
+            (8.0, 188.0),
+        ];
+        let base = refine_pick_by_ray_edge(&img, w, h, &pick).expect("proxy propose");
+        let (w2, h2) = (w * 2, h * 2);
+        let img2 = synth_paper(w2, h2, (32, 40, 288, 360), 200, 40);
+        let pick2 = pick.map(|(x, y)| (x * 2.0, y * 2.0));
+        let (scaled, st) =
+            refine_pick_by_ray_edge_scaled(&img2, w2, h2, &pick2, 2.0, EDGE_REFINE_JUMP_MIN);
+        let scaled = scaled.expect("double resolution propose");
+        assert_eq!(st.gate, "ok");
+        assert!((st.step - 2.0 * EDGE_REFINE_STEP).abs() < 1e-3, "step={}", st.step);
+        assert_eq!(st.win, 2 * EDGE_REFINE_WIN);
+        for i in 0..4 {
+            assert!(
+                (scaled[i].0 - base[i].0 * 2.0).abs() <= 5.0,
+                "corner {i} x={} expected {}",
+                scaled[i].0,
+                base[i].0 * 2.0
+            );
+            assert!(
+                (scaled[i].1 - base[i].1 * 2.0).abs() <= 5.0,
+                "corner {i} y={} expected {}",
+                scaled[i].1,
+                base[i].1 * 2.0
+            );
+        }
+    }
+
+    #[test]
+    fn edge_refine_scaled_reports_ray_gate() {
+        let (w, h) = (160usize, 200usize);
+        let img = vec![205u8; w * h];
+        let pick = [
+            (20.0f32, 24.0f32),
+            (140.0, 24.0),
+            (140.0, 176.0),
+            (20.0, 176.0),
+        ];
+        let (res, st) =
+            refine_pick_by_ray_edge_scaled(&img, w, h, &pick, 1.0, EDGE_REFINE_JUMP_MIN);
+        assert!(res.is_none());
+        assert_eq!(st.gate, "side_pts");
+        assert!(st.rays[3] >= EDGE_REFINE_RAYS - 4, "rays={:?}", st.rays);
     }
 
     #[test]
