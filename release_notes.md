@@ -39,8 +39,9 @@ Orientation is kept as shot — no forced rotation.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-SHA-256 and size are filled in after the CI build (`checksums.txt` in the
-release assets).
+VirusTotal — clean: 0/70 security vendors flagged the file.
+SHA-256: 73a62c7a437d6fe0a087396332512cbafe61d4a1319395a8a438e6ca206716b5
+Size: 33.38 MB (PE executable, 64-bit)
 
 License
 MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
