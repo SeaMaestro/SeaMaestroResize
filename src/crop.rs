@@ -215,10 +215,9 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     let n = dwi * dhi;
     let luma = small.as_raw();
 
-    let sharp = luma.to_vec();
     let soft = box_blur_gray(luma, dwi, dhi, 1);
 
-    let mag_sharp = sobel_l1(&sharp, dwi, dhi);
+    let mag_sharp = sobel_l1(luma, dwi, dhi);
     let mag_soft = sobel_l1(&soft, dwi, dhi);
     let strong = strong_threshold(&mag_sharp);
 
@@ -502,6 +501,9 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 let rq: [(f32, f32); 4] =
                     std::array::from_fn(|i| (rq[i].0 / ekx, rq[i].1 / eky));
                 let accept = env_f32(EDGE_REFINE_SEED_ACCEPT_ENV, REGION_EDGE_SEED_ACCEPT);
+                // Region mode: the refine step is a shrinker, not an extender. A refined quad wider than
+                // the region pick means the rays latched onto the desk/background instead of the sheet
+                // edge (see `REGION_EDGE_SEED_ACCEPT`), so the region pick stays.
                 let keep_region = vctx.enabled && polygon_area(&rq) > accept * polygon_area(&pick);
                 let chosen = if keep_region { pick } else { rq };
                 if crop_debug() {
@@ -1024,7 +1026,7 @@ fn refine_pick_by_ray_edge_scaled(
             let out_avg = out_sum / winf;
             let c = (in_avg - out_avg).abs();
             if c >= jump_thr {
-                let dd = (t as f32 * EDGE_REFINE_STEP - rp).abs();
+                let dd = (t as f32 * step - rp).abs();
                 if c > best_c + 1e-4 || (c >= best_c - 1e-4 && dd < best_d) {
                     best_c = c;
                     best_d = dd;
@@ -3787,6 +3789,24 @@ mod tests {
         v
     }
 
+    fn synth_rings(w: usize, h: usize, rings: &[(usize, u8)], outside: u8) -> Vec<u8> {
+        let cx = (w / 2) as i64;
+        let cy = (h / 2) as i64;
+        let mut v = vec![outside; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let d = (x as i64 - cx).abs().max((y as i64 - cy).abs()) as usize;
+                for &(lim, val) in rings.iter().rev() {
+                    if d < lim {
+                        v[y * w + x] = val;
+                        break;
+                    }
+                }
+            }
+        }
+        v
+    }
+
     fn refine_pick_by_ray_edge(
         luma: &[u8],
         w: usize,
@@ -3908,6 +3928,57 @@ mod tests {
         assert!(res.is_none());
         assert_eq!(st.gate, "side_pts");
         assert!(st.rays[3] >= EDGE_REFINE_RAYS - 4, "rays={:?}", st.rays);
+    }
+
+    #[test]
+    fn edge_refine_scaled_tie_break_prefers_the_nearest_jump() {
+        let (w, h) = (1520usize, 1520usize);
+        let img = synth_rings(w, h, &[(642, 200), (669, 40), (696, 200)], 40);
+        let pick = [
+            (120.0f32, 120.0f32),
+            (1400.0, 120.0),
+            (1400.0, 1400.0),
+            (120.0, 1400.0),
+        ];
+        let (base, bst) = refine_pick_by_ray_edge_scaled(
+            &img,
+            w,
+            h,
+            &pick,
+            1.0,
+            &EdgeRefineCfg::default(),
+        );
+        let base = base.expect("proxy tie-break propose");
+        assert_eq!(bst.gate, "ok");
+        let (scaled, sst) = refine_pick_by_ray_edge_scaled(
+            &img,
+            w,
+            h,
+            &pick,
+            1.5,
+            &EdgeRefineCfg::default(),
+        );
+        let scaled = scaled.expect("scaled tie-break propose");
+        assert_eq!(sst.gate, "ok");
+        for i in 0..4 {
+            assert!(
+                (scaled[i].0 - base[i].0).abs() <= 3.0,
+                "corner {i} x={} base={}",
+                scaled[i].0,
+                base[i].0
+            );
+            assert!(
+                (scaled[i].1 - base[i].1).abs() <= 3.0,
+                "corner {i} y={} base={}",
+                scaled[i].1,
+                base[i].1
+            );
+        }
+        assert!(
+            (base[0].0 - 118.0).abs() <= 3.0,
+            "sheet edge x={}",
+            base[0].0
+        );
     }
 
     #[test]
