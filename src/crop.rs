@@ -349,6 +349,20 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             "  [crop] pick edge ink_on={:.2} ink_out={:.2} thr={}",
             ink_on, ink_out, vctx.otsu
         );
+        let (po_all, po_side, po_med, po_tail) =
+            edge_paper_out_stats(&hyp[pick_idx].quad, vctx.luma, dwi, dhi);
+        eprintln!(
+            "  [crop] pick paper_out={:.2} sides=[{:.2} {:.2} {:.2} {:.2}] med={:.0} tail={:.0}",
+            po_all, po_side[0], po_side[1], po_side[2], po_side[3], po_med, po_tail
+        );
+        if region_idx != pick_idx {
+            let (ro_all, ro_side, ro_med, ro_tail) =
+                edge_paper_out_stats(&hyp[region_idx].quad, vctx.luma, dwi, dhi);
+            eprintln!(
+                "  [crop] region paper_out={:.2} sides=[{:.2} {:.2} {:.2} {:.2}] med={:.0} tail={:.0}",
+                ro_all, ro_side[0], ro_side[1], ro_side[2], ro_side[3], ro_med, ro_tail
+            );
+        }
     }
     if crop_debug() {
         let ink = ink_mask(vctx.luma, dwi, dhi, vctx.otsu);
@@ -1607,6 +1621,106 @@ fn edge_ink_stats(q: &[(f32, f32); 4], luma: &[u8], w: usize, h: usize, thr: u8)
         return (0.0, 0.0);
     }
     (on as f32 / total as f32, out as f32 / total as f32)
+}
+
+fn edge_paper_out_stats(
+    q: &[(f32, f32); 4],
+    luma: &[u8],
+    w: usize,
+    h: usize,
+) -> (f32, [f32; 4], f32, f32) {
+    const GRID: usize = 12;
+    const SAMPLES: usize = 24;
+    if w < 2 || h < 2 || luma.len() < w * h {
+        return (0.0, [0.0; 4], 0.0, 0.0);
+    }
+    let mut bx0 = f32::MAX;
+    let mut bx1 = f32::MIN;
+    let mut by0 = f32::MAX;
+    let mut by1 = f32::MIN;
+    for p in q.iter() {
+        bx0 = bx0.min(p.0);
+        bx1 = bx1.max(p.0);
+        by0 = by0.min(p.1);
+        by1 = by1.max(p.1);
+    }
+    bx0 = bx0.max(0.0);
+    by0 = by0.max(0.0);
+    bx1 = bx1.min((w - 1) as f32);
+    by1 = by1.min((h - 1) as f32);
+    if bx1 <= bx0 || by1 <= by0 {
+        return (0.0, [0.0; 4], 0.0, 0.0);
+    }
+    let sgn = quad_orientation(q);
+    let mut inside: Vec<f32> = Vec::with_capacity(GRID * GRID);
+    for iy in 0..GRID {
+        let yy = by0 + (by1 - by0) * (iy as f32 + 0.5) / GRID as f32;
+        for ix in 0..GRID {
+            let xx = bx0 + (bx1 - bx0) * (ix as f32 + 0.5) / GRID as f32;
+            if !quad_contains(q, sgn, xx, yy) {
+                continue;
+            }
+            if let Some(v) = sample_luma(luma, w, h, xx, yy) {
+                inside.push(v as f32);
+            }
+        }
+    }
+    if inside.len() < 16 {
+        return (0.0, [0.0; 4], 0.0, 0.0);
+    }
+    let internal = median_in_place(&mut inside);
+    let mut dev: Vec<f32> = inside.iter().map(|v| (v - internal).abs()).collect();
+    let mad = median_in_place(&mut dev);
+    let tail = (2.0 * mad).max(4.0);
+    let mut hit = [0usize; 4];
+    let mut tot = [0usize; 4];
+    for e in 0..4 {
+        let a = q[e];
+        let b = q[(e + 1) & 3];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 8.0 {
+            continue;
+        }
+        let (nx, ny) = (dy / len, -dx / len);
+        for s in 0..SAMPLES {
+            let t = (s as f32 + 0.5) / SAMPLES as f32;
+            let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+            let mut sum = 0.0f32;
+            let mut n = 0usize;
+            let mut d = 2.0f32;
+            while d <= 6.0 {
+                if let Some(v) = sample_luma(luma, w, h, px + nx * d, py + ny * d) {
+                    sum += v as f32;
+                    n += 1;
+                }
+                d += 2.0;
+            }
+            if n == 0 {
+                continue;
+            }
+            tot[e] += 1;
+            if (sum / n as f32 - internal).abs() <= tail {
+                hit[e] += 1;
+            }
+        }
+    }
+    let mut frac = [0.0f32; 4];
+    let mut all_hit = 0usize;
+    let mut all_tot = 0usize;
+    for e in 0..4 {
+        if tot[e] > 0 {
+            frac[e] = hit[e] as f32 / tot[e] as f32;
+            all_hit += hit[e];
+            all_tot += tot[e];
+        }
+    }
+    let all = if all_tot > 0 {
+        all_hit as f32 / all_tot as f32
+    } else {
+        0.0
+    };
+    (all, frac, internal, tail)
 }
 
 /// Debug probe for the region content guard: ink = a pixel darker than `thr` that also has a much
@@ -3794,6 +3908,45 @@ mod tests {
         assert!(res.is_none());
         assert_eq!(st.gate, "side_pts");
         assert!(st.rays[3] >= EDGE_REFINE_RAYS - 4, "rays={:?}", st.rays);
+    }
+
+    #[test]
+    fn edge_paper_out_detects_edge_cutting_into_sheet() {
+        let (w, h) = (240usize, 240usize);
+        let img = synth_paper(w, h, (40, 40, 200, 200), 210, 30);
+
+        let inside = [
+            (60.0f32, 60.0f32),
+            (180.0, 60.0),
+            (180.0, 180.0),
+            (60.0, 180.0),
+        ];
+        let (all, frac, med, tail) = edge_paper_out_stats(&inside, &img, w, h);
+        assert!(all > 0.9, "all={all}");
+        assert_eq!(frac.iter().filter(|f| **f > 0.9).count(), 4, "frac={frac:?}");
+        assert!((med - 210.0).abs() < 1.0, "med={med}");
+        assert!((tail - 4.0).abs() < 1.0, "tail={tail}");
+
+        let on_edge = [
+            (40.0f32, 40.0f32),
+            (200.0, 40.0),
+            (200.0, 200.0),
+            (40.0, 200.0),
+        ];
+        let (all, frac, _, _) = edge_paper_out_stats(&on_edge, &img, w, h);
+        assert!(all < 0.1, "all={all}");
+        assert_eq!(frac.iter().filter(|f| **f > 0.1).count(), 0, "frac={frac:?}");
+
+        let cut = [
+            (40.0f32, 40.0f32),
+            (120.0, 40.0),
+            (120.0, 200.0),
+            (40.0, 200.0),
+        ];
+        let (all, frac, _, _) = edge_paper_out_stats(&cut, &img, w, h);
+        assert!(frac[1] > 0.9, "right={}", frac[1]);
+        assert!(frac[3] < 0.1, "left={}", frac[3]);
+        assert!(all > 0.2 && all < 0.3, "all={all}");
     }
 
     #[test]
