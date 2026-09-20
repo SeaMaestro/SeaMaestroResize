@@ -308,6 +308,35 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             pq[3].1 * inv_scale
         );
     }
+    if crop_debug() {
+        let (ink_on, ink_out) = edge_ink_stats(&hyp[pick_idx].quad, vctx.luma, dwi, dhi, vctx.otsu);
+        eprintln!(
+            "  [crop] pick edge ink_on={:.2} ink_out={:.2} thr={}",
+            ink_on, ink_out, vctx.otsu
+        );
+    }
+    if crop_debug() {
+        let ink = ink_mask(vctx.luma, dwi, dhi, vctx.otsu);
+        let ink_px = ink.iter().filter(|&&v| v != 0).count();
+        let (legacy_idx, legacy_reason) = pick_index_mode(
+            &hyp,
+            false,
+            pick_mode_area_contrast(),
+            dwi as f32,
+            dhi as f32,
+        );
+        let region_idx = region_pick_index(&hyp);
+        let share_region = ink_share(&hyp[region_idx].quad, &ink, dwi, dhi, ink_px);
+        let share_legacy = ink_share(&hyp[legacy_idx].quad, &ink, dwi, dhi, ink_px);
+        eprintln!(
+            "  [crop] pick ink region={:.3} legacy={:.3} legacy_reason={} lost={:.3} ink_px={}",
+            share_region,
+            share_legacy,
+            legacy_reason,
+            1.0 - share_region / share_legacy.max(1e-6),
+            ink_px
+        );
+    }
     // A degenerate winner (duplicate vertex / zero-cross) can slip through `validate_reason`, so the
     // guard only fires on a proper convex quad; otherwise `warp` must report `reason=hull` itself.
     if hull_is_quad(&hyp[pick_idx].quad) && winner_is_fragment(&hyp[pick_idx]) {
@@ -1288,6 +1317,100 @@ fn push_quad(
         ring_fg,
         ring_bg,
     });
+}
+
+/// Debug probe for the region content guard: fraction of edge samples that sit on ink (dark pixels
+/// within +-1 px of the edge) and the fraction that still has ink 2..4 px outside the edge.
+fn edge_ink_stats(q: &[(f32, f32); 4], luma: &[u8], w: usize, h: usize, thr: u8) -> (f32, f32) {
+    let samples = 24usize;
+    let (mut on, mut out, mut total) = (0usize, 0usize, 0usize);
+    for e in 0..4 {
+        let a = q[e];
+        let b = q[(e + 1) & 3];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 8.0 {
+            continue;
+        }
+        let (nx, ny) = (dy / len, -dx / len);
+        for s in 0..samples {
+            let t = (s as f32 + 0.5) / samples as f32;
+            let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+            total += 1;
+            let mut on_ink = false;
+            for k in [-1.0f32, 0.0, 1.0] {
+                if let Some(v) = sample_luma(luma, w, h, px + nx * k, py + ny * k) {
+                    on_ink |= v < thr;
+                }
+            }
+            if on_ink {
+                on += 1;
+            }
+            let mut out_ink = false;
+            for k in [2.0f32, 3.0, 4.0] {
+                if let Some(v) = sample_luma(luma, w, h, px + nx * k, py + ny * k) {
+                    out_ink |= v < thr;
+                }
+            }
+            if out_ink {
+                out += 1;
+            }
+        }
+    }
+    if total == 0 {
+        return (0.0, 0.0);
+    }
+    (on as f32 / total as f32, out as f32 / total as f32)
+}
+
+/// Debug probe for the region content guard: ink = a pixel darker than `thr` that also has a much
+/// brighter pixel within +-`INK_RING` px, so large dark areas (desk, shadows) are not page content.
+fn ink_mask(luma: &[u8], w: usize, h: usize, thr: u8) -> Vec<u8> {
+    const INK_RING: usize = 5;
+    const INK_MARGIN: u8 = 24;
+    if w < 2 || h < 2 || luma.len() < w * h {
+        return Vec::new();
+    }
+    let bright = thr.saturating_add(INK_MARGIN);
+    let mut m = vec![0u8; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            if luma[y * w + x] >= thr {
+                continue;
+            }
+            let x0 = x.saturating_sub(INK_RING);
+            let x1 = (x + INK_RING).min(w - 1);
+            let y0 = y.saturating_sub(INK_RING);
+            let y1 = (y + INK_RING).min(h - 1);
+            let ring_bright = luma[y * w + x0] >= bright
+                || luma[y * w + x1] >= bright
+                || luma[y0 * w + x] >= bright
+                || luma[y1 * w + x] >= bright;
+            m[y * w + x] = u8::from(ring_bright);
+        }
+    }
+    m
+}
+
+/// Debug probe for the region content guard: share of the frame ink that falls inside `q`.
+fn ink_share(q: &[(f32, f32); 4], ink: &[u8], w: usize, h: usize, ink_px: usize) -> f32 {
+    if ink_px == 0 || w == 0 || h == 0 || ink.len() < w * h {
+        return 0.0;
+    }
+    let min_x = q.iter().map(|p| p.0).fold(f32::MAX, f32::min).clamp(0.0, (w - 1) as f32);
+    let max_x = q.iter().map(|p| p.0).fold(f32::MIN, f32::max).clamp(0.0, (w - 1) as f32);
+    let min_y = q.iter().map(|p| p.1).fold(f32::MAX, f32::min).clamp(0.0, (h - 1) as f32);
+    let max_y = q.iter().map(|p| p.1).fold(f32::MIN, f32::max).clamp(0.0, (h - 1) as f32);
+    let sgn = quad_orientation(q);
+    let mut hits = 0usize;
+    for y in min_y as usize..=max_y as usize {
+        for x in min_x as usize..=max_x as usize {
+            if ink[y * w + x] != 0 && quad_contains(q, sgn, x as f32 + 0.5, y as f32 + 0.5) {
+                hits += 1;
+            }
+        }
+    }
+    hits as f32 / ink_px as f32
 }
 
 fn frame_hugging(q: &[(f32, f32); 4], w: f32, h: f32) -> bool {
