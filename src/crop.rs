@@ -237,6 +237,15 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
+    let dbg_paper = if crop_debug() {
+        Some(paper_mask(vctx.luma, dwi, dhi, vctx.otsu))
+    } else {
+        None
+    };
+    let dbg_paper_px = dbg_paper
+        .as_ref()
+        .map(|p| p.iter().filter(|&&v| v != 0).count())
+        .unwrap_or(0);
     if crop_debug() {
         eprintln!(
             "  [crop] proxy {}x{} img={}x{} strong={} hypotheses={}",
@@ -258,6 +267,10 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
         let dbg_hyp_max = env_u8(HYP_DBG_ENV, HYP_DBG_DEFAULT) as usize;
         for (i, c) in hyp.iter().take(dbg_hyp_max).enumerate() {
             let q = c.quad;
+            let paper_cover = match dbg_paper.as_ref() {
+                Some(p) => quad_mask_stats(&q, p, dwi, dhi, dbg_paper_px).0,
+                None => 0.0,
+            };
             let quad = format!(
                 "quad=[{:.1},{:.1};{:.1},{:.1};{:.1},{:.1};{:.1},{:.1}]",
                 q[0].0 * dbg_inv_scale,
@@ -270,7 +283,7 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 q[3].1 * dbg_inv_scale
             );
             eprintln!(
-                "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} {}",
+                "  [crop]   #{} {:<6} area={:.3} edges={} frame={} score={:.4} step={}/4 fg={:.2} bg={:.2} cover={:.2} {}",
                 i,
                 c.source,
                 c.area_ratio,
@@ -280,6 +293,7 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 c.step_ok,
                 c.ring_fg,
                 c.ring_bg,
+                paper_cover,
                 quad
             );
         }
@@ -326,8 +340,8 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             dhi as f32,
         );
         let region_idx = region_pick_index(&hyp);
-        let share_region = ink_share(&hyp[region_idx].quad, &ink, dwi, dhi, ink_px);
-        let share_legacy = ink_share(&hyp[legacy_idx].quad, &ink, dwi, dhi, ink_px);
+        let (share_region, _) = quad_mask_stats(&hyp[region_idx].quad, &ink, dwi, dhi, ink_px);
+        let (share_legacy, _) = quad_mask_stats(&hyp[legacy_idx].quad, &ink, dwi, dhi, ink_px);
         eprintln!(
             "  [crop] pick ink region={:.3} legacy={:.3} legacy_reason={} lost={:.3} ink_px={}",
             share_region,
@@ -336,6 +350,21 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             1.0 - share_region / share_legacy.max(1e-6),
             ink_px
         );
+        if let Some(paper) = dbg_paper.as_ref() {
+            let (cov_r, dens_r) = quad_mask_stats(&hyp[region_idx].quad, paper, dwi, dhi, dbg_paper_px);
+            let (cov_l, dens_l) = quad_mask_stats(&hyp[legacy_idx].quad, paper, dwi, dhi, dbg_paper_px);
+            eprintln!(
+                "  [crop] pick paper px={} frac={:.3} reg_cover={:.2} reg_dens={:.2} reg_out={:.2} leg_cover={:.2} leg_dens={:.2} leg_out={:.2}",
+                dbg_paper_px,
+                dbg_paper_px as f32 / (dwi * dhi) as f32,
+                cov_r,
+                dens_r,
+                edge_mask_out(&hyp[region_idx].quad, paper, dwi, dhi),
+                cov_l,
+                dens_l,
+                edge_mask_out(&hyp[legacy_idx].quad, paper, dwi, dhi)
+            );
+        }
     }
     // A degenerate winner (duplicate vertex / zero-cross) can slip through `validate_reason`, so the
     // guard only fires on a proper convex quad; otherwise `warp` must report `reason=hull` itself.
@@ -1392,25 +1421,92 @@ fn ink_mask(luma: &[u8], w: usize, h: usize, thr: u8) -> Vec<u8> {
     m
 }
 
-/// Debug probe for the region content guard: share of the frame ink that falls inside `q`.
-fn ink_share(q: &[(f32, f32); 4], ink: &[u8], w: usize, h: usize, ink_px: usize) -> f32 {
-    if ink_px == 0 || w == 0 || h == 0 || ink.len() < w * h {
-        return 0.0;
+/// Debug probe for content/paper criteria: share of the frame mask inside `q` and mask density in `q`.
+fn quad_mask_stats(q: &[(f32, f32); 4], mask: &[u8], w: usize, h: usize, total: usize) -> (f32, f32) {
+    if w == 0 || h == 0 || mask.len() < w * h {
+        return (0.0, 0.0);
     }
     let min_x = q.iter().map(|p| p.0).fold(f32::MAX, f32::min).clamp(0.0, (w - 1) as f32);
     let max_x = q.iter().map(|p| p.0).fold(f32::MIN, f32::max).clamp(0.0, (w - 1) as f32);
     let min_y = q.iter().map(|p| p.1).fold(f32::MAX, f32::min).clamp(0.0, (h - 1) as f32);
     let max_y = q.iter().map(|p| p.1).fold(f32::MIN, f32::max).clamp(0.0, (h - 1) as f32);
     let sgn = quad_orientation(q);
-    let mut hits = 0usize;
+    let (mut hits, mut inside) = (0usize, 0usize);
     for y in min_y as usize..=max_y as usize {
         for x in min_x as usize..=max_x as usize {
-            if ink[y * w + x] != 0 && quad_contains(q, sgn, x as f32 + 0.5, y as f32 + 0.5) {
-                hits += 1;
+            if quad_contains(q, sgn, x as f32 + 0.5, y as f32 + 0.5) {
+                inside += 1;
+                if mask[y * w + x] != 0 {
+                    hits += 1;
+                }
             }
         }
     }
-    hits as f32 / ink_px as f32
+    let share = if total == 0 {
+        0.0
+    } else {
+        hits as f32 / total as f32
+    };
+    let dens = if inside == 0 {
+        0.0
+    } else {
+        hits as f32 / inside as f32
+    };
+    (share, dens)
+}
+
+/// Debug probe for the region paper criterion: paper = brighter than `thr`, morphed closed so text
+/// and table lines do not punch holes in the sheet.
+fn paper_mask(soft: &[u8], w: usize, h: usize, thr: u8) -> Vec<u8> {
+    let n = w * h;
+    if w < 2 || h < 2 || soft.len() < n {
+        return Vec::new();
+    }
+    let mut m = vec![0u8; n];
+    for (i, &v) in soft.iter().enumerate() {
+        m[i] = u8::from(v > thr);
+    }
+    let mut tmp = vec![0u8; n];
+    let mut closed = vec![0u8; n];
+    morph_close_into(&m, w, h, &mut tmp, &mut closed);
+    closed
+}
+
+/// Debug probe: fraction of quad edge samples whose 2..6 px outside band is still paper.
+fn edge_mask_out(q: &[(f32, f32); 4], mask: &[u8], w: usize, h: usize) -> f32 {
+    let samples = 24usize;
+    let (mut out, mut total) = (0usize, 0usize);
+    for e in 0..4 {
+        let a = q[e];
+        let b = q[(e + 1) & 3];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 8.0 {
+            continue;
+        }
+        let (nx, ny) = (dy / len, -dx / len);
+        for s in 0..samples {
+            let t = (s as f32 + 0.5) / samples as f32;
+            let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+            total += 1;
+            let (mut hits, mut seen) = (0usize, 0usize);
+            for k in [2.0f32, 3.0, 4.0, 5.0, 6.0] {
+                if let Some(v) = sample_luma(mask, w, h, px + nx * k, py + ny * k) {
+                    seen += 1;
+                    if v != 0 {
+                        hits += 1;
+                    }
+                }
+            }
+            if seen > 0 && hits * 2 >= seen {
+                out += 1;
+            }
+        }
+    }
+    if total == 0 {
+        return 0.0;
+    }
+    out as f32 / total as f32
 }
 
 fn frame_hugging(q: &[(f32, f32); 4], w: f32, h: f32) -> bool {
