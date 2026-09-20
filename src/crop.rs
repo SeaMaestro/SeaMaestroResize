@@ -246,6 +246,11 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
         .as_ref()
         .map(|p| p.iter().filter(|&&v| v != 0).count())
         .unwrap_or(0);
+    let dbg_full = if crop_debug() {
+        Some(img.to_luma8())
+    } else {
+        None
+    };
     if crop_debug() {
         eprintln!(
             "  [crop] proxy {}x{} img={}x{} strong={} hypotheses={}",
@@ -363,6 +368,31 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 cov_l,
                 dens_l,
                 edge_mask_out(&hyp[legacy_idx].quad, paper, dwi, dhi)
+            );
+        }
+        if let Some(full) = dbg_full.as_ref() {
+            let raw = full.as_raw();
+            let fw = full.width() as usize;
+            let fh = full.height() as usize;
+            let (ink_base, ink_ring, step_med) = ring_ink_probe(
+                raw,
+                fw,
+                fh,
+                inv_scale,
+                &hyp[region_idx].quad,
+                &hyp[legacy_idx].quad,
+                vctx.otsu,
+            );
+            eprintln!(
+                "  [crop] pick ring ink_base={} ink_ring={} share={:.3} step={:.1}",
+                ink_base,
+                ink_ring,
+                if ink_base == 0 {
+                    0.0
+                } else {
+                    ink_ring as f32 / ink_base as f32
+                },
+                step_med
             );
         }
     }
@@ -1507,6 +1537,98 @@ fn edge_mask_out(q: &[(f32, f32); 4], mask: &[u8], w: usize, h: usize) -> f32 {
         return 0.0;
     }
     out as f32 / total as f32
+}
+
+/// Debug probe on the FULL-resolution frame: how much thin dark ink of the base quad falls in the
+/// ring between `base` (legacy winner) and `pick` (region winner), plus the median brightness step
+/// across the picked border (a paper edge steps hard, an inner cut has paper on both sides).
+fn ring_ink_probe(
+    full: &[u8],
+    fw: usize,
+    fh: usize,
+    scale_up: f32,
+    pick: &[(f32, f32); 4],
+    base: &[(f32, f32); 4],
+    thr: u8,
+) -> (usize, usize, f32) {
+    if fw < 8 || fh < 8 || full.len() < fw * fh || !(scale_up > 0.0) {
+        return (0, 0, 0.0);
+    }
+    let bright = thr.saturating_add(40);
+    let pickf: [(f32, f32); 4] =
+        std::array::from_fn(|i| (pick[i].0 * scale_up, pick[i].1 * scale_up));
+    let basef: [(f32, f32); 4] =
+        std::array::from_fn(|i| (base[i].0 * scale_up, base[i].1 * scale_up));
+    let grid = (fw.max(fh) / 500).max(2);
+    let ring = (fw.max(fh) / 200).max(4);
+    let bmin_x = basef.iter().map(|p| p.0).fold(f32::MAX, f32::min).clamp(0.0, (fw - 1) as f32) as usize;
+    let bmax_x = basef.iter().map(|p| p.0).fold(f32::MIN, f32::max).clamp(0.0, (fw - 1) as f32) as usize;
+    let bmin_y = basef.iter().map(|p| p.1).fold(f32::MAX, f32::min).clamp(0.0, (fh - 1) as f32) as usize;
+    let bmax_y = basef.iter().map(|p| p.1).fold(f32::MIN, f32::max).clamp(0.0, (fh - 1) as f32) as usize;
+    let bsgn = quad_orientation(&basef);
+    let psgn = quad_orientation(&pickf);
+    let (mut ink_base, mut ink_ring) = (0usize, 0usize);
+    let mut y = bmin_y;
+    while y <= bmax_y {
+        let mut x = bmin_x;
+        while x <= bmax_x {
+            if full[y * fw + x] < thr && quad_contains(&basef, bsgn, x as f32 + 0.5, y as f32 + 0.5) {
+                let xl = x.saturating_sub(ring);
+                let xr = (x + ring).min(fw - 1);
+                let yu = y.saturating_sub(ring);
+                let yd = (y + ring).min(fh - 1);
+                let thin = full[y * fw + xl] >= bright
+                    || full[y * fw + xr] >= bright
+                    || full[yu * fw + x] >= bright
+                    || full[yd * fw + x] >= bright;
+                if thin {
+                    ink_base += 1;
+                    if !quad_contains(&pickf, psgn, x as f32 + 0.5, y as f32 + 0.5) {
+                        ink_ring += 1;
+                    }
+                }
+            }
+            x += grid;
+        }
+        y += grid;
+    }
+    let mut steps: Vec<f32> = Vec::with_capacity(96);
+    for e in 0..4 {
+        let a = pickf[e];
+        let b = pickf[(e + 1) & 3];
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 16.0 {
+            continue;
+        }
+        let (nx, ny) = (dy / len, -dx / len);
+        for s in 0..24 {
+            let t = (s as f32 + 0.5) / 24.0;
+            let (px, py) = (a.0 + dx * t, a.1 + dy * t);
+            let mut ins: Vec<f32> = Vec::with_capacity(9);
+            let mut outs: Vec<f32> = Vec::with_capacity(9);
+            for k in 4..=12 {
+                let kf = k as f32;
+                if let Some(v) = sample_luma(full, fw, fh, px - nx * kf, py - ny * kf) {
+                    ins.push(v as f32);
+                }
+                if let Some(v) = sample_luma(full, fw, fh, px + nx * kf, py + ny * kf) {
+                    outs.push(v as f32);
+                }
+            }
+            if ins.len() >= 4 && outs.len() >= 4 {
+                let mi = median_in_place(&mut ins);
+                let mo = median_in_place(&mut outs);
+                steps.push((mi - mo).abs());
+            }
+        }
+    }
+    let step_med = if steps.is_empty() {
+        0.0
+    } else {
+        median_in_place(&mut steps)
+    };
+    (ink_base, ink_ring, step_med)
 }
 
 fn frame_hugging(q: &[(f32, f32); 4], w: f32, h: f32) -> bool {
