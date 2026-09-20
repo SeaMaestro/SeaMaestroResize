@@ -827,16 +827,6 @@ struct EdgeRefineStats {
     jump_thr: f32,
 }
 
-#[cfg(test)]
-fn refine_pick_by_ray_edge(
-    luma: &[u8],
-    w: usize,
-    h: usize,
-    pick: &[(f32, f32); 4],
-) -> Option<[(f32, f32); 4]> {
-    refine_pick_by_ray_edge_scaled(luma, w, h, pick, 1.0, EDGE_REFINE_JUMP_MIN).0
-}
-
 fn refine_pick_by_ray_edge_scaled(
     luma: &[u8],
     w: usize,
@@ -3610,6 +3600,15 @@ mod tests {
         v
     }
 
+    fn refine_pick_by_ray_edge(
+        luma: &[u8],
+        w: usize,
+        h: usize,
+        pick: &[(f32, f32); 4],
+    ) -> Option<[(f32, f32); 4]> {
+        refine_pick_by_ray_edge_scaled(luma, w, h, pick, 1.0, EDGE_REFINE_JUMP_MIN).0
+    }
+
     #[test]
     fn edge_refine_shrinks_pick_to_paper_edge() {
         let (w, h) = (160usize, 200usize);
@@ -3661,17 +3660,17 @@ mod tests {
 
     #[test]
     fn edge_refine_scaled_keeps_geometry_at_double_resolution() {
-        let (w, h) = (160usize, 200usize);
-        let img = synth_paper(w, h, (16, 20, 144, 180), 200, 40);
+        let (w, h) = (240usize, 340usize);
+        let img = synth_paper(w, h, (28, 38, 212, 302), 200, 40);
         let pick = [
-            (8.0f32, 12.0f32),
-            (152.0, 12.0),
-            (152.0, 188.0),
-            (8.0, 188.0),
+            (14.0f32, 19.0f32),
+            (226.0, 19.0),
+            (226.0, 321.0),
+            (14.0, 321.0),
         ];
         let base = refine_pick_by_ray_edge(&img, w, h, &pick).expect("proxy propose");
         let (w2, h2) = (w * 2, h * 2);
-        let img2 = synth_paper(w2, h2, (32, 40, 288, 360), 200, 40);
+        let img2 = synth_paper(w2, h2, (56, 76, 424, 604), 200, 40);
         let pick2 = pick.map(|(x, y)| (x * 2.0, y * 2.0));
         let (scaled, st) =
             refine_pick_by_ray_edge_scaled(&img2, w2, h2, &pick2, 2.0, EDGE_REFINE_JUMP_MIN);
