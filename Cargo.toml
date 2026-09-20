@@ -9,6 +9,7 @@ panic = "unwind"
 name = "SeaMaestro"
 version = "2.5.1"
 edition = "2021"
+rust-version = "1.82"
 
 [dependencies]
 crc32fast = "1"

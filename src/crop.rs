@@ -1,23 +1,29 @@
 use rayon::prelude::*;
 
+/// Detection proxy long edge in pixels: the input is downscaled to this before analysis.
 const DETECT_LONG_EDGE: u32 = 512;
+/// Accepted quad area band, as a fraction of the proxy frame area.
 const AREA_MIN: f32 = 0.12;
 const AREA_MAX: f32 = 0.95;
 const ASPECT_MIN: f32 = 0.4;
 const ASPECT_MAX: f32 = 2.5;
 const MIN_COMPONENT: usize = 64;
 
-const COMP_MIN_FRAC: usize = 600;
+/// Component pixel floor for the threshold sweep: components smaller than `n / this` are skipped.
+const COMP_AREA_DIVISOR: usize = 600;
 const MAX_HYPOTHESES: usize = 96;
 const EDGE_TOP_COMPONENTS: usize = 8;
 const EDGE_DILATE_RX: usize = 2;
 const EDGE_DILATE_RY: usize = 2;
+/// Contour approximation epsilons, as fractions of the contour perimeter.
 const APPROX_EPS: [f32; 3] = [0.012, 0.02, 0.032];
 const EDGE_SUP_SAMPLES: usize = 32;
 const EDGE_SUP_OFFSETS: [f32; 3] = [-1.0, 0.0, 1.0];
 const EDGE_SUP_STRONG_FRAC: f32 = 0.35;
 const EDGE_SUP_RUN_MIN: usize = 16;
-const EDGE_SUP_FRAC_MIN: usize = 22;
+/// Minimum hits out of `EDGE_SUP_SAMPLES` for a side to count as edge-supported.
+const EDGE_SUP_MIN_HITS: usize = 22;
+/// Frame-hugging tolerance in proxy pixels.
 const FRAME_EPS: f32 = 3.0;
 const CANNY_HI_FRAC: f32 = 0.90;
 const CANNY_HI_FLOOR: u8 = 24;
@@ -38,6 +44,8 @@ const SHEET_BAND_ASPECT_MIN: f32 = 0.64;
 const SHEET_BAND_ASPECT_MAX: f32 = 0.80;
 const SHEET_WIDEN_RATIO: f32 = 1.20;
 const SHEET_MAX_AREA_FRAC: f32 = 0.90;
+/// Fragment guard: a small winner (below this area fraction) whose surrounding ring is the same
+/// paper (`ring_bg >= FRAGMENT_BG_MIN`, `ring_fg <= FRAGMENT_FG_MAX`) keeps the full frame.
 const FRAGMENT_AREA_MAX: f32 = 0.45;
 const FRAGMENT_BG_MIN: f32 = 0.70;
 const FRAGMENT_FG_MAX: f32 = 0.90;
@@ -116,7 +124,9 @@ struct Scratch {
     seed: Vec<u32>,
     visited: Vec<u8>,
     contour: Vec<(i32, i32)>,
+    contour_i: Vec<(i32, i32)>,
     poly: Vec<(f32, f32)>,
+    poly2: Vec<(f32, f32)>,
     keep: Vec<bool>,
     pstack: Vec<(usize, usize)>,
     stack: Vec<(usize, usize)>,
@@ -135,7 +145,9 @@ impl Scratch {
             seed: vec![0u32; n],
             visited: vec![0u8; n],
             contour: Vec::with_capacity(4096),
+            contour_i: Vec::with_capacity(4096),
             poly: Vec::with_capacity(4096),
+            poly2: Vec::with_capacity(4096),
             keep: Vec::with_capacity(4096),
             pstack: Vec::with_capacity(1024),
             stack: Vec::with_capacity(4096),
@@ -187,7 +199,7 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     let n = dwi * dhi;
     let luma = small.as_raw();
 
-    let sharp = box_blur_gray(luma, dwi, dhi, 0);
+    let sharp = luma.to_vec();
     let soft = box_blur_gray(luma, dwi, dhi, 1);
 
     let mag_sharp = sobel_l1(&sharp, dwi, dhi);
@@ -296,6 +308,8 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             pq[3].1 * inv_scale
         );
     }
+    // A degenerate winner (duplicate vertex / zero-cross) can slip through `validate_reason`, so the
+    // guard only fires on a proper convex quad; otherwise `warp` must report `reason=hull` itself.
     if hull_is_quad(&hyp[pick_idx].quad) && winner_is_fragment(&hyp[pick_idx]) {
         if crop_debug() {
             eprintln!(
@@ -922,6 +936,8 @@ fn detect_by_edges(
     }
 }
 
+/// Threshold sweep: only the largest component of each threshold is traced, so an inner object
+/// (a table inside a sheet) has to be found by `detect_by_edges` or by another threshold.
 fn detect_by_threshold(
     soft: &[u8],
     mag_sharp: &[u8],
@@ -945,7 +961,7 @@ fn detect_by_threshold(
         64,
         192,
     ];
-    let min_px = (n / COMP_MIN_FRAC).max(MIN_COMPONENT);
+    let min_px = (n / COMP_AREA_DIVISOR).max(MIN_COMPONENT);
     let dbg = crop_debug();
 
     for &t_raw in &thresholds {
@@ -1004,6 +1020,8 @@ fn detect_by_threshold(
     }
 }
 
+/// Debug-only probe (enabled by `SEAMAESTRO_CROP_DEBUG`): sweeps inverse thresholds and traces the
+/// largest dark component to show what the wet sweep ignores. It never contributes to `out`.
 fn detect_dark_diagnostics(
     soft: &[u8],
     mag_sharp: &[u8],
@@ -1024,7 +1042,7 @@ fn detect_dark_diagnostics(
         base_t + 60,
         192,
     ]);
-    let min_px = (n / COMP_MIN_FRAC).max(MIN_COMPONENT);
+    let min_px = (n / COMP_AREA_DIVISOR).max(MIN_COMPONENT);
     for &t_raw in &thresholds {
         let t = t_raw.clamp(0, 255) as u8;
         for (i, &v) in soft.iter().enumerate() {
@@ -1071,6 +1089,13 @@ fn detect_dark_diagnostics(
     }
 }
 
+/// Formats a point list for the `SEAMAESTRO_CROP_DEBUG` trace.
+fn fmt_pts(pts: &[(f32, f32)]) -> String {
+    pts.iter()
+        .map(|p| format!("{:.2},{:.2};", p.0, p.1))
+        .collect()
+}
+
 fn push_poly_hypotheses(
     source: &'static str,
     w: usize,
@@ -1092,22 +1117,20 @@ fn push_poly_hypotheses(
         let eps = per * eps_r;
         approx_polygon(&sc.contour, eps, &mut sc.keep, &mut sc.pstack, &mut sc.poly);
         let raw_n = sc.poly.len();
-        let mut poly = sc.poly.clone();
-        dedup_closed(&mut poly, eps.max(1.0));
-        let dedup_n = poly.len();
-        if poly.len() > 4 && poly.len() <= 7 {
-            poly = simplify_to_4(&poly);
+        sc.poly2.clear();
+        sc.poly2.extend_from_slice(&sc.poly);
+        dedup_closed(&mut sc.poly2, eps.max(1.0));
+        let dedup_n = sc.poly2.len();
+        if sc.poly2.len() > 4 && sc.poly2.len() <= 7 {
+            sc.poly2 = simplify_to_4(&sc.poly2);
         }
         if dbg {
-            let dmin = if poly.len() == 4 {
-                min_pair_dist(&[poly[0], poly[1], poly[2], poly[3]])
+            let dmin = if sc.poly2.len() == 4 {
+                min_pair_dist(&[sc.poly2[0], sc.poly2[1], sc.poly2[2], sc.poly2[3]])
             } else {
                 0.0
             };
-            let pts: String = poly
-                .iter()
-                .map(|p| format!("{:.2},{:.2};", p.0, p.1))
-                .collect();
+            let pts = fmt_pts(&sc.poly2);
             eprintln!(
                 "  [crop] poly {} {} stage=eps eps_r={} per={:.1} raw={} dedup={} n={} dmin={:.4} pts=[{}]",
                 source,
@@ -1116,20 +1139,21 @@ fn push_poly_hypotheses(
                 per,
                 raw_n,
                 dedup_n,
-                poly.len(),
+                sc.poly2.len(),
                 dmin,
                 pts
             );
         }
-        if poly.len() == 4 {
+        if sc.poly2.len() == 4 {
             eps4 += 1;
-            let q = order_corners(&[poly[0], poly[1], poly[2], poly[3]]);
+            let q = order_corners(&[sc.poly2[0], sc.poly2[1], sc.poly2[2], sc.poly2[3]]);
             push_quad(q, source, w, h, mag, out, vctx, dry);
         }
     }
 
-    let mut ip: Vec<(i32, i32)> = sc.contour.clone();
-    let hull = convex_hull(&mut ip);
+    sc.contour_i.clear();
+    sc.contour_i.extend_from_slice(&sc.contour);
+    let hull = convex_hull(&mut sc.contour_i);
     if dbg {
         eprintln!(
             "  [crop] poly {} {} stage=hull eps4={} hull_n={}",
@@ -1145,10 +1169,7 @@ fn push_poly_hypotheses(
     let hull_f: Vec<(f32, f32)> = hull.iter().map(|&(x, y)| (x as f32, y as f32)).collect();
     let corners = simplify_to_4(&hull_f);
     if dbg {
-        let pts: String = corners
-            .iter()
-            .map(|p| format!("{:.2},{:.2};", p.0, p.1))
-            .collect();
+        let pts = fmt_pts(&corners);
         let dmin = if corners.len() == 4 {
             min_pair_dist(&[corners[0], corners[1], corners[2], corners[3]])
         } else {
@@ -1169,7 +1190,7 @@ fn push_poly_hypotheses(
     }
     if let Some(q) = min_area_rect(&hull_f) {
         if dbg {
-            let pts: String = q.iter().map(|p| format!("{:.2},{:.2};", p.0, p.1)).collect();
+            let pts = fmt_pts(&q);
             eprintln!(
                 "  [crop] poly {} {} stage=rect dmin={:.4} pts=[{}]",
                 source,
@@ -1198,10 +1219,7 @@ fn push_quad(
     if !validate(&quad, w as f32, h as f32) {
         if crop_debug() {
             if let Some(reason) = validate_reason(&quad, w as f32, h as f32) {
-                let pts: String = quad
-                    .iter()
-                    .map(|p| format!("{:.2},{:.2};", p.0, p.1))
-                    .collect();
+                let pts = fmt_pts(&quad);
                 let dmin = min_pair_dist(&quad);
                 let a = polygon_area(&quad) / (w * h) as f32;
                 if dry {
@@ -1336,7 +1354,7 @@ fn edge_stats(
             }
         }
         stats[e] = (cnt, best_run);
-        if cnt >= EDGE_SUP_FRAC_MIN && best_run >= EDGE_SUP_RUN_MIN {
+        if cnt >= EDGE_SUP_MIN_HITS && best_run >= EDGE_SUP_RUN_MIN {
             ok += 1;
         }
     }
@@ -1411,7 +1429,7 @@ fn step_stats(
     for e in 0..4 {
         let (cnt, best_run) = side_plateau_support(q[e], q[(e + 1) & 3], luma, w, h, thr);
         stats[e] = (cnt, best_run);
-        if cnt >= EDGE_SUP_FRAC_MIN && best_run >= EDGE_SUP_RUN_MIN {
+        if cnt >= EDGE_SUP_MIN_HITS && best_run >= EDGE_SUP_RUN_MIN {
             ok += 1;
         }
     }
@@ -1569,6 +1587,8 @@ fn label_components(
     out
 }
 
+/// Union-find with path halving; called per neighbouring pixel pair, hence inline.
+#[inline]
 fn find(parent: &mut [u32], mut x: usize) -> u32 {
     while parent[x] != x as u32 {
         parent[x] = parent[parent[x] as usize];
@@ -1577,6 +1597,8 @@ fn find(parent: &mut [u32], mut x: usize) -> u32 {
     x as u32
 }
 
+/// Union by rank; called per neighbouring pixel pair, hence inline.
+#[inline]
 fn union(parent: &mut [u32], rank: &mut [u8], a: usize, b: usize) {
     let ra = find(parent, a) as usize;
     let rb = find(parent, b) as usize;
@@ -1623,6 +1645,7 @@ fn dedup_closed(poly: &mut Vec<(f32, f32)>, eps: f32) {
     }
 }
 
+#[inline]
 fn point_seg_dist(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
@@ -1737,6 +1760,7 @@ fn simplify_to_4(hull: &[(f32, f32)]) -> Vec<(f32, f32)> {
     poly
 }
 
+#[inline]
 fn triangle_area(a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     let ab = (b.0 - a.0, b.1 - a.1);
     let ac = (c.0 - a.0, c.1 - a.1);
@@ -1885,6 +1909,7 @@ fn min_pair_dist(c: &[(f32, f32); 4]) -> f32 {
     m
 }
 
+#[inline]
 fn dist(a: (f32, f32), b: (f32, f32)) -> f32 {
     let dx = a.0 - b.0;
     let dy = a.1 - b.1;
@@ -1978,6 +2003,8 @@ fn canny_hysteresis(
     }
 }
 
+/// Cross product of (a-o) x (b-o); sign tells the turn direction.
+#[inline]
 fn cross_f(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
     (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
 }
@@ -3225,5 +3252,12 @@ mod tests {
         let production = src.split("#[cfg(test)]").next().unwrap_or(src);
         let hits = production.lines().filter(|l| l.contains("warp(")).count();
         assert_eq!(hits, 2, "expected one definition and one call site, got {hits}");
+    }
+
+    #[test]
+    fn box_blur_radius_zero_is_a_pure_copy() {
+        let (w, h) = (8usize, 5usize);
+        let src: Vec<u8> = (0..(w * h) as u32).map(|i| (i * 37 % 251) as u8).collect();
+        assert_eq!(box_blur_gray(&src, w, h, 0), src);
     }
 }
