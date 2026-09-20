@@ -3796,7 +3796,7 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let d = (x as i64 - cx).abs().max((y as i64 - cy).abs()) as usize;
-                for &(lim, val) in rings.iter().rev() {
+                for &(lim, val) in rings.iter() {
                     if d < lim {
                         v[y * w + x] = val;
                         break;
@@ -3940,45 +3940,32 @@ mod tests {
             (1400.0, 1400.0),
             (120.0, 1400.0),
         ];
-        let (base, bst) = refine_pick_by_ray_edge_scaled(
-            &img,
-            w,
-            h,
-            &pick,
-            1.0,
-            &EdgeRefineCfg::default(),
-        );
-        let base = base.expect("proxy tie-break propose");
-        assert_eq!(bst.gate, "ok");
-        let (scaled, sst) = refine_pick_by_ray_edge_scaled(
-            &img,
-            w,
-            h,
-            &pick,
-            1.5,
-            &EdgeRefineCfg::default(),
-        );
-        let scaled = scaled.expect("scaled tie-break propose");
-        assert_eq!(sst.gate, "ok");
+        let probe = |k: f32, cfg: &EdgeRefineCfg| {
+            let (quad, st) = refine_pick_by_ray_edge_scaled(&img, w, h, &pick, k, cfg);
+            let info = format!(
+                "k={} gate={} step={} win={} jump={:.1} sides={:?} rays={:?} quad={:?}",
+                k, st.gate, st.step, st.win, st.jump_thr, st.sides, st.rays, quad
+            );
+            (quad, info)
+        };
+        let (base_quad, base_info) = probe(1.0, &EdgeRefineCfg::default());
+        let (scaled_quad, scaled_info) = probe(1.5, &EdgeRefineCfg::default());
+        let detail = format!("{base_info} | {scaled_info}");
+        let base_quad =
+            base_quad.unwrap_or_else(|| panic!("proxy tie-break propose -> {detail}"));
+        let scaled_quad =
+            scaled_quad.unwrap_or_else(|| panic!("scaled tie-break propose -> {detail}"));
         for i in 0..4 {
             assert!(
-                (scaled[i].0 - base[i].0).abs() <= 3.0,
-                "corner {i} x={} base={}",
-                scaled[i].0,
-                base[i].0
+                (scaled_quad[i].0 - base_quad[i].0).abs() <= 3.0,
+                "corner {i} {detail}"
             );
             assert!(
-                (scaled[i].1 - base[i].1).abs() <= 3.0,
-                "corner {i} y={} base={}",
-                scaled[i].1,
-                base[i].1
+                (scaled_quad[i].1 - base_quad[i].1).abs() <= 3.0,
+                "corner {i} {detail}"
             );
         }
-        assert!(
-            (base[0].0 - 118.0).abs() <= 3.0,
-            "sheet edge x={}",
-            base[0].0
-        );
+        assert!((base_quad[0].0 - 118.0).abs() <= 3.0, "{detail}");
     }
 
     #[test]
