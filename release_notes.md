@@ -1,3 +1,28 @@
+## SeaMaestro v2.5.2
+
+## 🧹 Maintenance
+
+**New application icon** — the executable ships with the updated SeaMaestro icon.
+
+**Internal cleanup in `--crop`** — the auto-crop module went through an audit
+pass: constants renamed to match their meaning, doc comments completed, a
+redundant blur pass and one full-frame copy removed, diagnostic probes kept behind the debug switch.
+**Crop behaviour is unchanged** — on the 49-photo regression set the output is
+bit-identical to v2.5.1.
+
+## 🔓 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+SHA-256 and size are filled in after the CI build (`checksums.txt` in the
+release assets).
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
 ## SeaMaestro v2.5.1
 
 ## ✨ What's New
