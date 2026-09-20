@@ -68,6 +68,7 @@ const EDGE_REFINE_TAIL_ENV: &str = "SEAMAESTRO_CROP_EDGE_TAIL";
 const EDGE_REFINE_RATIO_LO_ENV: &str = "SEAMAESTRO_CROP_EDGE_RATIO_LO";
 const EDGE_REFINE_RATIO_HI_ENV: &str = "SEAMAESTRO_CROP_EDGE_RATIO_HI";
 const REGION_EDGE_SEED_ACCEPT: f32 = 1.05;
+const REGION_EDGE_SEED_SRC_ENV: &str = "SEAMAESTRO_CROP_EDGE_SEED_SRC";
 const EDGE_REFINE_RAYS: usize = 72;
 const EDGE_REFINE_STEP: f32 = 2.0;
 const EDGE_REFINE_WIN: usize = 6;
@@ -440,8 +441,9 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
     let pick = hyp[pick_idx].quad;
     let (legacy_idx, legacy_reason) =
         pick_index_mode(&hyp, false, pick_mode_area_contrast(), dwi as f32, dhi as f32);
-    let refine_on = edge_refine_enabled() || vctx.enabled;
-    let (seed, seed_src) = if vctx.enabled {
+    let refine_on = edge_refine_enabled();
+    let region_legacy_seed = vctx.enabled && region_edge_seed_legacy();
+    let (seed, seed_src) = if region_legacy_seed {
         (hyp[legacy_idx].quad, "legacy")
     } else {
         (pick, "pick")
@@ -504,7 +506,7 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 // Region mode: the refine step is a shrinker, not an extender. A refined quad wider than
                 // the region pick means the rays latched onto the desk/background instead of the sheet
                 // edge (see `REGION_EDGE_SEED_ACCEPT`), so the region pick stays.
-                let keep_region = vctx.enabled && polygon_area(&rq) > accept * polygon_area(&pick);
+                let keep_region = region_legacy_seed && polygon_area(&rq) > accept * polygon_area(&pick);
                 let chosen = if keep_region { pick } else { rq };
                 if crop_debug() {
                     eprintln!(
@@ -700,6 +702,16 @@ fn pick_index_mode(
 fn edge_refine_enabled() -> bool {
     match std::env::var(EDGE_REFINE_ENV) {
         Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => false,
+    }
+}
+
+fn region_edge_seed_legacy() -> bool {
+    match std::env::var(REGION_EDGE_SEED_SRC_ENV) {
+        Ok(v) => {
+            let v = v.trim().to_ascii_lowercase();
+            v == "legacy" || v == "1"
+        }
         Err(_) => false,
     }
 }
