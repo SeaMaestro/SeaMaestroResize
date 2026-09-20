@@ -62,6 +62,11 @@ const EDGE_REFINE_ENV: &str = "SEAMAESTRO_CROP_EDGE";
 const EDGE_REFINE_RES_ENV: &str = "SEAMAESTRO_CROP_EDGE_RES";
 const EDGE_REFINE_JUMP_ENV: &str = "SEAMAESTRO_CROP_EDGE_JUMP";
 const EDGE_REFINE_SEED_ACCEPT_ENV: &str = "SEAMAESTRO_CROP_EDGE_SEED";
+const EDGE_REFINE_PTS_ENV: &str = "SEAMAESTRO_CROP_EDGE_PTS";
+const EDGE_REFINE_TOL_ENV: &str = "SEAMAESTRO_CROP_EDGE_TOL";
+const EDGE_REFINE_TAIL_ENV: &str = "SEAMAESTRO_CROP_EDGE_TAIL";
+const EDGE_REFINE_RATIO_LO_ENV: &str = "SEAMAESTRO_CROP_EDGE_RATIO_LO";
+const EDGE_REFINE_RATIO_HI_ENV: &str = "SEAMAESTRO_CROP_EDGE_RATIO_HI";
 const REGION_EDGE_SEED_ACCEPT: f32 = 1.05;
 const EDGE_REFINE_RAYS: usize = 72;
 const EDGE_REFINE_STEP: f32 = 2.0;
@@ -446,12 +451,12 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
             None => &soft,
         };
         let ek = (ekx + eky) * 0.5;
-        let jump = env_f32(EDGE_REFINE_JUMP_ENV, EDGE_REFINE_JUMP_MIN);
+        let ercfg = EdgeRefineCfg::from_env();
         let seed_hi: [(f32, f32); 4] = std::array::from_fn(|i| (seed[i].0 * ekx, seed[i].1 * eky));
-        let (refined, st) = refine_pick_by_ray_edge_scaled(edge_luma, ew, eh, &seed_hi, ek, jump);
+        let (refined, st) = refine_pick_by_ray_edge_scaled(edge_luma, ew, eh, &seed_hi, ek, &ercfg);
         if crop_debug() {
             eprintln!(
-                "  [crop] edge refine seed={} reason={} res={} k={:.2} step={:.2} win={} jump={:.1} gate={} rays=[{} {} {} {} {} {} {}]",
+                "  [crop] edge refine seed={} reason={} res={} k={:.2} step={:.2} win={} jump={:.1} pts={} tol={:.2} tail={:.2} ratio={:.2}..{:.2} sides=[{} {} {} {}] gate={} rays=[{} {} {} {} {} {} {}]",
                 seed_src,
                 legacy_reason,
                 eres,
@@ -459,6 +464,15 @@ fn detect_corners(img: &image::DynamicImage, w: u32, h: u32) -> Option<[(f32, f3
                 st.step,
                 st.win,
                 st.jump_thr,
+                st.pts_min,
+                st.tol_frac,
+                st.tail_max,
+                st.ratio_lo,
+                st.ratio_hi,
+                st.sides[0],
+                st.sides[1],
+                st.sides[2],
+                st.sides[3],
                 st.gate,
                 st.rays[0],
                 st.rays[1],
@@ -819,12 +833,53 @@ fn nearest_edge_index(q: &[(f32, f32); 4], p: (f32, f32)) -> Option<(usize, f32)
 }
 
 
+struct EdgeRefineCfg {
+    jump_min: f32,
+    pts_min: usize,
+    tol_frac: f32,
+    tail_max: f32,
+    ratio_lo: f32,
+    ratio_hi: f32,
+}
+
+impl EdgeRefineCfg {
+    fn from_env() -> Self {
+        Self {
+            jump_min: env_f32(EDGE_REFINE_JUMP_ENV, EDGE_REFINE_JUMP_MIN),
+            pts_min: env_u32(EDGE_REFINE_PTS_ENV, EDGE_REFINE_PTS_MIN as u32).max(2) as usize,
+            tol_frac: env_f32(EDGE_REFINE_TOL_ENV, EDGE_REFINE_EDGE_TOL_FRAC),
+            tail_max: env_f32(EDGE_REFINE_TAIL_ENV, EDGE_REFINE_TAIL_MAX),
+            ratio_lo: env_f32(EDGE_REFINE_RATIO_LO_ENV, EDGE_REFINE_RAY_RATIO_LO),
+            ratio_hi: env_f32(EDGE_REFINE_RATIO_HI_ENV, EDGE_REFINE_RAY_RATIO_HI),
+        }
+    }
+}
+
+impl Default for EdgeRefineCfg {
+    fn default() -> Self {
+        Self {
+            jump_min: EDGE_REFINE_JUMP_MIN,
+            pts_min: EDGE_REFINE_PTS_MIN,
+            tol_frac: EDGE_REFINE_EDGE_TOL_FRAC,
+            tail_max: EDGE_REFINE_TAIL_MAX,
+            ratio_lo: EDGE_REFINE_RAY_RATIO_LO,
+            ratio_hi: EDGE_REFINE_RAY_RATIO_HI,
+        }
+    }
+}
+
 struct EdgeRefineStats {
     rays: [usize; 7],
+    sides: [usize; 4],
     gate: &'static str,
     step: f32,
     win: usize,
     jump_thr: f32,
+    pts_min: usize,
+    tol_frac: f32,
+    tail_max: f32,
+    ratio_lo: f32,
+    ratio_hi: f32,
 }
 
 fn refine_pick_by_ray_edge_scaled(
@@ -833,17 +888,29 @@ fn refine_pick_by_ray_edge_scaled(
     h: usize,
     pick: &[(f32, f32); 4],
     k: f32,
-    jump_min: f32,
+    cfg: &EdgeRefineCfg,
 ) -> (Option<[(f32, f32); 4]>, EdgeRefineStats) {
     let k = k.max(0.25);
     let step = (EDGE_REFINE_STEP * k).max(0.5);
     let win = ((EDGE_REFINE_WIN as f32) * k).round().max(2.0) as usize;
+    let jump_min = cfg.jump_min;
+    let pts_min = cfg.pts_min;
+    let tol_frac = cfg.tol_frac;
+    let tail_max = cfg.tail_max;
+    let ratio_lo = cfg.ratio_lo;
+    let ratio_hi = cfg.ratio_hi;
     let mut st = EdgeRefineStats {
         rays: [0usize; 7],
+        sides: [0usize; 4],
         gate: "",
         step,
         win,
         jump_thr: jump_min,
+        pts_min,
+        tol_frac,
+        tail_max,
+        ratio_lo,
+        ratio_hi,
     };
     if w < 16 || h < 16 || luma.len() < w * h {
         return (None, st);
@@ -898,7 +965,7 @@ fn refine_pick_by_ray_edge_scaled(
     let diag_pick = dist(pick[0], pick[2])
         .max(dist(pick[1], pick[3]))
         .max(1e-6);
-    let edge_tol = EDGE_REFINE_EDGE_TOL_FRAC * diag_pick;
+    let edge_tol = tol_frac * diag_pick;
 
     let mut side_pts: [Vec<(f32, f32)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
     let mut side_ratio: [Vec<f32>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
@@ -974,13 +1041,13 @@ fn refine_pick_by_ray_edge_scaled(
         } else {
             1.0
         };
-        if tf > EDGE_REFINE_TAIL_MAX {
+        if tf > tail_max {
             st.rays[4] += 1;
             continue;
         }
         let rs = best_t as f32 * step;
         let rt = rs / rp;
-        if !(EDGE_REFINE_RAY_RATIO_LO..=EDGE_REFINE_RAY_RATIO_HI).contains(&rt) {
+        if !(ratio_lo..=ratio_hi).contains(&rt) {
             st.rays[5] += 1;
             continue;
         }
@@ -995,8 +1062,14 @@ fn refine_pick_by_ray_edge_scaled(
     }
 
     let mut lines = [(0.0f32, 0.0f32, 0.0f32, 0.0f32); 4];
+    st.sides = [
+        side_pts[0].len(),
+        side_pts[1].len(),
+        side_pts[2].len(),
+        side_pts[3].len(),
+    ];
     for j in 0..4 {
-        if side_pts[j].len() < EDGE_REFINE_PTS_MIN {
+        if side_pts[j].len() < pts_min {
             st.gate = "side_pts";
             return (None, st);
         }
@@ -3606,7 +3679,7 @@ mod tests {
         h: usize,
         pick: &[(f32, f32); 4],
     ) -> Option<[(f32, f32); 4]> {
-        refine_pick_by_ray_edge_scaled(luma, w, h, pick, 1.0, EDGE_REFINE_JUMP_MIN).0
+        refine_pick_by_ray_edge_scaled(luma, w, h, pick, 1.0, &EdgeRefineCfg::default()).0
     }
 
     #[test]
@@ -3672,8 +3745,14 @@ mod tests {
         let (w2, h2) = (w * 2, h * 2);
         let img2 = synth_paper(w2, h2, (56, 76, 424, 604), 200, 40);
         let pick2 = pick.map(|(x, y)| (x * 2.0, y * 2.0));
-        let (scaled, st) =
-            refine_pick_by_ray_edge_scaled(&img2, w2, h2, &pick2, 2.0, EDGE_REFINE_JUMP_MIN);
+        let (scaled, st) = refine_pick_by_ray_edge_scaled(
+            &img2,
+            w2,
+            h2,
+            &pick2,
+            2.0,
+            &EdgeRefineCfg::default(),
+        );
         let scaled = scaled.expect("double resolution propose");
         assert_eq!(st.gate, "ok");
         assert!((st.step - 2.0 * EDGE_REFINE_STEP).abs() < 1e-3, "step={}", st.step);
@@ -3704,8 +3783,14 @@ mod tests {
             (140.0, 176.0),
             (20.0, 176.0),
         ];
-        let (res, st) =
-            refine_pick_by_ray_edge_scaled(&img, w, h, &pick, 1.0, EDGE_REFINE_JUMP_MIN);
+        let (res, st) = refine_pick_by_ray_edge_scaled(
+            &img,
+            w,
+            h,
+            &pick,
+            1.0,
+            &EdgeRefineCfg::default(),
+        );
         assert!(res.is_none());
         assert_eq!(st.gate, "side_pts");
         assert!(st.rays[3] >= EDGE_REFINE_RAYS - 4, "rays={:?}", st.rays);
