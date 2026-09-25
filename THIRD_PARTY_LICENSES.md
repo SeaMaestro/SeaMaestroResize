@@ -114,6 +114,28 @@ repository.
 
 Copyright (c) Microsoft Corporation, Daan Leijen. Licensed under the MIT License.
 
+## BEN2 — AI background cut model (`BEN2_Base.onnx`, bundled in the cut build)
+
+- License: MIT
+- Project: https://huggingface.co/PramaLLC/BEN2
+- Embedded in: `SeaMaestroCut.exe` (the model is compiled into the executable)
+
+## ONNX Runtime — inference engine (bundled in the cut build)
+
+- License: MIT
+- Project: https://github.com/microsoft/onnxruntime
+- License text: https://github.com/microsoft/onnxruntime/blob/main/LICENSE
+- Embedded in: `SeaMaestroCut.exe`; unpacked on first cut into
+  `%LOCALAPPDATA%\SeaMaestro\ort\<key>\onnxruntime.dll`
+
+## DirectML — GPU execution provider for ONNX Runtime (bundled in the cut build)
+
+- License: MIT
+- Project: https://github.com/microsoft/DirectML
+- License text: https://github.com/microsoft/DirectML/blob/master/LICENSE
+- Embedded in: `SeaMaestroCut.exe`; unpacked on first cut into
+  `%LOCALAPPDATA%\SeaMaestro\ort\<key>\DirectML.dll`
+
 ## Other Rust crates
 
 The remaining Rust dependencies are licensed under MIT, Apache-2.0,

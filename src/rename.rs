@@ -107,6 +107,34 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
             config.merge = true;
             return true;
         }
+        "cut" | "cutout" => {
+            config.cut = true;
+            return true;
+        }
+        "tile" => {
+            config.tile = true;
+            return true;
+        }
+        "soft" => {
+            config.raw_alpha = true;
+            return true;
+        }
+        "hard" => {
+            config.raw_alpha = false;
+            return true;
+        }
+        "plain" => {
+            config.de_fringe = false;
+            return true;
+        }
+        "nopause" => {
+            config.no_pause = true;
+            return true;
+        }
+        "nocut" => {
+            config.cut = false;
+            return true;
+        }
         _ => {}
     }
 
@@ -138,25 +166,17 @@ impl Config {
             keep_exif: false,
             merge: false,
             output_is_dir: false,
+            cut: false,
+            ep: 0,
+            threads: 0,
+            de_fringe: true,
+            raw_alpha: SOFT_ALPHA_DEFAULT,
+            tile: false,
+            bg_color: None,
+            preview_dir: None,
         };
 
-        let cleaned: String = stem
-            .chars()
-            .map(|c| if "_-.,; ".contains(c) { ' ' } else { c })
-            .collect();
-
-        let tokens: Vec<String> = cleaned
-            .split_whitespace()
-            .map(|s| s.to_lowercase())
-            .filter_map(|s| {
-                let s = s
-                    .strip_prefix("seamaestroresize")
-                    .or_else(|| s.strip_prefix("seamaestro"))
-                    .or_else(|| s.strip_prefix("resize"))
-                    .unwrap_or(&s);
-                if s.is_empty() { None } else { Some(s.to_string()) }
-            })
-            .collect();
+        let tokens = stem_tokens(&stem);
 
         for token in &tokens {
             if try_apply_single(&mut config, token) {
@@ -171,7 +191,111 @@ impl Config {
     }
 }
 
+fn stem_tokens(stem: &str) -> Vec<String> {
+    let cleaned: String = stem
+        .chars()
+        .map(|c| if "_-.,; ".contains(c) { ' ' } else { c })
+        .collect();
+
+    cleaned
+        .split_whitespace()
+        .map(|s| s.to_lowercase())
+        .filter_map(|s| {
+            let s = s
+                .strip_prefix("seamaestroresize")
+                .or_else(|| s.strip_prefix("seamaestro"))
+                .or_else(|| s.strip_prefix("resize"))
+                .unwrap_or(&s);
+            if s.is_empty() { None } else { Some(s.to_string()) }
+        })
+        .collect()
+}
+
+pub(crate) fn exe_name_has_cut_token() -> bool {
+    exe_name_has_tokens(&["cut", "cutout"]) && !exe_name_has_tokens(&["nocut"])
+}
+
+pub(crate) fn exe_name_has_tokens(names: &[&str]) -> bool {
+    let stem = match env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+    {
+        Some(s) => s,
+        None => return false,
+    };
+    stem_tokens(&stem)
+        .iter()
+        .any(|t| names.iter().any(|n| t == n))
+}
+
+pub(crate) fn exe_name_format() -> Option<ImageFormat> {
+    let stem = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    for token in stem_tokens(&stem) {
+        let mut remaining: &str = &token;
+        while !remaining.is_empty() {
+            match try_match_at_start(remaining) {
+                Some((matched, rest)) => {
+                    if let Some(fmt) = ImageFormat::from_str(matched) {
+                        return Some(fmt);
+                    }
+                    remaining = rest;
+                }
+                None => break,
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn apply_cut_format_default(config: &mut Config) {
+    let stem = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    cut_format_default(config, names_format(&stem_tokens(&stem)));
+}
+
+fn cut_format_default(config: &mut Config, format_named: bool) {
+    if config.cut && !format_named {
+        config.format = ImageFormat::Png;
+    }
+}
+
+fn names_format(tokens: &[String]) -> bool {
+    for token in tokens {
+        let mut remaining: &str = token;
+        loop {
+            if remaining.is_empty() {
+                break;
+            }
+            let Some((matched, rest)) = try_match_at_start(remaining) else {
+                break;
+            };
+            if ImageFormat::from_str(matched).is_some() {
+                return true;
+            }
+            if rest.len() == remaining.len() {
+                break;
+            }
+            remaining = rest;
+        }
+    }
+    false
+}
+
 fn decompose_and_apply(config: &mut Config, token: &str) -> bool {
+    let mut scratch = config.clone();
+    if !apply_parts(&mut scratch, token) {
+        return false;
+    }
+    *config = scratch;
+    true
+}
+
+fn apply_parts(config: &mut Config, token: &str) -> bool {
     let mut remaining = token;
     let mut applied = false;
 
@@ -215,8 +339,10 @@ fn get_bare_re() -> &'static Regex {
     BARE_RE.get_or_init(|| Regex::new(r"^(\d{2,4})").unwrap())
 }
 
+pub(crate) const SOFT_ALPHA_DEFAULT: bool = true;
+
 const KEYWORDS_ORDERED: &[&str] = &[
-    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge",
+    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge", "cutout", "cut", "tile", "soft", "hard", "plain", "nopause", "nocut",
 ];
 
 const LANG_KEYWORDS_ORDERED: &[&str] = &[
@@ -303,6 +429,14 @@ mod tests {
             keep_exif: false,
             merge: false,
             output_is_dir: false,
+            cut: false,
+            ep: 0,
+            threads: 0,
+            de_fringe: true,
+            raw_alpha: SOFT_ALPHA_DEFAULT,
+            tile: false,
+            bg_color: None,
+            preview_dir: None,
         }
     }
 
@@ -325,5 +459,32 @@ mod tests {
         let mut c = config();
         assert!(decompose_and_apply(&mut c, "DE1920jpgq85"));
         assert!(matches!(c.lang, Lang::De));
+    }
+
+    #[test]
+    fn format_token_detection() {
+        assert!(!names_format(&stem_tokens("SeaMaestroCut")));
+        assert!(!names_format(&stem_tokens("SeaMaestro_w800_cut")));
+        assert!(names_format(&stem_tokens("SeaMaestroCut_png")));
+        assert!(names_format(&stem_tokens("SeaMaestroCut_jpg")));
+        assert!(names_format(&stem_tokens("SeaMaestroQ80webp")));
+    }
+
+    #[test]
+    fn cut_format_default_only_when_format_unnamed() {
+        let mut c = config();
+        c.cut = true;
+        cut_format_default(&mut c, false);
+        assert!(matches!(c.format, ImageFormat::Png));
+
+        let mut e = config();
+        e.cut = true;
+        cut_format_default(&mut e, true);
+        assert!(matches!(e.format, ImageFormat::Jpeg));
+
+        let mut k = config();
+        k.cut = false;
+        cut_format_default(&mut k, false);
+        assert!(matches!(k.format, ImageFormat::Jpeg));
     }
 }

@@ -1,4 +1,8 @@
 /target/
+/dist/
+/models/
+.clinerules/
+.clinerules
 vcpkg_installed/
 *.bak*
 .vscode/

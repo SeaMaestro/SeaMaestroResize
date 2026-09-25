@@ -181,5 +181,25 @@ pub(crate) fn print_help_table() {
             }
         }
     }
+    #[cfg(feature = "bg")]
+    {
+        eprintln!("  ╠{}╣", mid);
+        for line in wrap_line(&format!("{}  (SeaMaestroCut.exe)", m.h_cut), W) {
+            eprintln!("  ║  {}  ║", pad_right(&line, W));
+        }
+        print_pair_wrapped("cut:", m.cut_help, 16, W);
+        print_pair_wrapped("soft / hard:", m.soft_help, 16, W);
+        print_pair_wrapped("plain:", m.plain_help, 16, W);
+        print_pair_wrapped("tile:", m.tile_help, 16, W);
+        print_pair_wrapped("nopause:", m.no_pause_help, 16, W);
+    }
     eprintln!("  ╚{}╝", top);
+    #[cfg(not(feature = "bg"))]
+    {
+        eprintln!();
+        for line in wrap_line(msg().cut_hint, W) {
+            eprintln!("  {}", line);
+        }
+        eprintln!();
+    }
 }

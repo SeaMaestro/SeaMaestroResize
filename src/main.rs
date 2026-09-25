@@ -129,6 +129,11 @@ mod pdf;
 mod svg_pdf;
 mod scan;
 mod crop;
+mod bgcolor;
+#[cfg(feature = "bg")]
+mod cut;
+#[cfg(feature = "bg")]
+mod ort_runtime;
 
 use clap::{CommandFactory, FromArgMatches, Parser};
 use std::env;
@@ -185,10 +190,20 @@ fn detect_cli_lang(args: &[String]) -> Option<lang::Lang> {
 
 fn cli_command() -> clap::Command {
     let m = msg();
+    let title = if cfg!(feature = "bg") { m.banner_title_cut } else { m.banner_title };
     let mut cmd = Cli::command();
-    cmd = cmd
-        .about(format!("{}\n{}\n{} Version: {}\n🖂  seamaestro@proton.me\n⎇  https://github.com/SeaMaestro/SeaMaestroResize", m.banner_title, m.banner_tagline, m.banner_by, env!("CARGO_PKG_VERSION")))
-        .after_help(m.after_help);
+    cmd = cmd.about(format!(
+        "{}\n{}\n{} Version: {}\n🖂  seamaestro@proton.me\n⎇  https://github.com/SeaMaestro/SeaMaestroResize",
+        title, m.banner_tagline, m.banner_by, env!("CARGO_PKG_VERSION")
+    ));
+    #[cfg(feature = "bg")]
+    {
+        cmd = cmd.after_help(format!("{}\n\n  {}", m.after_help, m.cut_example));
+    }
+    #[cfg(not(feature = "bg"))]
+    {
+        cmd = cmd.after_help(format!("{}\n\n  {}", m.after_help, m.cut_hint));
+    }
     cmd = cmd
         .mut_arg("size", |a| a.help(m.size_help).help_heading(m.h_resize))
         .mut_arg("quality", |a| a.help(m.quality_help).help_heading(m.h_resize))
@@ -200,11 +215,34 @@ fn cli_command() -> clap::Command {
         .mut_arg("scan", |a| a.help(m.scan_help).help_heading(m.h_resize))
         .mut_arg("crop", |a| a.help(m.crop_help).help_heading(m.h_resize))
         .mut_arg("no_pause", |a| a.help(m.no_pause_help).help_heading(m.h_misc))
+        .mut_arg("merge", |a| a.help(m.merge_help).help_heading(m.h_misc))
         .mut_arg("output", |a| a.help(m.output_help).help_heading(m.h_misc))
         .mut_arg("shanty", |a| a.help(m.shanty_help).help_heading(m.h_misc))
         .mut_arg("keep_exif", |a| a.help(m.keep_exif_help).help_heading(m.h_misc))
         .mut_arg("lang", |a| a.help_heading(m.h_misc))
-        .mut_arg("files", |a| a.help_heading(m.h_input));
+        .mut_arg("files", |a| a.help_heading(m.h_input))
+        .mut_arg("cut", |a| a.help(m.cut_help).help_heading(m.h_cut))
+        .mut_arg("ep", |a| a.help(m.ep_help).help_heading(m.h_cut))
+        .mut_arg("threads", |a| a.help(m.threads_help).help_heading(m.h_cut))
+        .mut_arg("de_fringe", |a| a.help(m.plain_help).help_heading(m.h_cut))
+        .mut_arg("soft", |a| a.help(m.soft_help).help_heading(m.h_cut))
+        .mut_arg("hard", |a| a.help(m.hard_help).help_heading(m.h_cut))
+        .mut_arg("nocut", |a| a.help(m.nocut_help).help_heading(m.h_cut))
+        .mut_arg("tile", |a| a.help(m.tile_help).help_heading(m.h_cut))
+        .mut_arg("bg", |a| a.help(m.bg_help).help_heading(m.h_misc))
+        .mut_arg("preview", |a| a.help(m.preview_help).help_heading(m.h_misc));
+    #[cfg(not(feature = "bg"))]
+    {
+        cmd = cmd
+            .mut_arg("cut", |a| a.hide(true))
+            .mut_arg("ep", |a| a.hide(true))
+            .mut_arg("threads", |a| a.hide(true))
+            .mut_arg("de_fringe", |a| a.hide(true))
+            .mut_arg("soft", |a| a.hide(true))
+            .mut_arg("hard", |a| a.hide(true))
+            .mut_arg("nocut", |a| a.hide(true))
+            .mut_arg("tile", |a| a.hide(true));
+    }
     cmd
 }
 
@@ -236,6 +274,13 @@ fn run_safely<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
 
 // ── CLI ───────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum EpChoice {
+    #[clap(name = "auto")] Auto,
+    #[clap(name = "cpu")] Cpu,
+    #[clap(name = "dml")] Dml,
+}
+
 #[derive(Parser)]
 #[command(
     name = "SeaMaestro",
@@ -258,30 +303,50 @@ struct Cli {
     size: Option<String>,
     #[arg(long, default_value_t = 85, help_heading = "RESIZE")]
     quality: u8,
-    #[arg(long, value_enum, default_value_t = ImageFormat::Jpeg, help_heading = "RESIZE")]
-    format: ImageFormat,
+    #[arg(long, value_enum, help_heading = "RESIZE")]
+    format: Option<ImageFormat>,
     #[arg(long, help_heading = "RESIZE")]
     bw: bool,
     #[arg(long, help_heading = "RESIZE")]
     lossless: bool,
     #[arg(long, help_heading = "RESIZE")]
     progressive: bool,
-    #[arg(long, help = "Sharpen after resize", help_heading = "RESIZE")]
+    #[arg(long, help_heading = "RESIZE")]
     sharpen: bool,
     #[arg(long, help_heading = "RESIZE")]
     scan: bool,
     #[arg(long, help_heading = "RESIZE")]
     crop: bool,
-    #[arg(long, help_heading = "MISC")]
+    #[arg(long = "nopause", alias = "no-pause", help_heading = "MISC")]
     no_pause: bool,
     #[arg(long, help_heading = "MISC")]
     output: Option<String>,
     #[arg(long, help_heading = "MISC")]
     shanty: bool,
-    #[arg(long, help_heading = "MISC")]
+    #[arg(long = "exif", alias = "keep-exif", help_heading = "MISC")]
     keep_exif: bool,
-    #[arg(long, help = "Merge images into PDF documents preserving directory structure (implies --format pdf)", help_heading = "MISC")]
+    #[arg(long, help_heading = "MISC")]
     merge: bool,
+    #[arg(long, help_heading = "CUT")]
+    cut: bool,
+    #[arg(long, value_enum, default_value_t = EpChoice::Auto, help_heading = "CUT")]
+    ep: EpChoice,
+    #[arg(long, default_value_t = 0, help_heading = "CUT")]
+    threads: usize,
+    #[arg(long = "plain", alias = "no-de-fringe", action = clap::ArgAction::SetFalse, help_heading = "CUT")]
+    de_fringe: bool,
+    #[arg(long = "soft", alias = "raw-alpha", conflicts_with = "hard", help_heading = "CUT")]
+    soft: bool,
+    #[arg(long = "hard", alias = "alpha-levels", help_heading = "CUT")]
+    hard: bool,
+    #[arg(long = "nocut", help_heading = "CUT")]
+    nocut: bool,
+    #[arg(long, help_heading = "CUT")]
+    tile: bool,
+    #[arg(long, value_name = "COLOR", help_heading = "CUT")]
+    bg: Option<String>,
+    #[arg(long, value_name = "DIR", help_heading = "MISC")]
+    preview: Option<String>,
     #[arg(long, help = "Language code: en, ru, uk, de, es, fr, el, fil", help_heading = "MISC")]
     lang: Option<String>,
     #[arg(help_heading = "INPUT")]
@@ -290,6 +355,7 @@ struct Cli {
 
 // ── Config ────────────────────────────────────────────────────
 
+#[derive(Clone)]
 #[allow(dead_code)]
 pub(crate) struct Config {
     pub(crate) lang: lang::Lang,
@@ -308,8 +374,17 @@ pub(crate) struct Config {
     keep_exif: bool,
     merge: bool,
     output_is_dir: bool,
+    pub(crate) cut: bool,
+    pub(crate) ep: u8,
+    pub(crate) threads: usize,
+    pub(crate) de_fringe: bool,
+    pub(crate) raw_alpha: bool,
+    pub(crate) tile: bool,
+    pub(crate) bg_color: Option<String>,
+    pub(crate) preview_dir: Option<String>,
 }
 
+#[derive(Clone)]
 enum Size {
     Width(u32),
     Height(u32),
@@ -367,6 +442,9 @@ impl ImageFormat {
     }
     fn is_lossless(&self) -> bool {
         matches!(self, ImageFormat::Png | ImageFormat::Ico | ImageFormat::Qoi | ImageFormat::Bmp | ImageFormat::Gif | ImageFormat::Tiff)
+    }
+    fn carries_alpha(&self) -> bool {
+        !matches!(self, ImageFormat::Jpeg | ImageFormat::Pdf)
     }
 }
 
@@ -445,24 +523,51 @@ fn run() -> Result<Config> {
                 set_lang(l);
             }
         }
+        let exe_cut = rename::exe_name_has_cut_token();
+        let cut_active = (cli.cut || exe_cut) && !cli.nocut;
+        let soft_alpha = if cli.hard {
+            false
+        } else if cli.soft {
+            true
+        } else {
+            rename::SOFT_ALPHA_DEFAULT
+        };
         let mut config = Config {
             lang: detected,
             target_size: None,
             quality: cli.quality,
-            format: cli.format,
+            format: cli.format.unwrap_or(ImageFormat::Jpeg),
             grayscale: cli.bw,
             lossless: cli.lossless,
             progressive: cli.progressive,
             sharpen: cli.sharpen,
             scan: cli.scan,
             crop: cli.crop,
-            no_pause: cli.no_pause,
+            no_pause: cli.no_pause || rename::exe_name_has_tokens(&["nopause"]),
             output: cli.output.clone(),
             shanty: cli.shanty,
             keep_exif: cli.keep_exif,
             merge: cli.merge,
             output_is_dir: false,
+            cut: cut_active,
+            ep: match cli.ep {
+                EpChoice::Cpu => 1,
+                EpChoice::Dml => 2,
+                EpChoice::Auto => 0,
+            },
+            threads: cli.threads,
+            de_fringe: cli.de_fringe,
+            raw_alpha: soft_alpha,
+            tile: cli.tile,
+            bg_color: cli.bg.clone(),
+            preview_dir: cli.preview.clone(),
         };
+        if cli.format.is_none() {
+            match rename::exe_name_format() {
+                Some(named) => config.format = named,
+                None => rename::apply_cut_format_default(&mut config),
+            }
+        }
         if let Some(ref s) = cli.size {
             if s == "42" {
                 eprintln!("  {}", msg().the_answer);
@@ -501,6 +606,20 @@ fn run() -> Result<Config> {
         }
         if entries.len() > 1 && config.output.is_some() && !config.merge {
             config.output_is_dir = true;
+        }
+        #[cfg(not(feature = "bg"))]
+        if config.cut {
+            eprintln!("  {}\n", msg().err_cut_unsupported);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return Ok(config);
+        }
+        if let Some(text) = cut_format_error(&config) {
+            eprintln!("  {}\n", text);
+            HAD_ERRORS.store(true, Ordering::Relaxed);
+            return Ok(config);
+        }
+        if let Some(note) = cut_order_note(&config) {
+            eprintln!("  {}\n", note);
         }
         banner(&config);
         if let Some(buf) = stdin_buf {
@@ -543,13 +662,29 @@ fn run() -> Result<Config> {
             target_size: None, quality: 85, format: ImageFormat::Jpeg,
             grayscale: false, lossless: false, progressive: false,
             sharpen: false, scan: false, crop: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false, output_is_dir: false,
+            cut: false, ep: 0, threads: 0, de_fringe: true, raw_alpha: rename::SOFT_ALPHA_DEFAULT, tile: false, bg_color: None, preview_dir: None,
         });
     }
 
     let mut config = Config::from_exe_name()?;
+    rename::apply_cut_format_default(&mut config);
     set_lang(config.lang);
     if config.merge {
         config.format = ImageFormat::Pdf;
+    }
+    #[cfg(not(feature = "bg"))]
+    if config.cut {
+        eprintln!("  {}\n", msg().err_cut_unsupported);
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+        return Ok(config);
+    }
+    if let Some(text) = cut_format_error(&config) {
+        eprintln!("  {}\n", text);
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+        return Ok(config);
+    }
+    if let Some(note) = cut_order_note(&config) {
+        eprintln!("  {}\n", note);
     }
     banner(&config);
 
@@ -829,6 +964,113 @@ fn partition_into_pools(entries: Vec<InputEntry>) -> Vec<Pool> {
     pools
 }
 
+fn out_root_name(config: &Config) -> &'static str {
+    if config.cut {
+        "SeaMaestroCut"
+    } else {
+        "SeaMaestroResized"
+    }
+}
+
+fn out_sub_suffix(config: &Config) -> &'static str {
+    if config.cut {
+        "_Cut"
+    } else {
+        "_Resized"
+    }
+}
+
+pub(crate) const CUT_MAX_FRINGE_SIDE: u32 = 4096;
+
+fn cut_stage_need(width: u32, height: u32, config: &Config) -> u64 {
+    if !config.cut {
+        return 0;
+    }
+    let pixels = width as u64 * height as u64;
+    let per_pixel = if config.de_fringe && width.max(height) <= CUT_MAX_FRINGE_SIDE { 64 } else { 16 };
+    pixels.saturating_mul(per_pixel)
+}
+
+fn cut_order_note(config: &Config) -> Option<&'static str> {
+    if config.cut && (config.crop || config.scan) {
+        return Some(msg().cut_order_note);
+    }
+    None
+}
+
+fn cut_format_error(config: &Config) -> Option<String> {
+    let background = match config.bg_color.as_deref() {
+        Some(text) => match bgcolor::parse_color(text) {
+            Ok(value) => value,
+            Err(err) => return Some(format!("{err:#}")),
+        },
+        None => None,
+    };
+    if !config.cut || config.format.carries_alpha() {
+        return None;
+    }
+    if background.is_none() {
+        return Some(msg().err_bg_required.replacen("{}", config.format.extension(), 1));
+    }
+    None
+}
+
+const PREVIEW_LONG_EDGE: u32 = 2000;
+
+fn checkerboard_backdrop(width: u32, height: u32, step: u32) -> image::RgbImage {
+    let mut board = image::RgbImage::new(width, height);
+    for (x, y, pixel) in board.enumerate_pixels_mut() {
+        let cell = ((x / step) + (y / step)) % 2;
+        let value = if cell == 0 { 190 } else { 235 };
+        *pixel = image::Rgb([value, value, value]);
+    }
+    board
+}
+
+fn write_preview(img: &image::DynamicImage, config: &Config, stem: &str) -> Result<()> {
+    let dir = match config.preview_dir.as_deref() {
+        Some(text) if !text.is_empty() => PathBuf::from(text),
+        _ => return Ok(()),
+    };
+    let (w, h) = (img.width().max(1), img.height().max(1));
+    let scale = PREVIEW_LONG_EDGE as f64 / w.max(h) as f64;
+    let pw = ((w as f64 * scale).round() as u32).max(1);
+    let ph = ((h as f64 * scale).round() as u32).max(1);
+    let scaled = img.resize_exact(pw, ph, FilterType::Lanczos3);
+    let background = match config.bg_color.as_deref() {
+        Some(text) => bgcolor::parse_color(text)?,
+        None => None,
+    };
+    let composed: image::DynamicImage = match background {
+        Some(rgb) => bgcolor::flatten_to_color(&scaled, rgb),
+        None => {
+            if scaled.color().has_alpha() {
+                let rgba = scaled.to_rgba8();
+                let mut board = checkerboard_backdrop(pw, ph, 16);
+                for (x, y, pixel) in rgba.enumerate_pixels() {
+                    let a = pixel.0[3] as u32;
+                    let dst = board.get_pixel_mut(x, y);
+                    for channel in 0..3 {
+                        dst.0[channel] =
+                            ((pixel.0[channel] as u32 * a + dst.0[channel] as u32 * (255 - a)) / 255) as u8;
+                    }
+                }
+                image::DynamicImage::ImageRgb8(board)
+            } else {
+                image::DynamicImage::ImageRgb8(scaled.to_rgb8())
+            }
+        }
+    };
+    fs::create_dir_all(&dir)
+        .with_context(|| msg().err_mkdir.replacen("{}", &dir.display().to_string(), 1))?;
+    let path = dir.join(format!("{}_preview.png", stem));
+    composed
+        .save_with_format(&path, image::ImageFormat::Png)
+        .with_context(|| msg().err_png.replacen("{}", &path.display().to_string(), 1))?;
+    eprintln!("  preview  {}", path.display());
+    Ok(())
+}
+
 fn process_all(entries: Vec<InputEntry>, config: &Config) {
     let pools = partition_into_pools(entries);
     HAD_ERRORS.store(false, Ordering::Relaxed);
@@ -857,7 +1099,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let unified_base: Option<PathBuf> = if multi_root && !any_removable {
         let roots: Vec<&PathBuf> = grouped.keys().collect();
         let common = find_common_parent(roots);
-        Some(common.join("SeaMaestroResized"))
+        Some(common.join(out_root_name(config)))
     } else {
         None
     };
@@ -883,17 +1125,17 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     for (root, files) in &grouped {
         let out_dir = if any_removable {
             if single_file_mode {
-                unique_output_dir(&exe_dir().join("SeaMaestroResized"))
+                unique_output_dir(&exe_dir().join(out_root_name(config)))
             } else {
                 let is_loose = entries.iter().filter(|e| &e.root == root).all(|e| e.direct_file);
                 if is_loose {
-                    unique_output_dir(&exe_dir().join("SeaMaestroResized"))
+                    unique_output_dir(&exe_dir().join(out_root_name(config)))
                 } else {
                     let root_name = root.file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                         .to_string_lossy();
                     unique_output_dir_reserved(
-                        &exe_dir().join("SeaMaestroResized").join(format!("{}_Resized", root_name)),
+                        &exe_dir().join(out_root_name(config)).join(format!("{}{}", root_name, out_sub_suffix(config))),
                         &mut used_out_dirs,
                     )
                 }
@@ -901,16 +1143,16 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         } else if single_file_mode {
             root.clone()
         } else if loose_files {
-            unique_output_dir(&root.join("SeaMaestroResized"))
+            unique_output_dir(&root.join(out_root_name(config)))
         } else if flat_single_folder {
             let parent = root.parent().unwrap_or(root);
-            unique_output_dir(&parent.join("SeaMaestroResized"))
+            unique_output_dir(&parent.join(out_root_name(config)))
         } else if let Some(ref base) = unified_base {
             let root_name = root.file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                 .to_string_lossy();
             unique_output_dir_reserved(
-                &base.join(format!("{}_Resized", root_name)),
+                &base.join(format!("{}{}", root_name, out_sub_suffix(config))),
                 &mut used_out_dirs,
             )
         } else {
@@ -918,7 +1160,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
             let root_name = root.file_name()
                 .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
                 .to_string_lossy();
-            unique_output_dir(&parent.join("SeaMaestroResized").join(format!("{}_Resized", root_name)))
+            unique_output_dir(&parent.join(out_root_name(config)).join(format!("{}{}", root_name, out_sub_suffix(config))))
         };
 
         for (file, rel) in files {
@@ -950,7 +1192,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
             .progress_chars("█▓▒░ "),
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb.set_message("resizing images…");
+        pb.set_message(if config.cut { "cutting subjects…" } else { "resizing images…" });
         Some(pb)
     } else {
         None
@@ -1164,6 +1406,7 @@ fn build_suffix(config: &Config) -> String {
             Size::Percent(p) => parts.push(format!("p{:.0}", p * 100.0)),
         }
     }
+    if config.cut { parts.push("cut".to_string()); }
     if !config.format.is_lossless() && !is_lossless_mode(config) {
         parts.push(format!("q{}", config.quality));
     }
@@ -1202,7 +1445,7 @@ fn compute_output_path(
             if let std::path::Component::Normal(name) = comp {
                 let name_str = name.to_string_lossy();
                 if !name_str.is_empty() {
-                    result_components.push(format!("{}_Resized", name_str));
+                    result_components.push(format!("{}{}", name_str, out_sub_suffix(config)));
                 }
             }
         }
@@ -1319,7 +1562,9 @@ fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decod
 
     let decode_need = decode_raster.saturating_mul(in_mult).saturating_add(in_oh * 1024 * 1024);
     let encode_need = target_raster.saturating_mul(out_mult).saturating_add(out_oh * 1024 * 1024);
-    decode_need.max(encode_need)
+    decode_need
+        .max(encode_need)
+        .saturating_add(cut_stage_need(decode_w, decode_h, config))
 }
 
 fn exif_orientation(raw: &[u8]) -> Option<u32> {
@@ -1418,7 +1663,7 @@ fn jpeg_sof_info(raw: &[u8]) -> Option<(u32, u32, bool)> {
 }
 
 fn passthrough_jpeg_pdf(raw: &[u8], config: &Config) -> Option<crate::pdf::PdfPage> {
-    if config.target_size.is_some() || config.grayscale || config.sharpen || config.scan || config.crop {
+    if config.target_size.is_some() || config.grayscale || config.sharpen || config.scan || config.crop || config.cut {
         return None;
     }
     if !config.lossless && config.quality != 100 {
@@ -1456,7 +1701,27 @@ fn run_pipeline(
     let _permit = MemPermit { budget, need };
     let mut decoded = smart_decode(raw, config, path, svg, svg_render, &preflight, jxl)?;
     let orient = !is_svg && !is_heif(raw);
+    #[cfg(feature = "bg")]
+    let cut_oriented = {
+        if config.cut && orient {
+            decoded.img = auto_orient(decoded.img, raw);
+        }
+        config.cut
+    };
+    #[cfg(feature = "bg")]
+    if config.cut {
+        decoded.img = cut::apply_cut(&decoded.img, config)?;
+        if matches!(config.format, ImageFormat::Jpeg | ImageFormat::Pdf) {
+            let rgb = match config.bg_color.as_deref() {
+                Some(text) => bgcolor::parse_color(text)?.unwrap_or(bgcolor::WHITE),
+                None => bgcolor::WHITE,
+            };
+            decoded.img = bgcolor::flatten_to_color(&decoded.img, rgb);
+        }
+    }
     let stages = build_stages(config);
+    #[cfg(feature = "bg")]
+    let orient = orient && !cut_oriented;
     decoded.img = apply_stages(decoded.img, &stages, raw, orient, config, &preflight);
     Ok(decoded)
 }
@@ -1495,7 +1760,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.sharpen && !config.scan && !config.crop && matches!(config.format, ImageFormat::Pdf) {
+    if !config.sharpen && !config.scan && !config.crop && !config.cut && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 ensure_dir(&out_path)?;
@@ -1509,6 +1774,7 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     let decoded = run_pipeline(&raw, config, Some(input), svg.as_ref(), svg_render)?;
     ensure_dir(&out_path)?;
     save_image(&decoded.img, &out_path, config, decoded.icc.as_deref(), decoded.exif.as_deref())?;
+    write_preview(&decoded.img, config, &input.file_stem().unwrap_or_default().to_string_lossy())?;
     Ok(out_path)
 }
 
@@ -1792,8 +2058,9 @@ fn banner(config: &Config) {
         f => f.extension().to_uppercase(),
     };
     let top = "═".repeat(62);
+    let title = if config.cut { m.banner_title_cut } else { m.banner_title };
     eprintln!("  ╔{}╗", top);
-    eprintln!("  ║  {}  ║", pad_right(m.banner_title, 58));
+    eprintln!("  ║  {}  ║", pad_right(title, 58));
     eprintln!("  ║  {}  ║", pad_right(m.banner_tagline, 58));
     eprintln!("  ║  {}  ║", pad_right(&format!("{} Version: {}", m.banner_by, env!("CARGO_PKG_VERSION")), 58));
     eprintln!("  ║  {}  ║", pad_right("🖂  seamaestro@proton.me", 58));
@@ -1815,6 +2082,9 @@ fn banner(config: &Config) {
     }
     if config.merge {
         eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
+    }
+    if config.cut {
+        eprintln!("  ║  {:<13}{}  ║", m.label_cut, pad_right(m.on, 45));
     }
     if config.keep_exif
         && matches!(config.format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Jxl | ImageFormat::Avif)
@@ -2270,7 +2540,7 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    if !config.sharpen && !config.scan && !config.crop {
+    if !config.sharpen && !config.scan && !config.crop && !config.cut {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
             if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
                 return Ok(crate::pdf::PdfPage::Vector(vp));
@@ -2482,4 +2752,21 @@ fn unique_merge_pdf(out_dir: &Path, rel: &str, config: &Config) -> PathBuf {
         return out_dir.join(format!("{}_Merged{}_{}_{}.pdf", rel, suffix, stamp, fastrand::u32(100..999)));
     }
     candidate
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use clap::CommandFactory;
+
+    #[test]
+    fn visible_long_flags_are_single_words() {
+        let cmd = super::Cli::command();
+        let bad: Vec<String> = cmd
+            .get_arguments()
+            .filter_map(|a| a.get_long())
+            .filter(|name| name.contains('-'))
+            .map(|name| name.to_string())
+            .collect();
+        assert!(bad.is_empty(), "multi-word long flags found: {:?}", bad);
+    }
 }

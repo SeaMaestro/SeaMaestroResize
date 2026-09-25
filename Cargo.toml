@@ -7,7 +7,7 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestro"
-version = "2.5.2"
+version = "2.5.3"
 edition = "2021"
 rust-version = "1.82"
 
@@ -43,6 +43,16 @@ mimalloc = "0.1"
 resvg = "0.48.1"
 subsetter = { version = "0.2.6", default-features = false }
 fontdb = { version = "0.24.0", features = ["fs"] }
+ort = { version = "=2.0.0-rc.12", optional = true, default-features = false, features = ["std", "api-24", "directml", "half", "load-dynamic"] }
+half = { version = "2.7", optional = true }
+
+[features]
+default = []
+bg = ["dep:ort", "dep:half"]
+
+[[bin]]
+name = "SeaMaestro"
+path = "src/main.rs"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"

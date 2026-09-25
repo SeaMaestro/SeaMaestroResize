@@ -5,6 +5,7 @@ on:
     branches:
       - '**'
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -91,5 +92,136 @@ jobs:
         with:
           name: SeaMaestro-unsigned
           path: target/release/SeaMaestro.exe
+          archive: false
+          if-no-files-found: error
+
+  build-cut:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NASM
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Reset VCPKG_ROOT after MSVC
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "VCPKG_ROOT=C:\vcpkg"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Compute vcpkg deps hash
+        id: vcpkg-deps
+        shell: pwsh
+        run: |
+          $deps = (Get-Content vcpkg.json -Raw | ConvertFrom-Json).dependencies | ConvertTo-Json -Compress -Depth 10
+          $sha = [System.Security.Cryptography.SHA256]::Create()
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($deps)
+          $hash = ([System.BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').ToLower()
+          "deps_hash=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v3-${{ steps.vcpkg-deps.outputs.deps_hash }}
+          cache-all-crates: "true"
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-installed-v4-${{ runner.os }}-x64-windows-static-${{ steps.vcpkg-deps.outputs.deps_hash }}
+
+      - name: Install vcpkg dependencies
+        run: vcpkg install --triplet x64-windows-static --x-install-root="C:\vcpkg\installed"
+
+      - name: Ensure vcpkg status updates dir
+        shell: pwsh
+        run: |
+          $dir = "C:\vcpkg\installed\vcpkg\updates"
+          [System.IO.Directory]::CreateDirectory($dir) | Out-Null
+          if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+            throw "Failed to create vcpkg updates dir: $dir"
+          }
+
+      - name: Add pkgconf to PATH
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_PATH -Value "C:\vcpkg\installed\x64-windows-static\tools\pkgconf"
+
+      - name: Verify pinned runtime DLLs
+        shell: pwsh
+        run: |
+          $want = @{
+            'runtime\onnxruntime.dll'                  = '3153de3c4f0a98a3dda5351f2561219cd75c42af7c8a8dd6db8ed17b6d22697a'
+            'runtime\DirectML.dll'                     = '13af15778e6e587169e5990ce8c51fd9964ca7ece8000df2a8b4f6b3fbd5f34a'
+            'runtime\onnxruntime_providers_shared.dll' = 'd7ca6ef9dc3689bfcf24625139722f660add057945890ac7f50c43184e5cbce3'
+          }
+          foreach ($rel in $want.Keys) {
+            if (-not (Test-Path -LiteralPath $rel)) { throw "missing in the repository: $rel" }
+            $got = (Get-FileHash -LiteralPath $rel -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $want[$rel]) { throw "runtime DLL hash mismatch: $rel`nwant $($want[$rel])`ngot  $got" }
+            Write-Host "pinned ok: $rel"
+          }
+
+      - name: Fetch BEN2_Base.onnx from the pinned upstream revision (MIT)
+        shell: pwsh
+        run: |
+          $url = 'https://huggingface.co/PramaLLC/BEN2/resolve/e48a20765fb421d19dcdb0bf3cc61e802ca5ec8f/BEN2_Base.onnx'
+          $want = '22cea62108ff53b7ccc20f7a008bf30494228d84b1687f29ecbe76936a998101'
+          $tmp = Join-Path $env:RUNNER_TEMP 'BEN2_Base.onnx'
+          curl.exe -L --fail --retry 3 --retry-delay 5 -o $tmp $url
+          if ($LASTEXITCODE -ne 0) { throw "model download failed: $url" }
+          $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "model hash mismatch`nwant $want`ngot  $got" }
+          New-Item -ItemType Directory -Force -Path models | Out-Null
+          Copy-Item -LiteralPath $tmp -Destination 'models\BEN2_Base.onnx' -Force
+          Remove-Item -LiteralPath $tmp -Force
+          Write-Host "model verified: $((Get-Item 'models\BEN2_Base.onnx').Length) bytes, $got"
+
+      - name: Clean the crate so the verified inputs are embedded for real
+        run: cargo clean -p SeaMaestro
+
+      - name: Build light and cut executables
+        shell: cmd
+        run: build_cut.bat
+
+      - name: Assert the two builds are distinguishable
+        shell: pwsh
+        run: |
+          $light = (Get-Item 'dist\SeaMaestro.exe').VersionInfo
+          $cut = (Get-Item 'dist\SeaMaestroCut.exe').VersionInfo
+          if ($light.FileDescription -match 'Background Cut') { throw "light exe claims Background Cut: $($light.FileDescription)" }
+          if ($light.OriginalFilename -ne 'SeaMaestro.exe') { throw "light exe metadata is wrong: $($light.OriginalFilename)" }
+          if ($cut.FileDescription -notmatch 'Background Cut') { throw "cut exe metadata is not differentiated: $($cut.FileDescription)" }
+          if ($cut.OriginalFilename -ne 'SeaMaestroCut.exe') { throw "cut exe metadata is not differentiated: $($cut.OriginalFilename)" }
+          Write-Host 'metadata ok'
+          Write-Host "  light: $($light.FileDescription) | $($light.OriginalFilename)"
+          Write-Host "  cut:   $($cut.FileDescription) | $($cut.OriginalFilename)"
+
+      - name: Report sizes and SHA-256
+        shell: pwsh
+        run: |
+          $rows = foreach ($p in 'dist\SeaMaestro.exe', 'dist\SeaMaestroCut.exe') {
+            $i = Get-Item $p
+            [pscustomobject]@{
+              file   = $i.Name
+              mb     = [math]::Round($i.Length / 1MB, 2)
+              sha256 = (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()
+            }
+          }
+          $rows | Format-Table -AutoSize | Out-String | Write-Host
+          "| file | size | sha256 |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          "|---|---|---|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          $rows | ForEach-Object { "| $($_.file) | $($_.mb) MB | ``$($_.sha256)`` |" } | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+
+      - name: Upload light and cut executables
+        uses: actions/upload-artifact@v7
+        with:
+          name: SeaMaestro_${{ github.ref_name }}_light_and_cut
+          path: |
+            dist/SeaMaestro.exe
+            dist/SeaMaestroCut.exe
           archive: false
           if-no-files-found: error

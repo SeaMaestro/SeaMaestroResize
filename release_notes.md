@@ -1,3 +1,90 @@
+## SeaMaestro v2.5.3
+
+## ✨ What's New
+
+**The background cut build is self-contained** — the inference runtime (ONNX
+Runtime + DirectML, ~38 MB) now lives inside `SeaMaestroCut.exe`. The first cut
+unpacks it into `%LOCALAPPDATA%\SeaMaestro\ort\` once, verifies what was written,
+and every later run reuses it; nothing is installed and no DLL sits next to the
+program. The release is therefore **two files**: `SeaMaestro.exe` (resizer) and
+`SeaMaestroCut.exe` (resizer + cut, ~285 MB). Advanced: `ONNXRUNTIME_DLL` points
+the cut at an existing runtime, `SEAMAESTRO_RUNTIME_DIR` moves the unpack
+location, `SEAMAESTRO_RUNTIME_VERIFY=1` re-checks the unpacked files.
+
+**Background cut: cleaner edges by default (`--cut`)** — the matte keeps the raw
+model alpha instead of the old hard levels curve, so soft masks (fur, thin hair,
+fabric) no longer turn into speckle and the light rim around the subject is
+gone. The old look is one flag away: `--hard`. The new default is also cheaper
+to store: +2…5 % PNG instead of up to +445 % without the edge cleanup.
+
+**Edge colour blend** — the de-fringe estimate is now mixed with the original
+pixel colour (75 / 25) instead of replacing it. On the reference frame the
+letter edges went from a dark outline to neutral: edge bias −6.65 → −0.17,
+rim −40.8 → −4.2, band speckle 7433 → 4444, PNG 822 → 795 KB.
+
+**EXIF-safe cut** — rotated photos (phone JPEGs with an Orientation tag) are
+oriented before the model sees them. Measured on a rotated frame: 27.9 % of the
+alpha was wrong before, 0.00 % after (3 pixels, JPEG re-encode noise).
+
+**Faster batches** — the inference session is locked only while the model runs;
+the edge cleanup now happens on the CPU while the GPU computes the next frame.
+The memory budget also accounts for the cut stage, so a batch cannot
+over-allocate: peak RSS on 10 × 4000×3000 photos is 5.8 GB (6.3 s per frame).
+
+**One-word command line** — every visible flag is a single word: `--nopause`,
+`--exif`, `--soft`, `--hard`, `--plain`, `--nocut`, `--threads` (total cores).
+The old spellings (`--no-pause`, `--keep-exif`, `--raw-alpha`,
+`--no-de-fringe`) keep working as hidden aliases, so existing scripts and batch
+files are safe. A unit test keeps the rule from regressing.
+
+**Cut help in 8 languages** — the whole CUT section (and the renamed flags) is
+localized for en, ru, uk, de, es, fr, el, fil, with one line per flag.
+
+**The executable name is a config** — `SeaMaestroCut.exe photo.jpg` cuts,
+`..._png.exe` picks PNG, `..._hard.exe` the hard edge, `..._nocut.exe` resizes
+only. New: the name is also honoured when command-line flags are present
+(`SeaMaestroCut.exe --nopause photo.jpg` still cuts; `SeaMaestroCut_png.exe
+--cut` now produces PNG instead of a JPEG error).
+
+## 🐛 Bug Fixes
+
+**PDF and SVG fast paths skipped the cut** — `--cut --format pdf` (and the
+vector SVG path) could pass the original images through without removing the
+background. Both paths now respect `--cut`.
+
+**Colour typos failed late** — `--bg whiet` used to load the model first and
+fail at the end; now it is rejected in about a second, before any work starts.
+`--bg none` with a format that cannot store transparency is rejected too,
+instead of silently compositing onto white.
+
+**A crash no longer kills the batch** — if inference panics, the session is
+rebuilt for the next file instead of poisoning every remaining file.
+
+**Exe-name parsing is transactional** — a name that only partially parses no
+longer applies half of its settings.
+
+**`--merge` help** — the merge description is now translated in all 8 languages.
+
+## 🔔 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED
+SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED
+Size: TO_BE_FILLED MB (PE executable, 64-bit)
+
+The release contains two files: `SeaMaestro.exe` (resizer) and
+`SeaMaestroCut.exe` (resizer + background cut). The cut build writes its
+inference runtime into `%LOCALAPPDATA%\SeaMaestro\ort\` on first use; an
+unsigned executable that drops DLLs can trip antivirus heuristics — if the cut
+fails to start, check Windows Security → Protection history.
+
+License
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
 ## SeaMaestro v2.5.2
 
 ## 🧹 Maintenance
@@ -15,8 +102,9 @@ bit-identical to v2.5.1.
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
 publisher" warning on first run.
 
-SHA-256 and size are filled in after the CI build (`checksums.txt` in the
-release assets).
+VirusTotal — clean: 0/70 security vendors flagged the file.
+SHA-256: 8435ee87dea57fd77c50a808c3ee30a362b10e3a21ba13845c90eff4926acd89
+Size: 33.41 MB (PE executable, 64-bit)
 
 License
 MIT. See LICENSE and THIRD_PARTY_LICENSES.md.

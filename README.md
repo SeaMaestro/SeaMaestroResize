@@ -40,8 +40,15 @@ the whole workflow.
   (output lands next to the program).
 - **Quality control** for lossy formats, lossless WebP/JXL/PDF, progressive JPEG.
 - **Grayscale** (`--bw`), **sharpen** (`--sharpen`), and **Smart Scan** (`--scan`).
+- **Background cut** (`SeaMaestroCut.exe`, `--cut`): AI matting (BEN2) on the GPU
+  via DirectML. The inference runtime (~38 MB) is embedded in the executable and
+  unpacks once into `%LOCALAPPDATA%\SeaMaestro\ort\` — nothing is installed and
+  no DLL sits next to the program.
+- **Two cut looks**: `--soft` (default, raw model alpha — best for photos) and
+  `--hard` (crisp, old look — best for flat art, logos and screenshots), plus
+  `--plain` to keep the raw edge colour without the halo cleanup.
 - **ICC color profile passthrough** for JPEG, PNG, JXL, WebP, TIFF, AVIF.
-- **EXIF passthrough** (`--keep-exif`) with orientation normalization and
+- **EXIF passthrough** (`--exif`) with orientation normalization and
   resized pixel-dimension update; EXIF is cleared by default.
 - **Auto-rotation** from EXIF `Orientation`.
 - **Drag-and-drop / EXE rename**: bake settings into the executable name.
@@ -71,7 +78,7 @@ the whole workflow.
 **Metadata**
 
 - ICC color profiles are preserved for `JPEG`, `PNG`, `JXL`, `WEBP`, `TIFF`, `AVIF`.
-- EXIF is preserved only with `--keep-exif`. It is read from `JPEG`, `PNG`,
+- EXIF is preserved only with `--exif`. It is read from `JPEG`, `PNG`,
   `WEBP`, `JXL`, `AVIF`, `HEIC/HEIF` and written to `JPEG`, `PNG`, `WEBP`,
   `JXL`, `AVIF`.
 
@@ -116,6 +123,35 @@ rustflags = ["-C", "target-feature=+crt-static"]
 
 Output: `target/release/SeaMaestro.exe`
 
+### Two builds
+
+`build_release.bat` builds the resizer, `build_cut.bat` builds both. The cut
+build needs the model and the inference runtime, which are **not** stored in the
+repository:
+
+```bat
+build_release.bat                 -> dist\SeaMaestro.exe (resizer only)
+build_cut.bat                     -> dist\SeaMaestro.exe + dist\SeaMaestroCut.exe
+build_cut.bat models\Other.onnx   -> the same, with another model
+```
+
+Pinned inputs (their SHA-256 is verified on every CI build):
+
+- `models\BEN2_Base.onnx` — BEN2 matting model (MIT),
+  <https://huggingface.co/PramaLLC/BEN2> — 222 932 053 B, sha256
+  `22cea62108ff53b7ccc20f7a008bf30494228d84b1687f29ecbe76936a998101`
+- `runtime\onnxruntime.dll`, `runtime\DirectML.dll`,
+  `runtime\onnxruntime_providers_shared.dll` — the runtime that is embedded into
+  the cut build (the `runtime\` folder of this repository)
+
+Both executables carry the same version, but their file metadata differs:
+`SeaMaestroCut.exe` reports *SeaMaestro Multiformat Image Resizer + Background
+Cut*, so the two builds can be told apart in Explorer.
+
+GitHub Actions builds both: run the `CI` workflow manually to get the two
+binaries with their SHA-256 in the job summary and as artifacts; pushing a `v*`
+tag creates a release with both files and `checksums.txt`.
+
 ## Usage
 
 ```text
@@ -135,10 +171,17 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--sharpen` | Sharpen after resize (sigma=1.0, threshold=3) |
 | `--scan` | Smart Scan filter for document photos: flatten lighting, white background, keep colored stamps (combine with `--format pdf`/`--merge`) |
 | `--crop` | Auto-crop & deskew: detect the document, straighten perspective, crop background |
-| `--keep-exif` | Keep EXIF metadata (cleared by default) |
+| `--cut` | Background cut (cut build): remove the background, keep transparency |
+| `--soft` | Soft edge — raw model alpha, the recommended default (alias `--raw-alpha`) |
+| `--hard` | Hard edge (old look): crisp on flat art, logos and screenshots (alias `--alpha-levels`) |
+| `--plain` | Keep the raw edge colour: no halo/de-fringe cleanup (alias `--no-de-fringe`) |
+| `--nocut` | Resize only, even when the exe name or a flag asks for a cut |
+| `--tile` | Tiled inference for very large frames (off by default) |
+| `--ep <auto\|cpu\|dml>` | Inference provider for the cut: auto (default), CPU, DirectML |
+| `--exif` | Keep EXIF metadata (cleared by default) |
 | `--merge` | One PDF per folder, mirroring the tree (Path Compression; implies `--format pdf`) |
 | `--output <FILE>` | Output file name/path (single file only) |
-| `--no-pause` | Do not wait for Enter on exit |
+| `--nopause` | Do not wait for Enter on exit |
 | `--shanty` | Sea shanties while working |
 | `--lang <CODE>` | en, ru, uk, de, es, fr, el, fil |
 | `--help` | Show help |

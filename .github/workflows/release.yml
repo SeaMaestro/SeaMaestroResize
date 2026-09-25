@@ -71,31 +71,76 @@ jobs:
         shell: pwsh
         run: Add-Content -Path $env:GITHUB_PATH -Value "C:\vcpkg\installed\x64-windows-static\tools\pkgconf"
 
-      - name: Build
-        run: cargo build --release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: SeaMaestro_${{ github.ref_name }}
-          path: target/release/SeaMaestro.exe
-          archive: false
-          if-no-files-found: error
-
-      - name: Compute SHA-256
+      - name: Verify pinned runtime DLLs
         shell: pwsh
         run: |
-          $hash = (Get-FileHash "target/release/SeaMaestro.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  SeaMaestro.exe" | Out-File -FilePath checksums.txt -Encoding ascii
+          $want = @{
+            'runtime\onnxruntime.dll'                  = '3153de3c4f0a98a3dda5351f2561219cd75c42af7c8a8dd6db8ed17b6d22697a'
+            'runtime\DirectML.dll'                     = '13af15778e6e587169e5990ce8c51fd9964ca7ece8000df2a8b4f6b3fbd5f34a'
+            'runtime\onnxruntime_providers_shared.dll' = 'd7ca6ef9dc3689bfcf24625139722f660add057945890ac7f50c43184e5cbce3'
+          }
+          foreach ($rel in $want.Keys) {
+            if (-not (Test-Path -LiteralPath $rel)) { throw "missing in the repository: $rel" }
+            $got = (Get-FileHash -LiteralPath $rel -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $want[$rel]) { throw "runtime DLL hash mismatch: $rel`nwant $($want[$rel])`ngot  $got" }
+            Write-Host "pinned ok: $rel"
+          }
 
-      - name: Extract current release notes
+      - name: Fetch BEN2_Base.onnx from the pinned upstream revision (MIT)
         shell: pwsh
         run: |
+          $url = 'https://huggingface.co/PramaLLC/BEN2/resolve/e48a20765fb421d19dcdb0bf3cc61e802ca5ec8f/BEN2_Base.onnx'
+          $want = '22cea62108ff53b7ccc20f7a008bf30494228d84b1687f29ecbe76936a998101'
+          $tmp = Join-Path $env:RUNNER_TEMP 'BEN2_Base.onnx'
+          curl.exe -L --fail --retry 3 --retry-delay 5 -o $tmp $url
+          if ($LASTEXITCODE -ne 0) { throw "model download failed: $url" }
+          $got = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $want) { throw "model hash mismatch`nwant $want`ngot  $got" }
+          New-Item -ItemType Directory -Force -Path models | Out-Null
+          Copy-Item -LiteralPath $tmp -Destination 'models\BEN2_Base.onnx' -Force
+          Remove-Item -LiteralPath $tmp -Force
+          Write-Host "model verified: $((Get-Item 'models\BEN2_Base.onnx').Length) bytes, $got"
+
+      - name: Clean the crate so the verified inputs are embedded for real
+        run: cargo clean -p SeaMaestro
+
+      - name: Build light and cut executables
+        shell: cmd
+        run: build_cut.bat
+
+      - name: Assert the two builds are distinguishable
+        shell: pwsh
+        run: |
+          $light = (Get-Item 'dist\SeaMaestro.exe').VersionInfo
+          $cut = (Get-Item 'dist\SeaMaestroCut.exe').VersionInfo
+          if ($light.FileDescription -match 'Background Cut') { throw "light exe claims Background Cut: $($light.FileDescription)" }
+          if ($light.OriginalFilename -ne 'SeaMaestro.exe') { throw "light exe metadata is wrong: $($light.OriginalFilename)" }
+          if ($cut.FileDescription -notmatch 'Background Cut') { throw "cut exe metadata is not differentiated: $($cut.FileDescription)" }
+          if ($cut.OriginalFilename -ne 'SeaMaestroCut.exe') { throw "cut exe metadata is not differentiated: $($cut.OriginalFilename)" }
+          Write-Host 'metadata ok'
+          Write-Host "  light: $($light.FileDescription) | $($light.OriginalFilename)"
+          Write-Host "  cut:   $($cut.FileDescription) | $($cut.OriginalFilename)"
+
+      - name: Checksums and release notes with the real hashes
+        shell: pwsh
+        run: |
+          $light = (Get-FileHash 'dist\SeaMaestro.exe' -Algorithm SHA256).Hash.ToLower()
+          $cut = (Get-FileHash 'dist\SeaMaestroCut.exe' -Algorithm SHA256).Hash.ToLower()
+          $lightMb = [math]::Round((Get-Item 'dist\SeaMaestro.exe').Length / 1MB, 2)
+          $cutMb = [math]::Round((Get-Item 'dist\SeaMaestroCut.exe').Length / 1MB, 2)
+          "$light  SeaMaestro.exe" | Out-File -FilePath checksums.txt -Encoding ascii
+          "$cut  SeaMaestroCut.exe" | Out-File -FilePath checksums.txt -Append -Encoding ascii
           $content = Get-Content release_notes.md -Raw -Encoding utf8
           $top = ($content -split '(?m)^---[ \t]*\r?$')[0].Trim()
+          $top = $top.Replace('SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED', "SHA-256 (light build, SeaMaestro.exe): $light")
+          $top = $top.Replace('SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED', "SHA-256 (cut build, SeaMaestroCut.exe): $cut")
+          $top = $top.Replace('Size: TO_BE_FILLED MB (PE executable, 64-bit)', "Size: $lightMb MB (light) / $cutMb MB (cut), PE executable, 64-bit")
+          if ($top -match 'TO_BE_FILLED') { throw 'release notes still contain TO_BE_FILLED placeholders' }
           $top | Out-File -FilePath release_notes_current.md -Encoding utf8
+          Get-Content checksums.txt | Write-Host
+          Get-Content release_notes_current.md | Select-String 'SHA-256|^Size:' | Write-Host
 
       - name: Create GitHub Release
-        run: gh release create "${{ github.ref_name }}" --title "SeaMaestro ${{ github.ref_name }}" --notes-file release_notes_current.md "target/release/SeaMaestro.exe#SeaMaestro_${{ github.ref_name }}.exe" "checksums.txt"
+        run: gh release create "${{ github.ref_name }}" --title "SeaMaestro ${{ github.ref_name }}" --notes-file release_notes_current.md "dist/SeaMaestro.exe#SeaMaestro_${{ github.ref_name }}.exe" "dist/SeaMaestroCut.exe#SeaMaestroCut_${{ github.ref_name }}.exe" "checksums.txt"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
