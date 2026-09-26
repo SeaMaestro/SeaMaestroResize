@@ -19,6 +19,8 @@ env:
 jobs:
   build:
     runs-on: windows-2022
+    env:
+      VT_API_KEY: ${{ secrets.VT_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -135,6 +137,8 @@ jobs:
           $top = $top.Replace('SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED', "SHA-256 (light build, SeaMaestro.exe): $light")
           $top = $top.Replace('SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED', "SHA-256 (cut build, SeaMaestroCut.exe): $cut")
           $top = $top.Replace('Size: TO_BE_FILLED MB (PE executable, 64-bit)', "Size: $lightMb MB (light) / $cutMb MB (cut), PE executable, 64-bit")
+          $top = $top.Replace('VirusTotal (light build): TO_BE_FILLED', "VirusTotal (light build): https://www.virustotal.com/gui/file/$light")
+          $top = $top.Replace('VirusTotal (cut build): TO_BE_FILLED', "VirusTotal (cut build): https://www.virustotal.com/gui/file/$cut")
           if ($top -match 'TO_BE_FILLED') { throw 'release notes still contain TO_BE_FILLED placeholders' }
           $top | Out-File -FilePath release_notes_current.md -Encoding utf8
           Get-Content checksums.txt | Write-Host
@@ -144,3 +148,40 @@ jobs:
         run: gh release create "${{ github.ref_name }}" --title "SeaMaestro ${{ github.ref_name }}" --notes-file release_notes_current.md "dist/SeaMaestro.exe#SeaMaestro_${{ github.ref_name }}.exe" "dist/SeaMaestroCut.exe#SeaMaestroCut_${{ github.ref_name }}.exe" "checksums.txt"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: VirusTotal scan of the released executables
+        id: vt
+        if: ${{ always() && env.VT_API_KEY != '' }}
+        continue-on-error: true
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ env.VT_API_KEY }}
+          request_rate: 4
+          files: |
+            dist/SeaMaestro.exe
+            dist/SeaMaestroCut.exe
+
+      - name: Append the VirusTotal links to the release
+        if: ${{ always() && env.VT_API_KEY != '' && steps.vt.outcome == 'success' && steps.vt.outputs.analysis != '' }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $lines = foreach ($pair in '${{ steps.vt.outputs.analysis }}'.Split(',')) {
+            $parts = $pair.Split('=', 2)
+            if ($parts.Count -eq 2) { '- `' + $parts[0].Trim() + '` -> ' + $parts[1].Trim() }
+          }
+          if (-not $lines) { Write-Host 'no analysis links returned'; exit 0 }
+          $body = gh release view $tag --json body -q .body
+          $file = Join-Path $env:RUNNER_TEMP 'release_body.md'
+          ($body + "`n`n### 🧪 VirusTotal`n`n" + ($lines -join "`n") + "`n") | Out-File -FilePath $file -Encoding utf8
+          gh release edit $tag --notes-file $file
+          Write-Host $lines
+
+      - name: Report the VirusTotal outcome
+        if: ${{ always() && env.VT_API_KEY == '' }}
+        shell: pwsh
+        run: |
+          Write-Host 'VT_API_KEY secret is not set - the VirusTotal scan was skipped.'
+          Write-Host 'The release itself is complete; the VirusTotal links in the notes are derived from the hashes.'

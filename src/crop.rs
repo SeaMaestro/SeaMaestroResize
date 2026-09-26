@@ -628,8 +628,7 @@ fn sheet_band_max_index(hyp: &[Hypothesis], w: f32, h: f32) -> Option<usize> {
     let mut area = 0.0f32;
     for (i, c) in hyp.iter().enumerate() {
         let a = quad_aspect(&c.quad);
-        if a >= SHEET_BAND_ASPECT_MIN
-            && a <= SHEET_BAND_ASPECT_MAX
+        if (SHEET_BAND_ASPECT_MIN..=SHEET_BAND_ASPECT_MAX).contains(&a)
             && c.area_ratio > area
             && sheet_widen_ok(&c.quad, c.area_ratio, w, h)
         {
@@ -910,6 +909,7 @@ struct EdgeRefineStats {
     ratio_hi: f32,
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn refine_pick_by_ray_edge_scaled(
     luma: &[u8],
     w: usize,
@@ -1058,9 +1058,9 @@ fn refine_pick_by_ray_edge_scaled(
         }
         let mut same = 0usize;
         let mut tot = 0usize;
-        for i in best_t as usize..=n {
+        for p in &prof[best_t as usize..=n] {
             tot += 1;
-            if (prof[i] - best_in).abs() <= tail_lim {
+            if (p - best_in).abs() <= tail_lim {
                 same += 1;
             }
         }
@@ -1399,6 +1399,7 @@ fn fmt_pts(pts: &[(f32, f32)]) -> String {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_poly_hypotheses(
     source: &'static str,
     w: usize,
@@ -1506,6 +1507,7 @@ fn push_poly_hypotheses(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_quad(
     quad: [(f32, f32); 4],
     source: &'static str,
@@ -1857,6 +1859,7 @@ fn edge_mask_out(q: &[(f32, f32); 4], mask: &[u8], w: usize, h: usize) -> f32 {
 /// Debug probe on the FULL-resolution frame: how much thin dark ink of the base quad falls in the
 /// ring between `base` (legacy winner) and `pick` (region winner), plus the median brightness step
 /// across the picked border (a paper edge steps hard, an inner cut has paper on both sides).
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn ring_ink_probe(
     full: &[u8],
     fw: usize,
@@ -2954,6 +2957,7 @@ fn warp_degeneracy(h: &[f32; 9], dw: f32, dh: f32) -> (f32, f32) {
     (denom_min, jac_min)
 }
 
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::DynamicImage> {
     let top = dist(corners[0], corners[1]);
     let bottom = dist(corners[2], corners[3]);
@@ -4075,8 +4079,13 @@ mod tests {
     fn warp_has_single_call_site() {
         let src = include_str!("crop.rs");
         let production = src.split("#[cfg(test)]").next().unwrap_or(src);
-        let hits = production.lines().filter(|l| l.contains("warp(")).count();
-        assert_eq!(hits, 2, "expected one definition and one call site, got {hits}");
+        let calls = production.lines().filter(|l| l.contains("warp(&")).count();
+        let defs = production
+            .lines()
+            .filter(|l| l.trim_start().starts_with("fn warp("))
+            .count();
+        assert_eq!(calls, 1, "expected a single warp( call site, got {calls}");
+        assert_eq!(defs, 1, "expected a single warp( definition, got {defs}");
     }
 
     #[test]

@@ -216,12 +216,18 @@ jobs:
           "|---|---|---|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
           $rows | ForEach-Object { "| $($_.file) | $($_.mb) MB | ``$($_.sha256)`` |" } | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
-      - name: Upload light and cut executables
+      - name: Upload the light executable
         uses: actions/upload-artifact@v7
         with:
-          name: SeaMaestro_${{ github.ref_name }}_light_and_cut
-          path: |
-            dist/SeaMaestro.exe
-            dist/SeaMaestroCut.exe
+          name: SeaMaestro_${{ github.ref_name }}_light
+          path: dist/SeaMaestro.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload the cut executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: SeaMaestro_${{ github.ref_name }}_cut
+          path: dist/SeaMaestroCut.exe
           archive: false
           if-no-files-found: error

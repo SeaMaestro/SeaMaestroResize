@@ -61,10 +61,13 @@ fn build_session(ep_choice: u8, threads: usize) -> Result<(Session, &'static str
     match create_session(true, threads) {
         Ok(session) => Ok((session, "DirectML")),
         Err(err) if ep_choice == EP_DML => {
-            Err(err.context("--ep dml requested, but the DirectML backend is unavailable"))
+            Err(err.context(crate::msg().err_dml_requested))
         }
         Err(err) => {
-            eprintln!("  note: DirectML unavailable, falling back to the CPU ({err:#})");
+            eprintln!(
+                "{}",
+                crate::msg().note_dml_fallback.replacen("{}", &format!("{err:#}"), 1)
+            );
             Ok((create_session(false, threads)?, "CPU (DirectML fallback)"))
         }
     }
@@ -338,19 +341,19 @@ fn apply_de_fringe(rgba: &mut RgbaImage, radius: usize) {
     let mut channels = [vec![0f32; pixels], vec![0f32; pixels], vec![0f32; pixels]];
     for (index, pixel) in rgba.pixels().enumerate() {
         alpha[index] = pixel.0[3] as f32 / 255.0;
-        for channel in 0..3 {
-            channels[channel][index] = pixel.0[channel] as f32 / 255.0;
+        for (channel, value) in pixel.0.iter().take(3).enumerate() {
+            channels[channel][index] = *value as f32 / 255.0;
         }
     }
     for channel in channels.iter_mut() {
         *channel = refine_channel(channel, &alpha, width, height, radius);
     }
     for (index, pixel) in rgba.pixels_mut().enumerate() {
-        for channel in 0..3 {
-            let original = pixel.0[channel] as f32 / 255.0;
+        for (channel, value) in pixel.0.iter_mut().take(3).enumerate() {
+            let original = *value as f32 / 255.0;
             let refined = channels[channel][index];
             let blended = original * (1.0 - DE_FRINGE_BLEND) + refined * DE_FRINGE_BLEND;
-            pixel.0[channel] = (blended.clamp(0.0, 1.0) * 255.0).round() as u8;
+            *value = (blended.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
     }
 }
@@ -403,10 +406,10 @@ fn init_ort() -> Result<()> {
         if let Some(dir) = path.parent() {
             let beside = |name: &str| dir.join(name).is_file();
             if !beside("onnxruntime_providers_shared.dll") {
-                eprintln!("note: onnxruntime_providers_shared.dll is missing next to the runtime; the GPU backend may fail to load");
+                eprintln!("{}", crate::msg().note_providers_shared_missing);
             }
             if !beside("DirectML.dll") && !has_directml_in_system() {
-                eprintln!("note: DirectML.dll is in neither the runtime folder nor the system directory; --ep dml will fail and --ep auto will fall back to the CPU");
+                eprintln!("{}", crate::msg().note_directml_missing);
             }
         }
         match init_from(&path) {
@@ -415,8 +418,10 @@ fn init_ort() -> Result<()> {
         }
     }
     bail!(
-        "cannot load the inference runtime ({}). Set SEAMAESTRO_RUNTIME_DIR to a writable folder, set ONNXRUNTIME_DLL to an existing onnxruntime.dll, or place onnxruntime.dll, DirectML.dll and onnxruntime_providers_shared.dll next to the executable",
-        failures.join(" | ")
+        "{}",
+        crate::msg()
+            .err_cut_runtime_load
+            .replacen("{}", &failures.join(" | "), 1)
     )
 }
 
@@ -438,8 +443,12 @@ fn finish_frame(logits: Vec<f32>, img: &DynamicImage, de_fringe: bool, raw_alpha
             apply_de_fringe(&mut rgba, de_fringe_radius(max_side));
         } else {
             eprintln!(
-                "note: de-fringe skipped, frame {}x{} exceeds {} px",
-                width, height, crate::CUT_MAX_FRINGE_SIDE
+                "{}",
+                crate::msg()
+                    .note_de_fringe_skipped
+                    .replacen("{}", &width.to_string(), 1)
+                    .replacen("{}", &height.to_string(), 1)
+                    .replacen("{}", &crate::CUT_MAX_FRINGE_SIDE.to_string(), 1)
             );
         }
     }
@@ -474,19 +483,30 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
             let started = Instant::now();
             let (session, backend) = build_session(config.ep, config.threads)?;
             eprintln!(
-                "  {} | model {} | session ready in {:.1}s",
-                backend,
-                model_name(),
-                started.elapsed().as_secs_f64()
+                "{}",
+                crate::msg()
+                    .session_ready
+                    .replacen("{}", backend, 1)
+                    .replacen("{}", model_name(), 1)
+                    .replacen("{}", &format!("{:.1}", started.elapsed().as_secs_f64()), 1)
             );
+            let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+            let effective_threads = if config.threads == 0 { cores } else { config.threads };
+            if backend.starts_with("CPU") && effective_threads <= 2 {
+                eprintln!("  {}", crate::msg().note_cut_cpu_slow);
+            }
             *guard = Some(session);
         }
         let session = guard.as_mut().expect("session is initialized above");
         let (logits, tiles) = frame_logits(session, img, config.tile)?;
         if tiles > 1 {
             eprintln!(
-                "  note: {} tiles of {} px, overlap {} px",
-                tiles, INPUT_SIZE, TILE_OVERLAP
+                "{}",
+                crate::msg()
+                    .note_tiles
+                    .replacen("{}", &tiles.to_string(), 1)
+                    .replacen("{}", &INPUT_SIZE.to_string(), 1)
+                    .replacen("{}", &TILE_OVERLAP.to_string(), 1)
             );
         }
         logits

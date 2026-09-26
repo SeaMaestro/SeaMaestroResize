@@ -104,7 +104,10 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         return None;
     }
     let budget = mem_budget();
-    budget.acquire(vec_need);
+    if !budget.acquire(vec_need) {
+        eprintln!("  {}", crate::msg().note_mem_skip);
+        return None;
+    }
     let _permit = MemPermit { budget, need: vec_need };
 
     let fontdb = tree.fontdb();

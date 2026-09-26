@@ -174,6 +174,14 @@ fn chroma_denoise(buf: &mut [u8], w: usize, h: usize, ch: usize, r: usize) {
     }
     let stride = w * ch;
 
+    let need = (w as u64).saturating_mul(h as u64).saturating_mul(5);
+    let budget = crate::decode::mem_budget();
+    if !budget.acquire(need) {
+        eprintln!("  {}", crate::msg().note_mem_skip);
+        return;
+    }
+    let _permit = crate::decode::MemPermit { budget, need };
+
     let mut luma_map = vec![0u8; w * h];
     for y in 0..h {
         let row = &buf[y * stride..(y + 1) * stride];

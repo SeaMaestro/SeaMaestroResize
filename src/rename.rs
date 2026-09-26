@@ -1,10 +1,19 @@
 use std::env;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::Result;
 use regex::Regex;
 
 use crate::{lang::Lang, Config, ImageFormat, Size};
+
+static IGNORED_TOKENS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub(crate) fn ignored_tokens() -> Vec<String> {
+    IGNORED_TOKENS
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default()
+}
 
 pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
     let t = token.to_lowercase();
@@ -55,6 +64,22 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
                 config.target_size = Some(Size::Height(h));
                 return true;
             }
+        }
+    }
+
+    if let Some(rest) = t.strip_prefix('l') {
+        if let Ok(n) = rest.parse::<u32>() {
+            if n > 0 {
+                config.target_size = Some(Size::LongEdge(n));
+                return true;
+            }
+        }
+    }
+
+    if let Some(rest) = t.strip_prefix("bg") {
+        if !rest.is_empty() && crate::bgcolor::parse_color(rest).is_ok() {
+            config.bg_color = Some(rest.to_string());
+            return true;
         }
     }
 
@@ -178,6 +203,7 @@ impl Config {
 
         let tokens = stem_tokens(&stem);
 
+        let mut ignored: Vec<String> = Vec::new();
         for token in &tokens {
             if try_apply_single(&mut config, token) {
                 continue;
@@ -185,6 +211,10 @@ impl Config {
             if decompose_and_apply(&mut config, token) {
                 continue;
             }
+            ignored.push(token.clone());
+        }
+        if let Ok(mut guard) = IGNORED_TOKENS.lock() {
+            *guard = ignored;
         }
 
         Ok(config)

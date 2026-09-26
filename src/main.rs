@@ -672,6 +672,14 @@ fn run() -> Result<Config> {
     if config.merge {
         config.format = ImageFormat::Pdf;
     }
+    if config.cut && !config.format.carries_alpha() && config.bg_color.is_none() {
+        config.bg_color = Some("white".to_string());
+        eprintln!("  {}", msg().note_drop_bg_white);
+    }
+    let unknown = rename::ignored_tokens();
+    if !unknown.is_empty() {
+        eprintln!("  {}", msg().note_unknown_tokens.replacen("{}", &unknown.join(", "), 1));
+    }
     #[cfg(not(feature = "bg"))]
     if config.cut {
         eprintln!("  {}\n", msg().err_cut_unsupported);
@@ -1349,9 +1357,8 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         if let Some(idx) = easter_index(&fl) {
             eprintln!("  {}", m.easter[idx]);
         }
-        if let Err(e) = result {
+        if result.is_err() {
             errors += 1;
-            eprintln!("  MAYDAY! {} — {}", input.file_name().unwrap_or_default().to_string_lossy(), e);
         }
     }
 
@@ -1385,7 +1392,9 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     }
     eprintln!("  {}", m.output_label.replacen("{}", &output_base.display().to_string(), 1));
     eprintln!("  {}", random_funny_message());
-    HAD_ERRORS.store(errors > 0, Ordering::Relaxed);
+    if errors > 0 {
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+    }
 }
 
 // ── build_suffix ──────────────────────────────────────────────
@@ -1697,7 +1706,13 @@ fn run_pipeline(
     let need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config)
         .saturating_add(raw.len() as u64);
     let budget = mem_budget();
-    budget.acquire(need);
+    if !budget.acquire(need) {
+        anyhow::bail!(
+            "{}",
+            msg().err_mem_too_large
+                .replacen("{}", &(need / (1024 * 1024)).to_string(), 1)
+        );
+    }
     let _permit = MemPermit { budget, need };
     let mut decoded = smart_decode(raw, config, path, svg, svg_render, &preflight, jxl)?;
     let orient = !is_svg && !is_heif(raw);
@@ -1734,7 +1749,13 @@ fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
         anyhow::bail!("{}", msg().err_too_large.replacen("{}", &path.display().to_string(), 1));
     }
     let budget = mem_budget();
-    budget.acquire(len);
+    if !budget.acquire(len) {
+        anyhow::bail!(
+            "{}",
+            msg().err_mem_too_large
+                .replacen("{}", &(len / (1024 * 1024)).to_string(), 1)
+        );
+    }
     let permit = MemPermit { budget, need: len };
     let raw = fs::read(path).with_context(|| msg().err_read.replacen("{}", &path.display().to_string(), 1))?;
     Ok((raw, permit))
@@ -1751,6 +1772,9 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
     };
     if path_key(&out_path) == path_key(input) {
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
+    }
+    if fs_path(&out_path).is_dir() {
+        anyhow::bail!("{}", msg().err_output_is_dir.replacen("{}", &out_path.display().to_string(), 1));
     }
 
     let svg = if looks_like_svg(&raw) {
@@ -1817,7 +1841,7 @@ fn apply_resize(img: image::DynamicImage, size: &Size) -> image::DynamicImage {
             tmp.crop_imm(x, y, *tw, *th)
         }
         Size::LongEdge(n) => {
-            if *n >= img.width().max(img.height()) {
+            if *n == img.width().max(img.height()) {
                 img
             } else if img.width() >= img.height() {
                 let h = ((img.height() as f64 * *n as f64 / img.width() as f64) as u32).max(1);
@@ -1848,7 +1872,7 @@ fn svg_target_dims(native: (u32, u32), size: Option<&Size>) -> ((u32, u32), bool
             ((w, *th), true)
         }
         Some(Size::LongEdge(n)) => {
-            if *n >= nw.max(nh) {
+            if *n == nw.max(nh) {
                 ((nw, nh), true)
             } else if nw >= nh {
                 let h = ((nh as f64 * *n as f64 / nw as f64) as u32).max(1);
@@ -2105,6 +2129,9 @@ fn banner(config: &Config) {
     }
     eprintln!("  ╚{}╝", top);
     if config.shanty { eprintln!("  {}", next_shanty()); }
+    if matches!(config.format, ImageFormat::Avif) && !crate::encode::avx2_available() {
+        eprintln!("  {}", msg().warn_avif_no_avx2);
+    }
     eprintln!();
 }
 
@@ -2256,7 +2283,7 @@ fn merge_chunk_len(total: usize, config: &Config) -> usize {
         8 * 1024 * 1024
     };
     let n = (budget / per_page) as usize;
-    n.clamp(1, total)
+    n.clamp(1, total.max(1))
 }
 
 fn cap_name_parts(parts: &[String]) -> String {
@@ -2473,10 +2500,6 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
         pb.finish_and_clear();
     }
 
-    for (name, e) in &error_list {
-        eprintln!("  MAYDAY! {} — {}", name, e);
-    }
-
     let m = msg();
     let in_total = stat_in.load(Ordering::Relaxed);
     let out_total = stat_out.load(Ordering::Relaxed);
@@ -2522,7 +2545,9 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
     }
 
     eprintln!("  {}", random_funny_message());
-    HAD_ERRORS.store(!error_list.is_empty(), Ordering::Relaxed);
+    if !error_list.is_empty() {
+        HAD_ERRORS.store(true, Ordering::Relaxed);
+    }
 }
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {

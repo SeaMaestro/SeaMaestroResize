@@ -20,7 +20,7 @@ fn write_jpeg_exif(comp: &mut mozjpeg::compress::CompressStarted<Vec<u8>>, blob:
 
 fn png_embed_exif(png: Vec<u8>, exif: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(png.len() + exif.len() + 12);
-    out.extend_from_slice(&png[..33]);
+    out.extend_from_slice(png.get(..33).unwrap_or(&png));
     out.extend_from_slice(&(exif.len() as u32).to_be_bytes());
     out.extend_from_slice(b"eXIf");
     out.extend_from_slice(exif);
@@ -28,7 +28,7 @@ fn png_embed_exif(png: Vec<u8>, exif: &[u8]) -> Vec<u8> {
     hasher.update(b"eXIf");
     hasher.update(exif);
     out.extend_from_slice(&hasher.finalize().to_be_bytes());
-    out.extend_from_slice(&png[33..]);
+    out.extend_from_slice(png.get(33..).unwrap_or(&[]));
     out
 }
 
@@ -217,6 +217,17 @@ unsafe extern "C" fn noop_svt_log(
 ) {
 }
 
+pub(crate) fn avx2_available() -> bool {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        std::arch::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        true
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn encode_avif_raw(
     pixels: &[u8],
@@ -228,6 +239,9 @@ fn encode_avif_raw(
     icc: Option<&[u8]>,
     exif: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
+    if !avx2_available() {
+        anyhow::bail!("{}", msg().warn_avif_no_avx2);
+    }
     unsafe {
         svt_av1_set_log_callback(Some(noop_svt_log), std::ptr::null_mut());
         let encoder = avifEncoderCreate();
@@ -486,7 +500,7 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, channels: u32, quality: u8, lossle
             if res == JxlEncoderStatus_JXL_ENC_ERROR {
                 anyhow::bail!("JXL encode failed: JxlEncoderProcessOutput: {}", res);
             }
-            chunk = chunk.saturating_mul(2);
+            chunk = chunk.saturating_mul(2).min(16 * 1024 * 1024);
         }
         Ok(output)
     }

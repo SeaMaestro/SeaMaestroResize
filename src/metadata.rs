@@ -124,7 +124,7 @@ pub(crate) fn normalize_exif(mut blob: Vec<u8>, w: u32, h: u32) -> Option<Vec<u8
     }
     let n = read16(&blob, ifd0, little)? as usize;
     let entries_end = ifd0.checked_add(2)?.checked_add(n.checked_mul(12)?)?;
-    if entries_end > blob.len() {
+    if entries_end + 4 > blob.len() {
         return None;
     }
     let mut exif_ifd: Option<usize> = None;
@@ -162,7 +162,7 @@ pub(crate) fn normalize_exif(mut blob: Vec<u8>, w: u32, h: u32) -> Option<Vec<u8
     if let Some(ifd1) = exif_ifd {
         let n1 = read16(&blob, ifd1, little)? as usize;
         let end1 = ifd1.checked_add(2)?.checked_add(n1.checked_mul(12)?)?;
-        if end1 > blob.len() {
+        if end1 + 4 > blob.len() {
             return None;
         }
         for i in 0..n1 {

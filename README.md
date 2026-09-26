@@ -1,6 +1,6 @@
 # SeaMaestro
 
-🔱 Multiformat image resizer and converter for Windows.
+🔱 Multiformat image resizer and converter + Background remover (SeaMaestroCut.exe) for Windows.
 A single static executable — no installer, no external DLLs, no MSVC runtime.
 Download, run, done.
 
@@ -82,6 +82,21 @@ the whole workflow.
   `WEBP`, `JXL`, `AVIF`, `HEIC/HEIF` and written to `JPEG`, `PNG`, `WEBP`,
   `JXL`, `AVIF`.
 
+## Requirements
+
+- Windows 10 (1903+) or 11, **x64 only** — there is no 32-bit build.
+- ~4 GB RAM minimum, 8 GB comfortable. The tool caps its own memory budget at
+  60 % of the free RAM (hard cap 8 GB) and refuses a frame that cannot fit
+  instead of silently oversubscribing memory.
+- ~300 MB for `SeaMaestroCut.exe`, plus ~40 MB in
+  `%LOCALAPPDATA%\SeaMaestro\ort\` after the first cut run. The resizer build is
+  ~35 MB and writes nothing to AppData.
+- The background cut uses the GPU through DirectML when available and falls back
+  to the CPU automatically. On the CPU expect several seconds per frame; a
+  DirectML-capable GPU (Intel HD 5000+, any 2015+ NVIDIA/AMD) is far faster.
+- AVIF encoding needs a CPU with AVX2 (Intel 2011+, AMD 2015+); on older CPUs the
+  tool says so instead of failing with a codec error.
+
 ## Build
 
 Requirements:
@@ -147,6 +162,15 @@ Pinned inputs (their SHA-256 is verified on every CI build):
 Both executables carry the same version, but their file metadata differs:
 `SeaMaestroCut.exe` reports *SeaMaestro Multiformat Image Resizer + Background
 Cut*, so the two builds can be told apart in Explorer.
+
+**`SeaMaestroCut.exe` is a resizer _and_ a background remover, and the cut is on
+by default — the file name itself turns it on**, so no extra flag is needed:
+drop a photo onto `SeaMaestroCut.exe` (or run `SeaMaestroCut.exe photo.jpg` on the
+command line) and the background is removed. Because the cut is driven by the
+name, you can make the heavy build behave exactly like the light one by
+**renaming it to a name without `cut`/`cutout`** (e.g. `SeaMaestroRenamed.exe`) or
+by passing `--nocut`; the inference runtime is unpacked into AppData **only when a
+cut actually runs**.
 
 GitHub Actions builds both: run the `CI` workflow manually to get the two
 binaries with their SHA-256 in the job summary and as artifacts; pushing a `v*`
@@ -220,6 +244,9 @@ SeaMaestro --format pdf --lossless photo.jpg  → photo.pdf (FlateDecode)
 SeaMaestro --merge vacation_folder            → vacation_folder_Merged\ (one PDF per folder)
 SeaMaestro --merge --lossless --bw folder     → folder_Merged\ (FlateDecode, grayscale)
 ```
+
+`--merge` builds one document per folder; a folder that contains a single image
+simply produces a one-page PDF (it does not need the merge path).
 
 Single PDF keeps the normal output name, e.g. `photo_q85.pdf`.
 `--merge` rebuilds the folder tree next to the source: each folder becomes one

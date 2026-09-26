@@ -48,6 +48,11 @@ only. New: the name is also honoured when command-line flags are present
 
 ## 🐛 Bug Fixes
 
+**Background colour in the exe name** — `..._bgwhite.exe`, `..._bgblack.exe`,
+`..._bggrey.exe`, `..._bgred.exe` or `..._bg#RRGGBB.exe` set the colour a cut
+subject is composited onto (any name accepted by `--bg`). Without it the default
+is still white, with a note.
+
 **PDF and SVG fast paths skipped the cut** — `--cut --format pdf` (and the
 vector SVG path) could pass the original images through without removing the
 background. Both paths now respect `--cut`.
@@ -65,6 +70,63 @@ longer applies half of its settings.
 
 **`--merge` help** — the merge description is now translated in all 8 languages.
 
+**The cut build speaks all 8 languages** — the background-cut console messages
+(engine choice and fallbacks, cold start, tiles, runtime unpacking, de-fringe
+skips, and load errors) used to be English-only; they are now translated like
+the rest of the tool.
+
+**`--size 4000` refused to enlarge** — the long-edge form (a bare number, the
+one used in the exe-rename examples) silently kept the original size whenever
+the target was larger than the image, while `w4000`, `h4000`, `800x600` and
+`150pct` always scaled in both directions. All size forms behave the same now:
+**no size given — the frame is left exactly as it is; a size given — the frame is
+fitted to it, up or down** (a cropped document reaches the requested long side
+too), and the `(downscale only)` note is gone from the help.
+
+**A renamed exe could not composite a cut subject** — dropping files onto
+`SeaMaestroCut_jpg.exe` (or any name with a format that cannot store
+transparency) failed asking for `--bg`, which drop mode has no way to pass. It
+now composites the subject onto white and says so; PNG names keep transparency.
+
+**Long-edge size in the exe name (`l4000`) works, and unknown tokens are
+reported** — `SeaMaestro_l4000.exe` used to ignore that token silently; the long
+edge is now applied. Any name token the tool cannot understand produces a single
+`note:` line listing it, instead of silence.
+
+**`--output <existing folder>` is rejected up front** — the file is refused
+before any decoding; it used to fail late, once per file, after the work.
+
+**Failure reporting** — a batch with at least one failed file always exits
+non-zero now (a later successful drive could previously overwrite the error
+flag), and each failure is printed once instead of twice.
+
+**Low-end hardware** — the memory budget now refuses (instead of silently
+granting) a frame it cannot fit, `--scan` denoising and the SVG vector path skip
+themselves with a message when they would exceed it, and a CPU-only cut prints
+what to expect (`note: background cut runs on the CPU here …`) instead of looking
+frozen.
+
+**AVIF on old CPUs** — encoding needs AVX2 (Intel 2011+, AMD 2015+). The tool now
+says that up front instead of failing later with a codec error.
+
+## 📦 The two files
+
+| file | what it is | download |
+|---|---|---|
+| `SeaMaestro.exe` | the resizer: resize, crop, smart scan, formats, PDF and merge | ~35 MB |
+| `SeaMaestroCut.exe` | the same resizer **plus AI background cut** (BEN2, DirectML GPU or CPU) | ~300 MB |
+
+**The cut build is a background remover by default, and the file name is what
+switches it on** (`cut` inside `SeaMaestroCut.exe`), so no flag is needed: drop a
+photo onto it — or run `SeaMaestroCut.exe photo.jpg` — and you get a transparent
+PNG. Renaming the light build to a name containing `cut` enables nothing: it only
+tells you to take the cut build instead.
+
+**Want the cut build to behave exactly like the light one?** Rename it so the name
+has no `cut`/`cutout` in it (`SeaMaestroRenamed.exe`), or pass `--nocut`. Then the
+pipeline, the options and the output are identical to `SeaMaestro.exe`, and the
+inference runtime is never unpacked from the executable.
+
 ## 🔔 Signing
 
 This release is **unsigned**. Windows SmartScreen may show an "Unknown
@@ -73,6 +135,8 @@ publisher" warning on first run.
 SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED
 SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED
 Size: TO_BE_FILLED MB (PE executable, 64-bit)
+VirusTotal (light build): TO_BE_FILLED
+VirusTotal (cut build): TO_BE_FILLED
 
 The release contains two files: `SeaMaestro.exe` (resizer) and
 `SeaMaestroCut.exe` (resizer + background cut). The cut build writes its

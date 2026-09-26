@@ -54,13 +54,16 @@ impl Drop for MemPermit<'_> {
 }
 
 impl MemBudget {
-    pub(crate) fn acquire(&self, need: u64) {
-        let need = need.min(self.total.max(1));
+    pub(crate) fn acquire(&self, need: u64) -> bool {
+        if need > self.total {
+            return false;
+        }
         let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
         while *used + need > self.total {
             used = self.cv.wait(used).unwrap_or_else(|e| e.into_inner());
         }
         *used += need;
+        true
     }
 
     fn release(&self, need: u64) {

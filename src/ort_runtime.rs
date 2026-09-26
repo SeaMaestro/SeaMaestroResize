@@ -54,7 +54,12 @@ fn base_dir() -> Result<PathBuf> {
 }
 
 pub(crate) fn dir_key() -> String {
-    format!("{:08x}{:08x}", crc32fast::hash(ONNX_DLL), ONNX_DLL.len())
+    let mut key = String::new();
+    for (_, bytes) in files() {
+        let (crc, len) = fingerprint(bytes);
+        key.push_str(&format!("{:08x}{:08x}", crc, len));
+    }
+    key
 }
 
 pub(crate) fn runtime_dir() -> Result<PathBuf> {
@@ -114,7 +119,12 @@ fn extract_all(dir: &Path) -> Result<()> {
     if matches_embedded(dir) {
         return Ok(());
     }
-    eprintln!("note: unpacking the inference runtime into {}", dir.display());
+    eprintln!(
+        "{}",
+        crate::msg()
+            .note_unpacking_runtime
+            .replacen("{}", &dir.display().to_string(), 1)
+    );
     for (name, bytes) in files() {
         write_verified(dir, name, bytes)?;
     }
@@ -145,8 +155,10 @@ pub(crate) fn ensure_runtime() -> Result<PathBuf> {
         extract_all(&dir)?;
         if !matches_embedded(&dir) {
             bail!(
-                "the unpacked inference runtime at {} does not match the embedded one; delete the directory and retry",
-                dir.display()
+                "{}",
+                crate::msg()
+                    .err_runtime_mismatch
+                    .replacen("{}", &dir.display().to_string(), 1)
             );
         }
     }
@@ -166,8 +178,10 @@ pub(crate) fn prepare(onnx: &Path) -> Result<()> {
         let added = !AddDllDirectory(dir_w.as_ptr()).is_null();
         if !defaults_ok || !added {
             eprintln!(
-                "note: could not add {} to the DLL search path; the helpers are preloaded by absolute path instead",
-                dir.display()
+                "{}",
+                crate::msg()
+                    .note_dll_search_path
+                    .replacen("{}", &dir.display().to_string(), 1)
             );
         }
         for name in [SHARED_NAME, DML_NAME] {
@@ -183,8 +197,10 @@ pub(crate) fn prepare(onnx: &Path) -> Result<()> {
             );
             if handle.is_null() {
                 eprintln!(
-                    "warning: could not preload {}; the GPU backend may fall back to the CPU",
-                    path.display()
+                    "{}",
+                    crate::msg()
+                        .warn_preload_failed
+                        .replacen("{}", &path.display().to_string(), 1)
                 );
             } else if name == DML_NAME {
                 dml_loaded = true;
@@ -193,8 +209,10 @@ pub(crate) fn prepare(onnx: &Path) -> Result<()> {
     }
     if !dml_loaded {
         eprintln!(
-            "note: DirectML was not preloaded from {}; --ep dml will only work if the system provides it",
-            dir.display()
+            "{}",
+            crate::msg()
+                .note_dml_not_preloaded
+                .replacen("{}", &dir.display().to_string(), 1)
         );
     }
     Ok(())
