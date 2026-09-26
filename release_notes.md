@@ -109,6 +109,19 @@ frozen.
 **AVIF on old CPUs** — encoding needs AVX2 (Intel 2011+, AMD 2015+). The tool now
 says that up front instead of failing later with a codec error.
 
+**DirectML out of memory no longer fails the run** — on machines with little free
+RAM the built-in GPU (Intel/AMD) shares memory with the system, so the GPU session
+can be created and then fail during inference. SeaMaestro now detects exactly that,
+drops the GPU session, rebuilds it on the CPU and finishes the job — one clear note
+instead of `MAYDAY! inference failed`. With an explicit `--ep dml` you still get the
+run, but the message says your choice was not honoured.
+
+**The cut build's console is localized end to end** — the progress line
+(`cutting subjects…`), the inference errors (`inference failed`,
+`cannot create the inference session`, `cannot build the input tensor`, …) and the
+PDF progress line are translated in all 8 languages. The technical lines printed by
+ONNX Runtime itself are left as they are: they are diagnostics, not user text.
+
 ## 📦 The two files
 
 | file | what it is | download |

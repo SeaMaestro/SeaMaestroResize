@@ -25,10 +25,31 @@ pub(crate) const EP_AUTO: u8 = 0;
 pub(crate) const EP_CPU: u8 = 1;
 pub(crate) const EP_DML: u8 = 2;
 
-static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static SESSION: Mutex<Option<(Session, bool)>> = Mutex::new(None);
 
 fn ort_err<R>(err: ort::Error<R>) -> anyhow::Error {
     anyhow::anyhow!("{err}")
+}
+
+#[derive(Debug)]
+struct DmlOom {
+    detail: String,
+}
+
+impl std::fmt::Display for DmlOom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
+}
+
+impl std::error::Error for DmlOom {}
+
+fn is_oom(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("8007000e")
+        || lower.contains("e_outofmemory")
+        || lower.contains("out of memory")
+        || lower.contains("not enough memory")
 }
 
 fn model_name() -> &'static str {
@@ -51,7 +72,7 @@ fn create_session(use_dml: bool, threads: usize) -> Result<Session> {
     builder
         .commit_from_memory(MODEL)
         .map_err(ort_err)
-        .context("cannot create inference session")
+        .context(crate::msg().err_session_create)
 }
 
 fn build_session(ep_choice: u8, threads: usize) -> Result<(Session, &'static str)> {
@@ -89,7 +110,7 @@ fn preprocess(img: &DynamicImage) -> Result<Tensor<f32>> {
         }
     }
     Tensor::from_array((vec![1usize, 3, INPUT_SIZE, INPUT_SIZE], data))
-        .context("cannot build input tensor")
+        .context(crate::msg().err_tensor_build)
 }
 
 fn infer(session: &mut Session, tensor: Tensor<f32>) -> Result<Vec<f32>> {
@@ -100,8 +121,14 @@ fn infer(session: &mut Session, tensor: Tensor<f32>) -> Result<Vec<f32>> {
         .unwrap_or_else(|| "input".to_string());
     let outputs = session
         .run(ort::inputs![input_name.as_str() => tensor])
-        .map_err(ort_err)
-        .context("inference failed")?;
+        .map_err(|err| {
+            let detail = format!("{err:#}");
+            if is_oom(&detail) {
+                anyhow::Error::new(DmlOom { detail })
+            } else {
+                ort_err(err).context(crate::msg().err_infer_failed)
+            }
+        })?;
     let output = &outputs[0];
     let data = match output.try_extract_tensor::<f32>() {
         Ok((_, values)) => values.to_vec(),
@@ -109,13 +136,19 @@ fn infer(session: &mut Session, tensor: Tensor<f32>) -> Result<Vec<f32>> {
             let (_, values) = output
                 .try_extract_tensor::<half::f16>()
                 .map_err(ort_err)
-                .context("unexpected model output (expected float32 or float16)")?;
+                .context(crate::msg().err_model_output)?;
             values.iter().map(|value| value.to_f32()).collect()
         }
     };
     let expected = INPUT_SIZE * INPUT_SIZE;
     if data.len() != expected {
-        bail!("model returned {} values, expected {}", data.len(), expected);
+        bail!(
+            "{}",
+            crate::msg()
+                .err_model_shape
+                .replacen("{}", &data.len().to_string(), 1)
+                .replacen("{}", &expected.to_string(), 1)
+        );
     }
     Ok(data)
 }
@@ -385,7 +418,14 @@ fn exe_side_runtime() -> Option<PathBuf> {
 fn init_from(path: &Path) -> Result<()> {
     crate::ort_runtime::prepare(path)?;
     ort::init_from(path)
-        .map_err(|err| anyhow::anyhow!("cannot load {}: {err}", path.display()))?
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "{}: {err}",
+                crate::msg()
+                    .err_cut_load
+                    .replacen("{}", &path.display().to_string(), 1)
+            )
+        })?
         .commit();
     Ok(())
 }
@@ -495,10 +535,45 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
             if backend.starts_with("CPU") && effective_threads <= 2 {
                 eprintln!("  {}", crate::msg().note_cut_cpu_slow);
             }
-            *guard = Some(session);
+            *guard = Some((session, !backend.starts_with("CPU")));
         }
-        let session = guard.as_mut().expect("session is initialized above");
-        let (logits, tiles) = frame_logits(session, img, config.tile)?;
+        let first = {
+            let (session, _) = guard.as_mut().expect("session is initialized above");
+            frame_logits(session, img, config.tile)
+        };
+        let (logits, tiles) = match first {
+            Ok(result) => result,
+            Err(err) if err.is::<DmlOom>() && matches!(guard.as_ref(), Some((_, true))) => {
+                if config.ep == EP_DML {
+                    eprintln!("  {}", crate::msg().warn_dml_oom_explicit);
+                } else {
+                    eprintln!("  {}", crate::msg().note_dml_oom_fallback);
+                }
+                *guard = None;
+                let started = Instant::now();
+                let (session, _) = build_session(EP_CPU, config.threads)?;
+                eprintln!(
+                    "{}",
+                    crate::msg()
+                        .session_ready
+                        .replacen("{}", "CPU (DirectML out of memory)", 1)
+                        .replacen("{}", model_name(), 1)
+                        .replacen("{}", &format!("{:.1}", started.elapsed().as_secs_f64()), 1)
+                );
+                *guard = Some((session, false));
+                let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+                let effective_threads = if config.threads == 0 { cores } else { config.threads };
+                if effective_threads <= 2 {
+                    eprintln!("  {}", crate::msg().note_cut_cpu_slow);
+                }
+                let (session, _) = guard.as_mut().expect("session is initialized above");
+                frame_logits(session, img, config.tile)?
+            }
+            Err(err) if err.is::<DmlOom>() => {
+                bail!("{}", crate::msg().err_cut_oom_no_fallback);
+            }
+            Err(err) => return Err(err),
+        };
         if tiles > 1 {
             eprintln!(
                 "{}",
@@ -516,3 +591,25 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
 }
 
 
+
+#[cfg(test)]
+mod tests {
+    use super::is_oom;
+
+    #[test]
+    fn oom_signatures_are_detected() {
+        assert!(is_oom(
+            "[E:onnxruntime:, sequential_executor.cc:572] Non-zero status code returned while running Add node. Status Message: DmlCommon::TranslateHresult] 0x8007000E"
+        ));
+        assert!(is_oom("Not enough memory resources are available to complete this operation."));
+        assert!(is_oom("E_OUTOFMEMORY"));
+        assert!(is_oom("dml out of memory"));
+    }
+
+    #[test]
+    fn non_oom_errors_are_not_treated_as_oom() {
+        assert!(!is_oom("cannot build input tensor"));
+        assert!(!is_oom("Non-zero status code returned while running Resize: Invalid argument"));
+        assert!(!is_oom("unexpected model output (expected float32 or float16)"));
+    }
+}

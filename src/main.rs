@@ -1200,7 +1200,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
             .progress_chars("█▓▒░ "),
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb.set_message(if config.cut { "cutting subjects…" } else { "resizing images…" });
+        pb.set_message(if config.cut { msg().progress_cutting } else { msg().progress_resizing });
         Some(pb)
     } else {
         None
@@ -2437,7 +2437,7 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
             .progress_chars("█▓▒░ "),
         );
         pb.enable_steady_tick(std::time::Duration::from_millis(100));
-        pb.set_message("building PDF…");
+        pb.set_message(msg().progress_pdf);
         Some(pb)
     } else {
         None
