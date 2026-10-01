@@ -229,6 +229,7 @@ fn cli_command() -> clap::Command {
         .mut_arg("hard", |a| a.help(m.hard_help).help_heading(m.h_cut))
         .mut_arg("nocut", |a| a.help(m.nocut_help).help_heading(m.h_cut))
         .mut_arg("tile", |a| a.help(m.tile_help).help_heading(m.h_cut))
+        .mut_arg("no_refine", |a| a.help(m.no_refine_help).help_heading(m.h_cut))
         .mut_arg("bg", |a| a.help(m.bg_help).help_heading(m.h_misc))
         .mut_arg("preview", |a| a.help(m.preview_help).help_heading(m.h_misc));
     #[cfg(not(feature = "bg"))]
@@ -241,7 +242,8 @@ fn cli_command() -> clap::Command {
             .mut_arg("soft", |a| a.hide(true))
             .mut_arg("hard", |a| a.hide(true))
             .mut_arg("nocut", |a| a.hide(true))
-            .mut_arg("tile", |a| a.hide(true));
+            .mut_arg("tile", |a| a.hide(true))
+        .mut_arg("no_refine", |a| a.hide(true));
     }
     cmd
 }
@@ -319,6 +321,8 @@ struct Cli {
     crop: bool,
     #[arg(long = "nopause", alias = "no-pause", help_heading = "MISC")]
     no_pause: bool,
+    #[arg(long = "norefine", alias = "no-refine", help_heading = "CUT")]
+    no_refine: bool,
     #[arg(long, help_heading = "MISC")]
     output: Option<String>,
     #[arg(long, help_heading = "MISC")]
@@ -380,6 +384,7 @@ pub(crate) struct Config {
     pub(crate) de_fringe: bool,
     pub(crate) raw_alpha: bool,
     pub(crate) tile: bool,
+    pub(crate) no_refine: bool,
     pub(crate) bg_color: Option<String>,
     pub(crate) preview_dir: Option<String>,
 }
@@ -501,15 +506,74 @@ fn pause() {
     let _ = std::io::stdin().read_line(&mut line);
 }
 
+fn normalize_oneline_args(args: Vec<String>) -> Vec<String> {
+    args.into_iter()
+        .map(|a| {
+            let body = match a.strip_prefix("--") {
+                Some(body) => body,
+                None => return a,
+            };
+            if body.is_empty() || body.contains('=') {
+                return a;
+            }
+            for key in ["bg", "ep", "threads"] {
+                if let Some(rest) = body.strip_prefix(key) {
+                    if !rest.is_empty() {
+                        return format!("--{}={}", key, rest);
+                    }
+                }
+            }
+            a
+        })
+        .collect()
+}
+
+pub(crate) fn config_default() -> Config {
+    Config {
+        lang: lang::Lang::En,
+        target_size: None,
+        quality: 85,
+        format: ImageFormat::Jpeg,
+        grayscale: false,
+        lossless: false,
+        progressive: false,
+        sharpen: false,
+        scan: false,
+        crop: false,
+        no_pause: false,
+        output: None,
+        shanty: false,
+        keep_exif: false,
+        merge: false,
+        output_is_dir: false,
+        cut: false,
+        ep: 0,
+        threads: 0,
+        de_fringe: true,
+        raw_alpha: rename::SOFT_ALPHA_DEFAULT,
+        tile: false,
+        no_refine: false,
+        bg_color: None,
+        preview_dir: None,
+    }
+}
+
 fn run() -> Result<Config> {
-    let args: Vec<String> = env::args().collect();
+    let args = normalize_oneline_args(env::args().collect());
 
     let detected = detect_cli_lang(&args).unwrap_or_else(|| {
-        env::current_exe()
+        let by_stem = env::current_exe()
             .ok()
             .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
             .map(|stem| lang::Lang::detect(&stem))
-            .unwrap_or(lang::Lang::En)
+            .unwrap_or(lang::Lang::En);
+        if matches!(by_stem, lang::Lang::En) {
+            Config::from_exe_name()
+                .map(|c| c.lang)
+                .unwrap_or(lang::Lang::En)
+        } else {
+            by_stem
+        }
     });
     set_lang(detected);
 
@@ -523,50 +587,96 @@ fn run() -> Result<Config> {
                 set_lang(l);
             }
         }
-        let exe_cut = rename::exe_name_has_cut_token();
-        let cut_active = (cli.cut || exe_cut) && !cli.nocut;
-        let soft_alpha = if cli.hard {
-            false
-        } else if cli.soft {
-            true
-        } else {
-            rename::SOFT_ALPHA_DEFAULT
+        let mut config = Config::from_exe_name().unwrap_or_else(|_| config_default());
+        config.lang = detected;
+
+        let vs = |name: &str| {
+            matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine)
         };
-        let mut config = Config {
-            lang: detected,
-            target_size: None,
-            quality: cli.quality,
-            format: cli.format.unwrap_or(ImageFormat::Jpeg),
-            grayscale: cli.bw,
-            lossless: cli.lossless,
-            progressive: cli.progressive,
-            sharpen: cli.sharpen,
-            scan: cli.scan,
-            crop: cli.crop,
-            no_pause: cli.no_pause || rename::exe_name_has_tokens(&["nopause"]),
-            output: cli.output.clone(),
-            shanty: cli.shanty,
-            keep_exif: cli.keep_exif,
-            merge: cli.merge,
-            output_is_dir: false,
-            cut: cut_active,
-            ep: match cli.ep {
+
+        if vs("quality") {
+            config.quality = cli.quality;
+        }
+        if vs("bw") {
+            config.grayscale = cli.bw;
+        }
+        if vs("lossless") {
+            config.lossless = cli.lossless;
+        }
+        if vs("progressive") {
+            config.progressive = cli.progressive;
+        }
+        if vs("sharpen") {
+            config.sharpen = cli.sharpen;
+        }
+        if vs("scan") {
+            config.scan = cli.scan;
+        }
+        if vs("crop") {
+            config.crop = cli.crop;
+        }
+        if vs("no_pause") {
+            config.no_pause = cli.no_pause;
+        }
+        if vs("shanty") {
+            config.shanty = cli.shanty;
+        }
+        if vs("keep_exif") {
+            config.keep_exif = cli.keep_exif;
+        }
+        if vs("merge") {
+            config.merge = cli.merge;
+        }
+        if vs("output") {
+            config.output = cli.output.clone();
+        }
+        if vs("preview") {
+            config.preview_dir = cli.preview.clone();
+        }
+        if vs("cut") || vs("nocut") {
+            config.cut = cli.cut && !cli.nocut;
+        }
+        if vs("tile") {
+            config.tile = cli.tile;
+        }
+        if vs("de_fringe") {
+            config.de_fringe = cli.de_fringe;
+        }
+        if vs("hard") {
+            config.raw_alpha = false;
+        } else if vs("soft") {
+            config.raw_alpha = true;
+        }
+        if vs("no_refine") {
+            config.no_refine = cli.no_refine;
+        }
+        if vs("bg") {
+            config.bg_color = cli.bg.clone();
+        }
+        if vs("ep") {
+            config.ep = match cli.ep {
                 EpChoice::Cpu => 1,
                 EpChoice::Dml => 2,
                 EpChoice::Auto => 0,
-            },
-            threads: cli.threads,
-            de_fringe: cli.de_fringe,
-            raw_alpha: soft_alpha,
-            tile: cli.tile,
-            bg_color: cli.bg.clone(),
-            preview_dir: cli.preview.clone(),
-        };
-        if cli.format.is_none() {
-            match rename::exe_name_format() {
-                Some(named) => config.format = named,
-                None => rename::apply_cut_format_default(&mut config),
+            };
+        }
+        if vs("threads") {
+            config.threads = cli.threads;
+        }
+        if vs("format") {
+            if let Some(f) = cli.format {
+                config.format = f;
             }
+        } else {
+            rename::apply_cut_format_default(&mut config);
+        }
+        let unknown = rename::ignored_tokens();
+        if !unknown.is_empty() {
+            eprintln!("  {}", msg().note_unknown_tokens.replacen("{}", &unknown.join(", "), 1));
+        }
+        if config.cut && !config.format.carries_alpha() && config.bg_color.is_none() {
+            config.bg_color = Some("white".to_string());
+            eprintln!("  {}", msg().note_drop_bg_white);
         }
         if let Some(ref s) = cli.size {
             if s == "42" {
@@ -657,13 +767,7 @@ fn run() -> Result<Config> {
         #[cfg(not(target_os = "windows"))] {
             eprintln!("{}", boxed(msg().rename_linux));
         }
-        return Ok(Config {
-            lang: lang::Lang::En,
-            target_size: None, quality: 85, format: ImageFormat::Jpeg,
-            grayscale: false, lossless: false, progressive: false,
-            sharpen: false, scan: false, crop: false, no_pause: false, output: None, shanty: false, keep_exif: false, merge: false, output_is_dir: false,
-            cut: false, ep: 0, threads: 0, de_fringe: true, raw_alpha: rename::SOFT_ALPHA_DEFAULT, tile: false, bg_color: None, preview_dir: None,
-        });
+        return Ok(config_default());
     }
 
     let mut config = Config::from_exe_name()?;
@@ -1041,10 +1145,14 @@ fn write_preview(img: &image::DynamicImage, config: &Config, stem: &str) -> Resu
         _ => return Ok(()),
     };
     let (w, h) = (img.width().max(1), img.height().max(1));
-    let scale = PREVIEW_LONG_EDGE as f64 / w.max(h) as f64;
+    let scale = (PREVIEW_LONG_EDGE as f64 / w.max(h) as f64).min(1.0);
     let pw = ((w as f64 * scale).round() as u32).max(1);
     let ph = ((h as f64 * scale).round() as u32).max(1);
-    let scaled = img.resize_exact(pw, ph, FilterType::Lanczos3);
+    let scaled = if pw == w && ph == h {
+        img.clone()
+    } else {
+        img.resize_exact(pw, ph, FilterType::Lanczos3)
+    };
     let background = match config.bg_color.as_deref() {
         Some(text) => bgcolor::parse_color(text)?,
         None => None,
@@ -1080,6 +1188,14 @@ fn write_preview(img: &image::DynamicImage, config: &Config, stem: &str) -> Resu
 }
 
 fn process_all(entries: Vec<InputEntry>, config: &Config) {
+    #[cfg(all(feature = "bg", target_os = "windows"))]
+    if config.cut {
+        if let Err(err) =
+            crate::ort_runtime::ensure_runtime().and_then(|path| crate::ort_runtime::prepare(&path))
+        {
+            eprintln!("{err:#}");
+        }
+    }
     let pools = partition_into_pools(entries);
     HAD_ERRORS.store(false, Ordering::Relaxed);
     for pool in &pools {
@@ -1214,7 +1330,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     let mut final_tasks: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(tasks.len());
     for (input, output_dir, rel) in &tasks {
         let check_disk = *disk_check_cache.entry(output_dir.clone()).or_insert_with(|| {
-            output_dir.exists() && !is_directory_empty(output_dir)
+            fs_path(output_dir).exists() && !is_directory_empty(output_dir)
         });
         let base = compute_output_path(input, config, output_dir, Some(rel));
         let path_collision = used_paths.contains(&path_key(&base)) || (check_disk && base.exists());
@@ -1240,7 +1356,7 @@ fn process_files(entries: &[InputEntry], config: &Config) {
     }
 
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let max_workers = cpus;
+    let max_workers = if config.cut { 1 } else { cpus };
     let task_idx = AtomicUsize::new(0);
     let (tx, rx) = std::sync::mpsc::channel();
     let task_idx = &task_idx;
@@ -1606,12 +1722,27 @@ fn build_stages(config: &Config) -> Vec<Stage> {
     stages
 }
 
+fn grayscale_stage(img: image::DynamicImage, config: &Config) -> image::DynamicImage {
+    if !config.cut || !img.color().has_alpha() {
+        return img.grayscale();
+    }
+    let rgba = img.to_rgba8();
+    let mut out = image::RgbaImage::new(rgba.width(), rgba.height());
+    for (dst, src) in out.pixels_mut().zip(rgba.pixels()) {
+        let luma = (0.299 * src[0] as f32 + 0.587 * src[1] as f32 + 0.114 * src[2] as f32)
+            .round()
+            .clamp(0.0, 255.0) as u8;
+        *dst = image::Rgba([luma, luma, luma, src[3]]);
+    }
+    image::DynamicImage::ImageRgba8(out)
+}
+
 fn apply_stages(mut img: image::DynamicImage, stages: &[Stage], raw: &[u8], orient: bool, config: &Config, preflight: &Preflight) -> image::DynamicImage {
     for stage in stages {
         img = match stage {
             Stage::DepthDownscale => downscale_depth(img, config),
             Stage::AutoOrient => if orient { auto_orient(img, raw) } else { img },
-            Stage::Grayscale => img.grayscale(),
+            Stage::Grayscale => grayscale_stage(img, config),
             Stage::Resize => {
                 if preflight.exact && img.width() == preflight.target.0 && img.height() == preflight.target.1 {
                     img
@@ -1724,6 +1855,22 @@ fn run_pipeline(
         config.cut
     };
     #[cfg(feature = "bg")]
+    let resize_before_cut = config.cut
+        && config.target_size.is_some()
+        && !config.crop
+        && !config.scan
+        && !config.tile
+        && !config.merge
+        && !matches!(config.format, ImageFormat::Pdf)
+        && preflight.target.0 <= decoded.img.width()
+        && preflight.target.1 <= decoded.img.height()
+        && (preflight.target.0 < decoded.img.width() || preflight.target.1 < decoded.img.height());
+    #[cfg(feature = "bg")]
+    if resize_before_cut {
+        decoded.img = downscale_depth(decoded.img, config);
+        decoded.img = apply_resize(decoded.img, config.target_size.as_ref().unwrap());
+    }
+    #[cfg(feature = "bg")]
     if config.cut {
         decoded.img = cut::apply_cut(&decoded.img, config)?;
         if matches!(config.format, ImageFormat::Jpeg | ImageFormat::Pdf) {
@@ -1735,6 +1882,15 @@ fn run_pipeline(
         }
     }
     let stages = build_stages(config);
+    #[cfg(feature = "bg")]
+    let stages: Vec<Stage> = if resize_before_cut {
+        stages
+            .into_iter()
+            .filter(|stage| !matches!(stage, Stage::Resize | Stage::DepthDownscale))
+            .collect()
+    } else {
+        stages
+    };
     #[cfg(feature = "bg")]
     let orient = orient && !cut_oriented;
     decoded.img = apply_stages(decoded.img, &stages, raw, orient, config, &preflight);
@@ -1763,6 +1919,9 @@ fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
 
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
     let (raw, file_permit) = read_input(input)?;
+    // The permit covers only the read below; run_pipeline re-acquires the budget
+    // with raw.len() folded into need, so holding it across the whole call would
+    // double-count the same bytes and throttle parallelism for nothing.
     drop(file_permit);
 
     let out_path = if config.output.is_some() && !config.output_is_dir {
@@ -1946,7 +2105,8 @@ fn unsharp_plane(buf: &mut [u8], w: usize, h: usize, ch: usize, threshold: i32) 
     let r = 2isize;
     let stride = w * ch;
     let mut tmp = vec![0f32; w * h];
-    for c in 0..ch {
+    let ncolor = if ch == 2 || ch == 4 { ch - 1 } else { ch };
+    for c in 0..ncolor {
         let src_plane: &[u8] = buf;
         tmp.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
             let src = &src_plane[y * stride..(y + 1) * stride];
@@ -2625,7 +2785,7 @@ fn merge_group_to_pdf(
         let end = (offset + chunk).min(group_total);
         let slice = &ordered[offset..end];
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-        let chunk_workers = cpus.min(slice.len());
+        let chunk_workers = if config.cut { 1 } else { cpus.min(slice.len()) };
         let task_idx = AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let task_idx = &task_idx;
@@ -2793,5 +2953,17 @@ mod cli_tests {
             .map(|name| name.to_string())
             .collect();
         assert!(bad.is_empty(), "multi-word long flags found: {:?}", bad);
+    }
+
+    #[test]
+    fn plain_flag_keeps_de_fringe_on_by_default() {
+        use clap::Parser;
+        let defaults = super::Cli::try_parse_from(["seamaestro"]).expect("defaults must parse");
+        assert!(defaults.de_fringe, "de-fringe must be on without --plain");
+        let plain = super::Cli::try_parse_from(["seamaestro", "--plain"]).expect("plain must parse");
+        assert!(!plain.de_fringe, "--plain must turn de-fringe off");
+        let alias =
+            super::Cli::try_parse_from(["seamaestro", "--no-de-fringe"]).expect("alias must parse");
+        assert!(!alias.de_fringe, "--no-de-fringe must turn de-fringe off");
     }
 }

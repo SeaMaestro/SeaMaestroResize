@@ -83,6 +83,33 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
         }
     }
 
+    if let Some(rest) = t.strip_prefix("ep") {
+        match rest {
+            "cpu" => {
+                config.ep = 1;
+                return true;
+            }
+            "dml" => {
+                config.ep = 2;
+                return true;
+            }
+            "auto" => {
+                config.ep = 0;
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(rest) = t.strip_prefix("threads") {
+        if let Ok(n) = rest.parse::<usize>() {
+            if n > 0 {
+                config.threads = n;
+                return true;
+            }
+        }
+    }
+
     if let Ok(n) = t.parse::<u32>() {
         if n > 0 {
             config.target_size = Some(Size::LongEdge(n));
@@ -156,6 +183,10 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
             config.no_pause = true;
             return true;
         }
+        "norefine" => {
+            config.no_refine = true;
+            return true;
+        }
         "nocut" => {
             config.cut = false;
             return true;
@@ -174,32 +205,7 @@ impl Config {
             .unwrap_or_default()
             .to_string_lossy();
 
-        let mut config = Config {
-            lang: Lang::En,
-            target_size: None,
-            quality: 85,
-            format: ImageFormat::Jpeg,
-            grayscale: false,
-            lossless: false,
-            progressive: false,
-            sharpen: false,
-            scan: false,
-            crop: false,
-            no_pause: false,
-            output: None,
-            shanty: false,
-            keep_exif: false,
-            merge: false,
-            output_is_dir: false,
-            cut: false,
-            ep: 0,
-            threads: 0,
-            de_fringe: true,
-            raw_alpha: SOFT_ALPHA_DEFAULT,
-            tile: false,
-            bg_color: None,
-            preview_dir: None,
-        };
+        let mut config = crate::config_default();
 
         let tokens = stem_tokens(&stem);
 
@@ -239,45 +245,6 @@ fn stem_tokens(stem: &str) -> Vec<String> {
             if s.is_empty() { None } else { Some(s.to_string()) }
         })
         .collect()
-}
-
-pub(crate) fn exe_name_has_cut_token() -> bool {
-    exe_name_has_tokens(&["cut", "cutout"]) && !exe_name_has_tokens(&["nocut"])
-}
-
-pub(crate) fn exe_name_has_tokens(names: &[&str]) -> bool {
-    let stem = match env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-    {
-        Some(s) => s,
-        None => return false,
-    };
-    stem_tokens(&stem)
-        .iter()
-        .any(|t| names.iter().any(|n| t == n))
-}
-
-pub(crate) fn exe_name_format() -> Option<ImageFormat> {
-    let stem = env::current_exe()
-        .ok()
-        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .unwrap_or_default();
-    for token in stem_tokens(&stem) {
-        let mut remaining: &str = &token;
-        while !remaining.is_empty() {
-            match try_match_at_start(remaining) {
-                Some((matched, rest)) => {
-                    if let Some(fmt) = ImageFormat::from_str(matched) {
-                        return Some(fmt);
-                    }
-                    remaining = rest;
-                }
-                None => break,
-            }
-        }
-    }
-    None
 }
 
 pub(crate) fn apply_cut_format_default(config: &mut Config) {
@@ -372,7 +339,7 @@ fn get_bare_re() -> &'static Regex {
 pub(crate) const SOFT_ALPHA_DEFAULT: bool = true;
 
 const KEYWORDS_ORDERED: &[&str] = &[
-    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge", "cutout", "cut", "tile", "soft", "hard", "plain", "nopause", "nocut",
+    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge", "cutout", "cut", "tile", "soft", "hard", "plain", "nopause", "norefine", "nocut", "epcpu", "epdml", "epauto",
 ];
 
 const LANG_KEYWORDS_ORDERED: &[&str] = &[
@@ -465,6 +432,8 @@ mod tests {
             de_fringe: true,
             raw_alpha: SOFT_ALPHA_DEFAULT,
             tile: false,
+            no_refine: false,
+
             bg_color: None,
             preview_dir: None,
         }
@@ -498,6 +467,35 @@ mod tests {
         assert!(names_format(&stem_tokens("SeaMaestroCut_png")));
         assert!(names_format(&stem_tokens("SeaMaestroCut_jpg")));
         assert!(names_format(&stem_tokens("SeaMaestroQ80webp")));
+    }
+
+    #[test]
+    fn exe_token_ep() {
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "epcpu"));
+        assert_eq!(c.ep, 1);
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "epdml"));
+        assert_eq!(c.ep, 2);
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "epauto"));
+        assert_eq!(c.ep, 0);
+        let mut c = config();
+        assert!(!try_apply_single(&mut c, "epgpu"));
+        assert!(!try_apply_single(&mut c, "ep"));
+    }
+
+    #[test]
+    fn exe_token_threads() {
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "threads4"));
+        assert_eq!(c.threads, 4);
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "threads12"));
+        assert_eq!(c.threads, 12);
+        let mut c = config();
+        assert!(!try_apply_single(&mut c, "threads0"));
+        assert!(!try_apply_single(&mut c, "threads"));
     }
 
     #[test]

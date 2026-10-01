@@ -18,7 +18,11 @@ const DE_FRINGE_BASE_RADIUS: f64 = 90.0;
 const DE_FRINGE_BASE_SIDE: f64 = 1024.0;
 const DE_FRINGE_MIN_RADIUS: usize = 4;
 const ALPHA_LEVELS: Option<(f32, f32)> = Some((0.03, 0.50));
+const CUT_MIN_FREE_RAM: u64 = 3 * 1024 * 1024 * 1024;
 const DE_FRINGE_BLEND: f32 = 0.75;
+const DE_FRINGE_STRIP_H: usize = 512;
+const DE_FRINGE_STRIP_MIN_H: usize = 128;
+const DE_FRINGE_STRIP_BUDGET: usize = 512 * 1024 * 1024;
 
 #[allow(dead_code)]
 pub(crate) const EP_AUTO: u8 = 0;
@@ -31,25 +35,51 @@ fn ort_err<R>(err: ort::Error<R>) -> anyhow::Error {
     anyhow::anyhow!("{err}")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DmlFailure {
+    Oom,
+    Gpu,
+}
+
 #[derive(Debug)]
-struct DmlOom {
+struct DmlFatal {
+    kind: DmlFailure,
     detail: String,
 }
 
-impl std::fmt::Display for DmlOom {
+impl std::fmt::Display for DmlFatal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.detail)
     }
 }
 
-impl std::error::Error for DmlOom {}
+impl std::error::Error for DmlFatal {}
 
-fn is_oom(text: &str) -> bool {
+fn classify_dml_failure(text: &str) -> Option<DmlFailure> {
     let lower = text.to_ascii_lowercase();
-    lower.contains("8007000e")
+    if lower.contains("8007000e")
         || lower.contains("e_outofmemory")
         || lower.contains("out of memory")
         || lower.contains("not enough memory")
+    {
+        return Some(DmlFailure::Oom);
+    }
+    let gpu = lower.contains("887a0020")
+        || lower.contains("887a0005")
+        || lower.contains("887a0006")
+        || lower.contains("887a0001")
+        || lower.contains("driver's state is probably suspect")
+        || lower.contains("an internal issue prevented the driver")
+        || lower.contains("device removed")
+        || lower.contains("device hung")
+        || lower.contains("dmlexecutionprovider")
+        || lower.contains("dmlgraphfusionhelper")
+        || lower.contains("directml");
+    if gpu {
+        Some(DmlFailure::Gpu)
+    } else {
+        None
+    }
 }
 
 fn model_name() -> &'static str {
@@ -123,10 +153,9 @@ fn infer(session: &mut Session, tensor: Tensor<f32>) -> Result<Vec<f32>> {
         .run(ort::inputs![input_name.as_str() => tensor])
         .map_err(|err| {
             let detail = format!("{err:#}");
-            if is_oom(&detail) {
-                anyhow::Error::new(DmlOom { detail })
-            } else {
-                ort_err(err).context(crate::msg().err_infer_failed)
+            match classify_dml_failure(&detail) {
+                Some(kind) => anyhow::Error::new(DmlFatal { kind, detail }),
+                None => ort_err(err).context(crate::msg().err_infer_failed),
             }
         })?;
     let output = &outputs[0];
@@ -176,20 +205,12 @@ fn post_alpha(values: Vec<f32>) -> Vec<f32> {
         low = low.min(*value);
         high = high.max(*value);
     }
-    if low < 0.0 || high > 1.0 {
-        for value in alpha.iter_mut() {
-            *value = 1.0 / (1.0 + (-(*value)).exp());
-        }
-        low = f32::INFINITY;
-        high = f32::NEG_INFINITY;
-        for value in alpha.iter() {
-            low = low.min(*value);
-            high = high.max(*value);
-        }
+    if std::env::var("SEAMAESTRO_CUT_ALPHA_PROBE").is_ok() {
+        eprintln!("  alpha raw range: low={low:.6} high={high:.6}");
     }
     let span = (high - low).max(1e-8);
     for value in alpha.iter_mut() {
-        *value = (*value - low) / span;
+        *value = ((*value - low) / span).clamp(0.0, 1.0);
     }
     alpha
 }
@@ -249,13 +270,177 @@ fn tile_weight(width: usize, height: usize, overlap: usize) -> Vec<f32> {
     weights
 }
 
-fn frame_logits(session: &mut Session, img: &DynamicImage, tiled: bool) -> Result<(Vec<f32>, usize)> {
+const EDGE_REFINE_LOW: f32 = 0.03;
+const EDGE_REFINE_HIGH: f32 = 0.97;
+const EDGE_REFINE_MAX_TILES: usize = 48;
+const EDGE_REFINE_MAX_TILES_CPU: usize = 12;
+
+fn edge_tiles(coarse: &[f32], width: u32, height: u32) -> Vec<(u32, u32, usize)> {
+    let small = INPUT_SIZE;
+    let mut picked: Vec<(u32, u32, usize)> = Vec::new();
+    for (x, y) in tile_origins(width, height) {
+        let inner_x = if x == 0 { 0 } else { x + TILE_OVERLAP / 2 };
+        let inner_y = if y == 0 { 0 } else { y + TILE_OVERLAP / 2 };
+        let right = (x + INPUT_SIZE as u32).min(width);
+        let bottom = (y + INPUT_SIZE as u32).min(height);
+        let inner_right = if right >= width {
+            width
+        } else {
+            right.saturating_sub(TILE_OVERLAP / 2)
+        };
+        let inner_bottom = if bottom >= height {
+            height
+        } else {
+            bottom.saturating_sub(TILE_OVERLAP / 2)
+        };
+        let inner_w = inner_right.saturating_sub(inner_x).max(1);
+        let inner_h = inner_bottom.saturating_sub(inner_y).max(1);
+        let sx0 = (inner_x as usize * small) / width.max(1) as usize;
+        let sx1 = (((inner_x + inner_w) as usize * small) / width.max(1) as usize).clamp(sx0 + 1, small);
+        let sy0 = (inner_y as usize * small) / height.max(1) as usize;
+        let sy1 = (((inner_y + inner_h) as usize * small) / height.max(1) as usize).clamp(sy0 + 1, small);
+        let mut edge = 0usize;
+        for row in sy0..sy1 {
+            for column in sx0..sx1 {
+                let value = coarse[row * small + column];
+                if value > EDGE_REFINE_LOW && value < EDGE_REFINE_HIGH {
+                    edge += 1;
+                }
+            }
+        }
+        if edge > 0 {
+            picked.push((x, y, edge));
+        }
+    }
+    picked.sort_by_key(|item| std::cmp::Reverse(item.2));
+    picked
+}
+
+fn grid_extreme(src: &[f32], size: usize, radius: isize, want_min: bool) -> Vec<f32> {
+    let mut out = vec![0f32; src.len()];
+    let last = size as isize - 1;
+    for y in 0..size {
+        for x in 0..size {
+            let mut best = if want_min { f32::MAX } else { f32::MIN };
+            for dy in -radius..=radius {
+                let yy = (y as isize + dy).clamp(0, last) as usize;
+                for dx in -radius..=radius {
+                    let xx = (x as isize + dx).clamp(0, last) as usize;
+                    let value = src[yy * size + xx];
+                    best = if want_min { best.min(value) } else { best.max(value) };
+                }
+            }
+            out[y * size + x] = best;
+        }
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refine_edge_logits(
+    session: &mut Session,
+    img: &DynamicImage,
+    coarse: &[f32],
+    full: &mut [f32],
+    width: u32,
+    height: u32,
+    cap: usize,
+    is_dml: bool,
+) -> Result<usize> {
+    let picked = edge_tiles(coarse, width, height);
+    if picked.is_empty() {
+        return Ok(0);
+    }
+    if picked.len() > cap {
+        let note = if is_dml {
+            crate::msg().note_refine_skip_dml
+        } else {
+            crate::msg().note_refine_skip_cpu
+        };
+        eprintln!("  {}", note);
+        return Ok(0);
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let overlap = TILE_OVERLAP as usize;
+    let guard_grid = coarse.len() == INPUT_SIZE * INPUT_SIZE;
+    let (coarse_min, coarse_max) = if guard_grid {
+        (
+            grid_extreme(coarse, INPUT_SIZE, 2, true),
+            grid_extreme(coarse, INPUT_SIZE, 1, false),
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut value = vec![0f32; full.len()];
+    let mut weight_total = vec![0f32; full.len()];
+    for (x, y, _) in &picked {
+        let patch_width = (INPUT_SIZE as u32).min(width - x);
+        let patch_height = (INPUT_SIZE as u32).min(height - y);
+        let patch = img.crop_imm(*x, *y, patch_width, patch_height);
+        let logits = infer(session, preprocess(&patch)?)?;
+        let small = resize_logits(&logits, patch_width, patch_height);
+        let weights = tile_weight(patch_width as usize, patch_height as usize, overlap);
+        let (pw, ph) = (patch_width as usize, patch_height as usize);
+        for row in 0..ph {
+            let source = row * pw;
+            let target = (*y as usize + row) * w + *x as usize;
+            for column in 0..pw {
+                let weight = weights[source + column];
+                value[target + column] += small[source + column] * weight;
+                weight_total[target + column] += weight;
+            }
+        }
+    }
+    for (index, slot) in full.iter_mut().enumerate() {
+        let total = weight_total[index];
+        if total <= 1e-6 {
+            continue;
+        }
+        let refined = value[index] / total;
+        let blend = total.min(1.0);
+        let blended = *slot * (1.0 - blend) + refined * blend;
+        if !guard_grid {
+            *slot = blended;
+            continue;
+        }
+        let column = index % w;
+        let row = index / w;
+        let cx = (column * INPUT_SIZE / w).min(INPUT_SIZE - 1);
+        let cy = (row * INPUT_SIZE / h).min(INPUT_SIZE - 1);
+        let cell = cy * INPUT_SIZE + cx;
+        if coarse_min[cell] >= 0.85 {
+            *slot = blended.max(*slot);
+        } else if coarse_max[cell] <= 0.02 {
+            continue;
+        } else {
+            *slot = blended;
+        }
+    }
+    Ok(picked.len())
+}
+
+fn frame_logits(
+    session: &mut Session,
+    img: &DynamicImage,
+    tiled: bool,
+    cap: usize,
+    is_dml: bool,
+    no_refine: bool,
+) -> Result<(Vec<f32>, usize)> {
     let width = img.width();
     let height = img.height();
     let tile = INPUT_SIZE as u32;
     if !tiled || (width <= tile && height <= tile) {
         let logits = infer(session, preprocess(img)?)?;
-        return Ok((resize_logits(&logits, width, height), 1));
+        let mut combined = resize_logits(&logits, width, height);
+        let refined = if (width > tile || height > tile) && !no_refine {
+            let coarse = post_alpha(logits);
+            refine_edge_logits(session, img, &coarse, &mut combined, width, height, cap, is_dml)?
+        } else {
+            0
+        };
+        return Ok((combined, 1 + refined));
     }
     let (w, h) = (width as usize, height as usize);
     let overlap = TILE_OVERLAP as usize;
@@ -317,17 +502,18 @@ fn box_blur(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32>
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fb_estimate(
     image: &[f32],
     foreground: &[f32],
     background: &[f32],
     alpha: &[f32],
+    blurred_alpha: &[f32],
     width: usize,
     height: usize,
     radius: usize,
 ) -> (Vec<f32>, Vec<f32>) {
     let pixels = width * height;
-    let blurred_alpha = box_blur(alpha, width, height, radius);
     let mut foreground_scaled = vec![0f32; pixels];
     let mut background_scaled = vec![0f32; pixels];
     for index in 0..pixels {
@@ -358,13 +544,55 @@ fn de_fringe_radius(max_side: u32) -> usize {
 fn refine_channel(
     image: &[f32],
     alpha: &[f32],
+    blurred_alpha: &[f32],
+    blurred_alpha_second: &[f32],
     width: usize,
     height: usize,
     radius: usize,
 ) -> Vec<f32> {
-    let (first, background) = fb_estimate(image, image, image, alpha, width, height, radius);
-    let (second, _) = fb_estimate(image, &first, &background, alpha, width, height, 6);
+    let (first, background) =
+        fb_estimate(image, image, image, alpha, blurred_alpha, width, height, radius);
+    let (second, _) = fb_estimate(
+        image,
+        &first,
+        &background,
+        alpha,
+        blurred_alpha_second,
+        width,
+        height,
+        6,
+    );
     second
+}
+
+const DE_FRINGE_PARALLEL_MAX_PX: usize = 4 * 1024 * 1024;
+
+fn refine_channels(
+    channels: &[Vec<f32>; 3],
+    alpha: &[f32],
+    blurred_alpha: &[f32],
+    blurred_alpha_second: &[f32],
+    width: usize,
+    height: usize,
+    radius: usize,
+) -> Vec<Vec<f32>> {
+    let refine = |channel: &Vec<f32>| {
+        refine_channel(
+            channel,
+            alpha,
+            blurred_alpha,
+            blurred_alpha_second,
+            width,
+            height,
+            radius,
+        )
+    };
+    if width * height <= DE_FRINGE_PARALLEL_MAX_PX {
+        use rayon::prelude::*;
+        channels.par_iter().map(refine).collect()
+    } else {
+        channels.iter().map(refine).collect()
+    }
 }
 
 fn apply_de_fringe(rgba: &mut RgbaImage, radius: usize) {
@@ -378,16 +606,92 @@ fn apply_de_fringe(rgba: &mut RgbaImage, radius: usize) {
             channels[channel][index] = *value as f32 / 255.0;
         }
     }
-    for channel in channels.iter_mut() {
-        *channel = refine_channel(channel, &alpha, width, height, radius);
-    }
+    let blurred_alpha = box_blur(&alpha, width, height, radius);
+    let blurred_alpha_second = box_blur(&alpha, width, height, 6);
+    let refined_channels = refine_channels(
+        &channels,
+        &alpha,
+        &blurred_alpha,
+        &blurred_alpha_second,
+        width,
+        height,
+        radius,
+    );
     for (index, pixel) in rgba.pixels_mut().enumerate() {
         for (channel, value) in pixel.0.iter_mut().take(3).enumerate() {
             let original = *value as f32 / 255.0;
-            let refined = channels[channel][index];
+            let refined = refined_channels[channel][index];
             let blended = original * (1.0 - DE_FRINGE_BLEND) + refined * DE_FRINGE_BLEND;
             *value = (blended.clamp(0.0, 1.0) * 255.0).round() as u8;
         }
+    }
+}
+
+fn de_fringe_strip_height(width: usize, height: usize, radius: usize) -> usize {
+    let margin = radius / 2 + 8;
+    let planes = 9usize;
+    let per_row = (width * 4 * planes).max(1);
+    let affordable = DE_FRINGE_STRIP_BUDGET / per_row;
+    let strip = affordable.saturating_sub(2 * margin);
+    strip
+        .clamp(DE_FRINGE_STRIP_MIN_H, DE_FRINGE_STRIP_H)
+        .min(height.max(1))
+}
+
+fn apply_de_fringe_strips(rgba: &mut RgbaImage, radius: usize, strip_h: usize) {
+    let (width, height) = (rgba.width() as usize, rgba.height() as usize);
+    if strip_h == 0 || strip_h >= height {
+        apply_de_fringe(rgba, radius);
+        return;
+    }
+    let margin = radius / 2 + 8;
+    let mut y0 = 0usize;
+    while y0 < height {
+        let y1 = (y0 + strip_h).min(height);
+        let b0 = y0.saturating_sub(margin);
+        let b1 = (y1 + margin).min(height);
+        let rows = b1 - b0;
+        let mut alpha = vec![0f32; width * rows];
+        let mut channels = [
+            vec![0f32; width * rows],
+            vec![0f32; width * rows],
+            vec![0f32; width * rows],
+        ];
+        for row in 0..rows {
+            for column in 0..width {
+                let pixel = rgba.get_pixel(column as u32, (b0 + row) as u32).0;
+                let index = row * width + column;
+                alpha[index] = pixel[3] as f32 / 255.0;
+                for channel in 0..3 {
+                    channels[channel][index] = pixel[channel] as f32 / 255.0;
+                }
+            }
+        }
+        let blurred_alpha = box_blur(&alpha, width, rows, radius);
+        let blurred_alpha_second = box_blur(&alpha, width, rows, 6);
+        let refined_channels = refine_channels(
+            &channels,
+            &alpha,
+            &blurred_alpha,
+            &blurred_alpha_second,
+            width,
+            rows,
+            radius,
+        );
+        for row in y0..y1 {
+            let source_row = row - b0;
+            for column in 0..width {
+                let pixel = rgba.get_pixel_mut(column as u32, row as u32);
+                for (channel, plane) in refined_channels.iter().enumerate().take(3) {
+                    let index = source_row * width + column;
+                    let original = pixel.0[channel] as f32 / 255.0;
+                    let refined = plane[index];
+                    let blended = original * (1.0 - DE_FRINGE_BLEND) + refined * DE_FRINGE_BLEND;
+                    pixel.0[channel] = (blended.clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+        }
+        y0 = y1;
     }
 }
 
@@ -479,17 +783,23 @@ fn finish_frame(logits: Vec<f32>, img: &DynamicImage, de_fringe: bool, raw_alpha
     }
     if de_fringe {
         let max_side = width.max(height);
+        let radius = de_fringe_radius(max_side);
         if max_side <= crate::CUT_MAX_FRINGE_SIDE {
-            apply_de_fringe(&mut rgba, de_fringe_radius(max_side));
+            apply_de_fringe(&mut rgba, radius);
         } else {
-            eprintln!(
-                "{}",
-                crate::msg()
-                    .note_de_fringe_skipped
-                    .replacen("{}", &width.to_string(), 1)
-                    .replacen("{}", &height.to_string(), 1)
-                    .replacen("{}", &crate::CUT_MAX_FRINGE_SIDE.to_string(), 1)
-            );
+            let strip = de_fringe_strip_height(width as usize, height as usize, radius);
+            if strip >= DE_FRINGE_STRIP_MIN_H && strip <= height as usize {
+                apply_de_fringe_strips(&mut rgba, radius, strip);
+            } else {
+                eprintln!(
+                    "{}",
+                    crate::msg()
+                        .note_de_fringe_skipped
+                        .replacen("{}", &width.to_string(), 1)
+                        .replacen("{}", &height.to_string(), 1)
+                        .replacen("{}", &crate::CUT_MAX_FRINGE_SIDE.to_string(), 1)
+                );
+            }
         }
     }
     let levels = if raw_alpha { None } else { ALPHA_LEVELS };
@@ -515,13 +825,18 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
         };
         if guard.is_none() {
             init_ort()?;
-            if config.ep == EP_CPU {
+            let mut ep = config.ep;
+            if ep == EP_AUTO && crate::usable_ram() < CUT_MIN_FREE_RAM {
+                eprintln!("  {}", crate::msg().note_cut_low_ram);
+                ep = EP_CPU;
+            }
+            if ep == EP_CPU {
                 eprintln!("  {}", crate::msg().cold_start_cpu);
             } else {
                 eprintln!("  {}", crate::msg().cold_start_gpu);
             }
             let started = Instant::now();
-            let (session, backend) = build_session(config.ep, config.threads)?;
+            let (session, backend) = build_session(ep, config.threads)?;
             eprintln!(
                 "{}",
                 crate::msg()
@@ -537,26 +852,45 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
             }
             *guard = Some((session, !backend.starts_with("CPU")));
         }
+        let is_dml = matches!(guard.as_ref(), Some((_, true)));
+        let cap = if is_dml {
+            EDGE_REFINE_MAX_TILES
+        } else {
+            EDGE_REFINE_MAX_TILES_CPU
+        };
         let first = {
             let (session, _) = guard.as_mut().expect("session is initialized above");
-            frame_logits(session, img, config.tile)
+            frame_logits(session, img, config.tile, cap, is_dml, config.no_refine)
         };
         let (logits, tiles) = match first {
             Ok(result) => result,
-            Err(err) if err.is::<DmlOom>() && matches!(guard.as_ref(), Some((_, true))) => {
-                if config.ep == EP_DML {
-                    eprintln!("  {}", crate::msg().warn_dml_oom_explicit);
+            Err(err) if err.is::<DmlFatal>() && matches!(guard.as_ref(), Some((_, true))) => {
+                let oom = matches!(
+                    err.downcast_ref::<DmlFatal>().map(|fatal| fatal.kind),
+                    Some(DmlFailure::Oom)
+                );
+                if oom {
+                    if config.ep == EP_DML {
+                        eprintln!("  {}", crate::msg().warn_dml_oom_explicit);
+                    } else {
+                        eprintln!("  {}", crate::msg().note_dml_oom_fallback);
+                    }
                 } else {
-                    eprintln!("  {}", crate::msg().note_dml_oom_fallback);
+                    eprintln!("  {}", crate::msg().note_dml_gpu_fallback);
                 }
                 *guard = None;
                 let started = Instant::now();
                 let (session, _) = build_session(EP_CPU, config.threads)?;
+                let backend = if oom {
+                    "CPU (DirectML out of memory)"
+                } else {
+                    "CPU (DirectML error)"
+                };
                 eprintln!(
                     "{}",
                     crate::msg()
                         .session_ready
-                        .replacen("{}", "CPU (DirectML out of memory)", 1)
+                        .replacen("{}", backend, 1)
                         .replacen("{}", model_name(), 1)
                         .replacen("{}", &format!("{:.1}", started.elapsed().as_secs_f64()), 1)
                 );
@@ -567,9 +901,9 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
                     eprintln!("  {}", crate::msg().note_cut_cpu_slow);
                 }
                 let (session, _) = guard.as_mut().expect("session is initialized above");
-                frame_logits(session, img, config.tile)?
+                frame_logits(session, img, config.tile, EDGE_REFINE_MAX_TILES_CPU, false, config.no_refine)?
             }
-            Err(err) if err.is::<DmlOom>() => {
+            Err(err) if err.is::<DmlFatal>() => {
                 bail!("{}", crate::msg().err_cut_oom_no_fallback);
             }
             Err(err) => return Err(err),
@@ -594,22 +928,135 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
 
 #[cfg(test)]
 mod tests {
-    use super::is_oom;
+    use super::{classify_dml_failure, DmlFailure};
 
     #[test]
-    fn oom_signatures_are_detected() {
-        assert!(is_oom(
-            "[E:onnxruntime:, sequential_executor.cc:572] Non-zero status code returned while running Add node. Status Message: DmlCommon::TranslateHresult] 0x8007000E"
-        ));
-        assert!(is_oom("Not enough memory resources are available to complete this operation."));
-        assert!(is_oom("E_OUTOFMEMORY"));
-        assert!(is_oom("dml out of memory"));
+    fn oom_signatures_are_classified_as_oom() {
+        assert_eq!(
+            classify_dml_failure(
+                "[E:onnxruntime:, sequential_executor.cc:572] Non-zero status code returned while running Add node. Status Message: DmlCommon::TranslateHresult] 0x8007000E"
+            ),
+            Some(DmlFailure::Oom)
+        );
+        assert_eq!(
+            classify_dml_failure("Not enough memory resources are available to complete this operation."),
+            Some(DmlFailure::Oom)
+        );
+        assert_eq!(classify_dml_failure("E_OUTOFMEMORY"), Some(DmlFailure::Oom));
+        assert_eq!(classify_dml_failure("dml out of memory"), Some(DmlFailure::Oom));
     }
 
     #[test]
-    fn non_oom_errors_are_not_treated_as_oom() {
-        assert!(!is_oom("cannot build input tensor"));
-        assert!(!is_oom("Non-zero status code returned while running Resize: Invalid argument"));
-        assert!(!is_oom("unexpected model output (expected float32 or float16)"));
+    fn dxgi_driver_errors_are_classified_as_gpu_failure() {
+        assert_eq!(
+            classify_dml_failure(
+                "Exception(2) tid(4e30) 887A0020 An internal issue prevented the driver from carrying out the specified operation. The driver's state is probably suspect, and the application should not continue."
+            ),
+            Some(DmlFailure::Gpu)
+        );
+        assert_eq!(
+            classify_dml_failure("887A0005 The GPU device instance has been suspended"),
+            Some(DmlFailure::Gpu)
+        );
+        assert_eq!(
+            classify_dml_failure("887A0006 The GPU will not respond to more commands"),
+            Some(DmlFailure::Gpu)
+        );
+        assert_eq!(
+            classify_dml_failure("Non-zero status code returned while running Add: DmlExecutionProvider failure 0x1"),
+            Some(DmlFailure::Gpu)
+        );
+    }
+
+    #[test]
+    fn other_errors_are_not_treated_as_dml_failures() {
+        assert_eq!(classify_dml_failure("cannot build input tensor"), None);
+        assert_eq!(
+            classify_dml_failure("Non-zero status code returned while running Resize: Invalid argument"),
+            None
+        );
+        assert_eq!(
+            classify_dml_failure("unexpected model output (expected float32 or float16)"),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod strip_probe {
+    use super::{apply_de_fringe, apply_de_fringe_strips};
+    use image::{Rgba, RgbaImage};
+
+    fn sample(width: u32, height: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(width, height);
+        for (x, y, pixel) in img.enumerate_pixels_mut() {
+            let hard = if (y / 512) % 2 == 0 { 250 } else { 10 };
+            let soft = if x < width / 2 { 255 } else { 0 };
+            *pixel = Rgba([hard, (x % 251) as u8, (y % 241) as u8, soft]);
+        }
+        img
+    }
+
+    #[test]
+    fn strips_match_whole_frame() {
+        let (width, height) = (48u32, 1600u32);
+        let source = sample(width, height);
+        let radius = 12usize;
+        let mut whole = source.clone();
+        apply_de_fringe(&mut whole, radius);
+        for strip in [128usize, 512usize, height as usize] {
+            let mut tiled = source.clone();
+            apply_de_fringe_strips(&mut tiled, radius, strip);
+            assert_eq!(
+                whole.as_raw(),
+                tiled.as_raw(),
+                "strip={strip} de-fringe differs from the whole-frame result"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tile_probe {
+    use super::{edge_tiles, EDGE_REFINE_MAX_TILES, INPUT_SIZE};
+    use image::GenericImageView;
+
+    #[test]
+    #[ignore = "diagnostic: run with SM_TILE_PROBE set to a cut PNG (alpha = the edge map)"]
+    fn report_tiles_needed() {
+        let list = match std::env::var("SM_TILE_PROBE") {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for path in list.split('|') {
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            let img = match image::open(path) {
+                Ok(img) => img,
+                Err(err) => {
+                    lines.push(format!("{path}: cannot open ({err})"));
+                    continue;
+                }
+            };
+            let (w, h) = img.dimensions();
+            let small = img
+                .resize_exact(INPUT_SIZE as u32, INPUT_SIZE as u32, image::imageops::FilterType::Triangle)
+                .to_rgba8();
+            let mut coarse = vec![0f32; INPUT_SIZE * INPUT_SIZE];
+            for (index, pixel) in small.pixels().enumerate() {
+                coarse[index] = pixel.0[3] as f32 / 255.0;
+            }
+            let picked = edge_tiles(&coarse, w, h);
+            lines.push(format!(
+                "{w}x{h}  tiles_needed={}  cap={EDGE_REFINE_MAX_TILES}  capped={}",
+                picked.len(),
+                picked.len() > EDGE_REFINE_MAX_TILES
+            ));
+            lines.push(format!("  file={path}"));
+        }
+        let _ = std::fs::write(std::env::temp_dir().join("sm_tile_probe.txt"), lines.join("\n"));
     }
 }

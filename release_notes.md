@@ -1,3 +1,89 @@
+## SeaMaestro v2.5.4
+
+## ✨ What's New
+
+**Crisper edges on large photos — the biggest change in this release.** BEN2 looks
+at a 1024×1024 view of the frame, so on a 5568×4872 photo the matte used to be
+upscaled 5.4× and every edge came out soft. Now, after the usual full-frame pass,
+SeaMaestro finds the band where the edge actually lies and re-cuts **only those
+tiles at native resolution, 1:1**, then blends them back. Thin branches, hairs and
+fine detail stop turning into mush. Frames up to 1024 px are handled exactly as
+before (byte-for-byte), so nothing regresses for small pictures. If a frame needs
+more tiles than one pass allows, the tool says so in plain words instead of
+silently mixing sharp and soft edges.
+
+**Edge cleanup for very large frames.** The halo/edge polish used to be skipped
+above 4096 px. It now runs in strips, which keeps memory around 226 MB instead of
+~1 GB — and gives a byte-identical result to the old whole-frame code (there is a
+unit test proving exactly that, with hard edges placed right on the strip seams).
+
+**Cutting a resized frame no longer pays for the full-size mask.** When you ask for
+`--cut` together with a smaller size (and no crop/scan/tile/merge/pdf), the frame is
+now resized *first* and the model runs on the size you actually asked for — the matte
+is no longer upscaled from a much larger frame, so edges come out at least as clean
+and a 5568×4872 photo headed for 1600 px does a fraction of the work. The documented
+stage order (cut → crop/scan → resize) still applies to every other combination.
+Because the mask is now computed on the final resolution, cut results for
+`--size N --cut` differ from v2.5.3 — everything else is unchanged.
+
+**One voice, from launch to finish.** Every message you normally see — startup,
+model warm-up, progress line, skipped steps, hints — now speaks in the same warm
+captain's-bridge voice as the banner, in all eight languages. Errors that used to
+read like a system log now say what happened, why, and what to do: *"Full ahead is
+off — the graphics card drank her tanks dry (GPU: low on memory). Dropping the
+telegraph to slow ahead (CPU)…"*
+
+**A graphics-card crash now falls back too.** Besides running out of memory, some
+Intel/AMD drivers fail with `887A0020` / `887A0005` mid-run. Both are recognised
+now, so the job continues on the CPU instead of stopping with `MAYDAY!`.
+
+**Print preview no longer enlarges.** `--preview` upscaled small frames to 2000 px;
+it now only downscales, so the preview really is "how it will print".
+
+## 🐛 Bug Fixes
+
+**AVIF transparency.** Files produced by SeaMaestro always carried a correct alpha
+channel — but some Windows viewers (including certain versions of *Photos* and
+Explorer thumbnails) paint AVIF on a solid background, which made cutouts look as
+if the background was never removed. Check such files in Chrome, Edge or Firefox.
+This is now also documented in the README, together with the Intel UHD note: on
+built-in Intel graphics the GPU backend can fail, and the recommended stable
+setting there is `--ep cpu`.
+
+**Settings baked into the exe name survive a command-line flag.** The name was
+already honoured in drop mode, but as soon as a single `--` flag was present only a
+handful of its tokens were read: `q90`, `w800`, `1920x1080`, `50pct`, `bw`,
+`lossless`, `progressive`, `sharp`, `scan`, `crop`, `merge`, `exif`, `shanty`,
+`tile`, `soft`, `hard`, `plain` were dropped without a word. Every preset token is
+now applied in both modes, and the command line overrides only what you actually
+typed: `SeaMaestro_q90.exe --nopause photo.jpg` is quality 90, while
+`--quality 80` still wins. A name token the tool cannot parse is now reported
+instead of vanishing. The same goes for the interface language: a name with the
+language glued to the numbers, like `SeaMaestrode1920jpgq85.exe`, opens in German
+even with flags present, and `--lang` keeps the last word.
+
+## 🔧 Under the hood
+
+- `v2.5.4` is a drop-in update — no reinstalling, and no new flags are needed for
+  what used to work: `SeaMaestro.exe` still just resizes and converts,
+  `SeaMaestroCut.exe` still cuts, both self-contained.
+- All eight languages were brought in line, including the 23 messages that are
+  seen during normal work — not only the errors.
+- The cut runtime is now prepared once, in the main thread, before any parallel work
+  starts, instead of being unpacked lazily from inside a worker. The unpack note can
+  therefore appear a little earlier in a run that later stops for another reason; the
+  runtime itself is unchanged and still self-contained.
+- `--norefine` is new: it keeps the global mask and skips the edge refine pass, for
+  netted, webbed or thin-strand subjects. This is the manual override for the
+  all-or-nothing refine rule described above. The resizer build does not cut and does
+  not show it.
+- One word everywhere: `bgwhite`, `epcpu`, `threads4` are spelled the same on the
+  command line and in the exe name — `--bgwhite` / `..._bgwhite.exe`, `--epcpu` /
+  `..._epcpu.exe`, `--threads4` / `..._threads4.exe`. The spaced forms
+  (`--bg white`, `--ep cpu`, `--threads 4`) keep working.
+- The cut model is fed the ImageNet mean/std normalisation it was trained with — the
+  same setting the reference frames in the release gate were produced with.
+
 ## SeaMaestro v2.5.3
 
 ## ✨ What's New

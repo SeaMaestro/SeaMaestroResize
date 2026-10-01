@@ -28,7 +28,7 @@ if errorlevel 1 (
   echo.
   echo GATE FAILED - see %TEMP%\sm_gate_%TAG%_log.txt
   echo ---- log tail ----
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content \"$env:TEMP\sm_gate_%TAG%_log.txt\" -Tail 40"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Encoding utf8 \"$env:TEMP\sm_gate_%TAG%_log.txt\" -Tail 40"
   exit /b 1
 )
 echo.
@@ -36,5 +36,5 @@ echo ---- DONE marker ----
 type "%TEMP%\sm_gate_%TAG%_DONE.txt" 2>nul
 echo.
 echo ---- log tail ----
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content \"$env:TEMP\sm_gate_%TAG%_log.txt\" -Tail 40"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Content -Encoding utf8 \"$env:TEMP\sm_gate_%TAG%_log.txt\" -Tail 40"
 endlocal

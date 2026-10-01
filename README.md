@@ -96,6 +96,19 @@ the whole workflow.
   DirectML-capable GPU (Intel HD 5000+, any 2015+ NVIDIA/AMD) is far faster.
 - AVIF encoding needs a CPU with AVX2 (Intel 2011+, AMD 2015+); on older CPUs the
   tool says so instead of failing with a codec error.
+- **Intel UHD and DirectML.** The built-in Intel UHD graphics is the least stable
+  DirectML backend: on some drivers the GPU backend runs out of memory
+  (`8007000E`) or the driver itself fails (`887A0020`, `887A0005`). SeaMaestro
+  detects both and continues on the CPU automatically (you will see a note), so
+  the job still finishes — but on the CPU a cut frame takes seconds instead of
+  fractions of a second. Nothing has to be configured for this: the fallback is
+  automatic. If a machine is known to fail on the GPU every single time, the
+  attempt can be skipped altogether with `epcpu` in the exe name or `--epcpu`.
+- **AVIF alpha in viewers.** Some system viewers on Windows (including some
+  versions of *Photos* and Explorer thumbnails) draw AVIF on a white or black
+  background and do not show the transparency, while the file itself carries a
+  correct alpha channel — check it in Chrome, Edge or Firefox, which render AVIF
+  transparency correctly. PNG and WebP are always shown as expected.
 
 ## Build
 
@@ -201,7 +214,10 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--plain` | Keep the raw edge colour: no halo/de-fringe cleanup (alias `--no-de-fringe`) |
 | `--nocut` | Resize only, even when the exe name or a flag asks for a cut |
 | `--tile` | Tiled inference for very large frames (off by default) |
-| `--ep <auto\|cpu\|dml>` | Inference provider for the cut: auto (default), CPU, DirectML |
+| `--norefine` | Skip the edge refine: global mask only — for netted, webbed or thin-strand objects |
+| `--epauto`, `--epcpu`, `--epdml` | Inference provider for the cut: auto (default), CPU, DirectML |
+| `--threads4` | CPU threads for the cut — put your core count in place of `4` (0 = all cores) |
+| `--bgwhite`, `--bgnone`, `--bg#rrggbb` | Backdrop for formats without alpha (jpeg, pdf) |
 | `--exif` | Keep EXIF metadata (cleared by default) |
 | `--merge` | One PDF per folder, mirroring the tree (Path Compression; implies `--format pdf`) |
 | `--output <FILE>` | Output file name/path (single file only) |
@@ -209,6 +225,29 @@ SeaMaestro [OPTIONS] <FILES...>
 | `--shanty` | Sea shanties while working |
 | `--lang <CODE>` | en, ru, uk, de, es, fr, el, fil |
 | `--help` | Show help |
+
+**Every cut flag has the same one-word form in the exe name.** Drop the `--`
+and write the word into the file name — that is all. `SeaMaestroCut_soft.exe`
+is `--soft`, `SeaMaestroCut_norefine.exe` is `--norefine`. Both sides accept
+these spellings:
+
+| What it does | In the exe name | Command line |
+| --- | --- | --- |
+| soft edge (default) | `soft` | `--soft` |
+| hard edge | `hard` | `--hard` |
+| raw edge colour | `plain` | `--plain` |
+| skip the edge refine | `norefine` | `--norefine` |
+| tile large frames | `tile` | `--tile` |
+| resize only | `nocut` | `--nocut` |
+| backdrop colour | `bgwhite`, `bg#ff0000`, `bgnone` | `--bgwhite`, `--bg#ff0000`, `--bgnone` |
+| inference provider | `epcpu`, `epdml`, `epauto` | `--epcpu`, `--epdml`, `--epauto` |
+| CPU threads | `threads4` | `--threads4` |
+| do not wait for Enter | `nopause` | `--nopause` |
+
+Tokens are never renamed between the two — the word is the same, only the `--`
+differs, because without it the command line cannot tell a flag from a file
+name. The spaced forms (`--bg white`, `--ep cpu`, `--threads 4`) keep working
+too.
 
 **Auto-crop shooting advice.** `--crop` looks for the edge of the sheet, so it
 works best when the paper lies on a plain, contrasting surface. Two cases are

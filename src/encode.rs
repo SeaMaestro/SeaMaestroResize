@@ -252,7 +252,7 @@ fn encode_avif_raw(
         (*encoder.0).codecChoice = avifCodecChoice_AVIF_CODEC_CHOICE_SVT;
         (*encoder.0).speed = 8;
         (*encoder.0).quality = quality;
-        (*encoder.0).qualityAlpha = quality;
+        (*encoder.0).qualityAlpha = quality.max(90);
         (*encoder.0).maxThreads = avif_threads() as i32;
 
         let image = avifImageCreate(w, h, 8, avifPixelFormat_AVIF_PIXEL_FORMAT_YUV420);
@@ -532,3 +532,115 @@ pub(crate) fn encode_pdf_jpeg(img: &image::DynamicImage, quality: u8) -> Result<
     let raw = rgb.into_raw();
     run_mozjpeg(mozjpeg::ColorSpace::JCS_RGB, w, h, &raw, 3, quality, false, Some(((2, 2), (2, 2))), None, None)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{avifCodecVersions, avx2_available, encode_avif_to_vec};
+    use crate::decode::{decode_avif, is_avif};
+    use image::{DynamicImage, Rgba, RgbaImage};
+
+    fn sample_rgba(w: u32, h: u32) -> RgbaImage {
+        let mut img = RgbaImage::new(w, h);
+        for (x, _y, px) in img.enumerate_pixels_mut() {
+            let alpha = if x < w / 2 { 0u8 } else { 255u8 };
+            *px = Rgba([200, 30, 30, alpha]);
+        }
+        img
+    }
+
+    #[test]
+    fn avif_round_trip_preserves_alpha() {
+        let mut versions = [0 as libc::c_char; 256];
+        unsafe { avifCodecVersions(&mut versions) };
+        let text: Vec<u8> = versions
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8)
+            .collect();
+        eprintln!("libavif codecs: {}", String::from_utf8_lossy(&text));
+        if !avx2_available() {
+            eprintln!("skipped: this CPU has no AVX2");
+            return;
+        }
+        let img = DynamicImage::ImageRgba8(sample_rgba(64, 64));
+        let bytes = encode_avif_to_vec(&img, 80, None, None).expect("AVIF encoding must succeed");
+        assert!(is_avif(&bytes), "the encoder output must be an AVIF file");
+        let (decoded, _icc, _exif) =
+            decode_avif(&bytes).expect("our AVIF decoder must read our own encoder output");
+        assert!(decoded.color().has_alpha(), "AVIF lost the alpha channel");
+        let rgba = decoded.to_rgba8();
+        let left = rgba.get_pixel(0, 0).0[3];
+        let right = rgba.get_pixel(63, 0).0[3];
+        assert!(left < 40, "transparent side must stay transparent, got alpha={left}");
+        assert!(right > 215, "opaque side must stay opaque, got alpha={right}");
+    }
+
+    #[test]
+    #[ignore = "diagnostic: run with SM_CMP_PNG and SM_CMP_AVIF set to the same cut frame"]
+    fn avif_matches_png_alpha_map() {
+        let png_path = match std::env::var("SM_CMP_PNG") {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let avif_path = match std::env::var("SM_CMP_AVIF") {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        let png_img = image::open(&png_path)
+            .expect("the PNG reference must be readable")
+            .to_rgba8();
+        let raw = std::fs::read(&avif_path).expect("the AVIF file must be readable");
+        let (decoded, _icc, _exif) = decode_avif(&raw).expect("the AVIF file must decode");
+        let avif_img = decoded.to_rgba8();
+        assert_eq!(png_img.dimensions(), avif_img.dimensions(), "size mismatch");
+
+        let (w, h) = png_img.dimensions();
+        let total = (w as u64) * (h as u64);
+        let mut worst = 0i32;
+        let mut sum = 0i64;
+        let (mut both_zero, mut png_zero_avif_not, mut png_not_avif_zero) = (0u64, 0u64, 0u64);
+        let (mut rgb_under_zero_png, mut rgb_under_zero_avif) = (0u64, 0u64);
+        for (p, a) in png_img.pixels().zip(avif_img.pixels()) {
+            let diff = (p.0[3] as i32 - a.0[3] as i32).abs();
+            if diff > worst {
+                worst = diff;
+            }
+            sum += diff as i64;
+            match (p.0[3], a.0[3]) {
+                (0, 0) => both_zero += 1,
+                (0, _) => png_zero_avif_not += 1,
+                (_, 0) => png_not_avif_zero += 1,
+                _ => {}
+            }
+            if p.0[3] == 0 && (p.0[0] != 0 || p.0[1] != 0 || p.0[2] != 0) {
+                rgb_under_zero_png += 1;
+            }
+            if a.0[3] == 0 && (a.0[0] != 0 || a.0[1] != 0 || a.0[2] != 0) {
+                rgb_under_zero_avif += 1;
+            }
+        }
+        let lines = vec![
+            format!("png={png_path}"),
+            format!("avif={avif_path}"),
+            format!("size={w}x{h}"),
+            format!("alpha |png-avif|: max={worst} mean={:.4}", sum as f64 / total as f64),
+            format!("alpha==0 in both: {both_zero}"),
+            format!("png alpha==0, avif alpha>0: {png_zero_avif_not}"),
+            format!("png alpha>0, avif alpha==0: {png_not_avif_zero}"),
+            format!("rgb non-zero under alpha==0 (png): {rgb_under_zero_png}"),
+            format!("rgb non-zero under alpha==0 (avif): {rgb_under_zero_avif}"),
+        ];
+        let path = std::env::temp_dir().join("sm_avif_vs_png.txt");
+        let _ = std::fs::write(path, lines.join("\n"));
+
+        assert!(
+            png_zero_avif_not * 10 <= total,
+            "AVIF reports transparency where the PNG does not in {png_zero_avif_not} of {total} pixels"
+        );
+        assert!(
+            png_not_avif_zero * 10 <= total,
+            "AVIF lost transparency in {png_not_avif_zero} of {total} pixels"
+        );
+    }
+}
+

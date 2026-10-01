@@ -66,12 +66,10 @@ pub(crate) fn runtime_dir() -> Result<PathBuf> {
     Ok(base_dir()?.join("ort").join(dir_key()))
 }
 
-fn present_with_expected_len(dir: &Path) -> bool {
-    files().iter().all(|(name, bytes)| {
-        fs::metadata(dir.join(name))
-            .map(|meta| meta.is_file() && meta.len() == bytes.len() as u64)
-            .unwrap_or(false)
-    })
+fn present_verified(dir: &Path) -> bool {
+    files()
+        .iter()
+        .all(|(name, bytes)| on_disk_matches(&dir.join(name), bytes))
 }
 
 fn on_disk_matches(path: &Path, bytes: &[u8]) -> bool {
@@ -150,7 +148,7 @@ pub(crate) fn ensure_runtime() -> Result<PathBuf> {
         .map(|v| !v.trim().is_empty() && v.trim() != "0")
         .unwrap_or(false);
 
-    let ready = if force_verify { false } else { present_with_expected_len(&dir) };
+    let ready = if force_verify { false } else { present_verified(&dir) };
     if !ready {
         extract_all(&dir)?;
         if !matches_embedded(&dir) {

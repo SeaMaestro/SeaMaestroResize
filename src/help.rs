@@ -3,13 +3,27 @@ use unicode_width::UnicodeWidthStr;
 use crate::lang::HelpRow;
 use crate::msg;
 
-pub(crate) fn pad_right(s: &str, width: usize) -> String {
-    let w = UnicodeWidthStr::width(s);
-    if w >= width {
-        s.to_string()
-    } else {
-        format!("{}{}", s, " ".repeat(width - w))
+const GREEN: &str = "\x1b[92m";
+const YELLOW: &str = "\x1b[93m";
+const RESET: &str = "\x1b[0m";
+
+fn colors_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
     }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+fn paint(text: &str, color: &str) -> String {
+    if colors_enabled() {
+        format!("{color}{text}{RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+pub(crate) fn pad_right(s: &str, width: usize) -> String {
+    fit_cell(s, width)
 }
 
 fn fit_cell(s: &str, width: usize) -> String {
@@ -17,16 +31,25 @@ fn fit_cell(s: &str, width: usize) -> String {
     if w <= width {
         return format!("{}{}", s, " ".repeat(width - w));
     }
+    if width == 0 {
+        return String::new();
+    }
+    let budget = width - 1;
     let mut out = String::new();
     let mut cur = 0;
     for ch in s.chars() {
         let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if cur + cw <= width {
+        if cur + cw <= budget {
             out.push(ch);
             cur += cw;
         } else {
             break;
         }
+    }
+    out.push('…');
+    let used = cur + 1;
+    if used < width {
+        out.push_str(&" ".repeat(width - used));
     }
     out
 }
@@ -133,26 +156,29 @@ fn print_pair_wrapped(label: &str, value: &str, label_w: usize, width: usize) {
     }
 }
 
-pub(crate) fn print_help_table() {
-    let m = msg();
-    let top = "═".repeat(84);
+#[allow(non_snake_case)]
+fn print_rows(rows: &[HelpRow], W: usize) {
     let mid = "─".repeat(84);
-    const W: usize = 80;
-    eprintln!("  ╔{}╗", top);
     let mut first = true;
     let mut i = 0usize;
-    while i < m.help_table.len() {
-        match &m.help_table[i] {
+    while i < rows.len() {
+        match &rows[i] {
             HelpRow::Title(t) => {
                 if !first {
                     eprintln!("  ╠{}╣", mid);
                 }
                 for line in wrap_line(t, W) {
-                    eprintln!("  ║  {}  ║", pad_right(&line, W));
+                    eprintln!("  ║  {}  ║", paint(&pad_right(&line, W), GREEN));
                 }
                 if first {
                     eprintln!("  ╠{}╣", mid);
                     first = false;
+                }
+                i += 1;
+            }
+            HelpRow::HiText(t) => {
+                for line in wrap_line(t, W) {
+                    eprintln!("  ║  {}  ║", paint(&pad_right(&line, W), YELLOW));
                 }
                 i += 1;
             }
@@ -165,41 +191,41 @@ pub(crate) fn print_help_table() {
             HelpRow::Pair(..) => {
                 let start = i;
                 let mut label_w = 0usize;
-                while i < m.help_table.len() {
-                    if let HelpRow::Pair(l, _) = &m.help_table[i] {
+                while i < rows.len() {
+                    if let HelpRow::Pair(l, _) = &rows[i] {
                         label_w = label_w.max(l.width());
                         i += 1;
                     } else {
                         break;
                     }
                 }
-                for j in start..i {
-                    if let HelpRow::Pair(l, v) = &m.help_table[j] {
+                for row in &rows[start..i] {
+                    if let HelpRow::Pair(l, v) = row {
                         print_pair_wrapped(l, v, label_w, W);
                     }
                 }
             }
         }
     }
-    #[cfg(feature = "bg")]
-    {
+}
+
+pub(crate) fn print_help_table() {
+    let m = msg();
+    let top = "═".repeat(84);
+    let mid = "─".repeat(84);
+    const W: usize = 80;
+    let intro = if cfg!(feature = "bg") {
+        m.help_intro_cut
+    } else {
+        m.help_intro_normal
+    };
+    eprintln!("  ╔{}╗", top);
+    if intro.is_empty() {
+        print_rows(m.help_table, W);
+    } else {
+        print_rows(intro, W);
         eprintln!("  ╠{}╣", mid);
-        for line in wrap_line(&format!("{}  (SeaMaestroCut.exe)", m.h_cut), W) {
-            eprintln!("  ║  {}  ║", pad_right(&line, W));
-        }
-        print_pair_wrapped("cut:", m.cut_help, 16, W);
-        print_pair_wrapped("soft / hard:", m.soft_help, 16, W);
-        print_pair_wrapped("plain:", m.plain_help, 16, W);
-        print_pair_wrapped("tile:", m.tile_help, 16, W);
-        print_pair_wrapped("nopause:", m.no_pause_help, 16, W);
+        print_rows(m.help_table, W);
     }
     eprintln!("  ╚{}╝", top);
-    #[cfg(not(feature = "bg"))]
-    {
-        eprintln!();
-        for line in wrap_line(msg().cut_hint, W) {
-            eprintln!("  {}", line);
-        }
-        eprintln!();
-    }
 }

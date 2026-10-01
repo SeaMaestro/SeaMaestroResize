@@ -1299,7 +1299,7 @@ pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
+pub(crate) fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
     unsafe {
         let decoder = avifDecoderCreate();
         if decoder.is_null() {
