@@ -161,24 +161,6 @@ jobs:
             dist/SeaMaestro.exe
             dist/SeaMaestroCut.exe
 
-      - name: Append the VirusTotal links to the release
-        if: ${{ always() && env.VT_API_KEY != '' && steps.vt.outcome == 'success' && steps.vt.outputs.analysis != '' }}
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          $tag = '${{ github.ref_name }}'
-          $lines = foreach ($pair in '${{ steps.vt.outputs.analysis }}'.Split(',')) {
-            $parts = $pair.Split('=', 2)
-            if ($parts.Count -eq 2) { '- `' + $parts[0].Trim() + '` -> ' + $parts[1].Trim() }
-          }
-          if (-not $lines) { Write-Host 'no analysis links returned'; exit 0 }
-          $body = gh release view $tag --json body -q .body
-          $file = Join-Path $env:RUNNER_TEMP 'release_body.md'
-          ($body + "`n`n### 🧪 VirusTotal`n`n" + ($lines -join "`n") + "`n") | Out-File -FilePath $file -Encoding utf8
-          gh release edit $tag --notes-file $file
-          Write-Host $lines
-
       - name: Report the VirusTotal outcome
         if: ${{ always() && env.VT_API_KEY == '' }}
         shell: pwsh
