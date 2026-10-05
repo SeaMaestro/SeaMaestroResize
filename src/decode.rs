@@ -66,6 +66,18 @@ impl MemBudget {
         true
     }
 
+    pub(crate) fn try_acquire(&self, need: u64) -> bool {
+        if need > self.total {
+            return false;
+        }
+        let mut used = self.used.lock().unwrap_or_else(|e| e.into_inner());
+        if *used + need > self.total {
+            return false;
+        }
+        *used += need;
+        true
+    }
+
     fn release(&self, need: u64) {
         let need = need.min(self.total.max(1));
         let mut used = self.used.lock().unwrap();
@@ -433,63 +445,123 @@ fn probe_jxl_dims(raw: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-fn jxl_exif(raw: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn jxl_exif(raw: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK: usize = 1 << 20;
+    const MAX_BOX: u64 = 256 * 1024 * 1024;
+
     unsafe {
         let dec = JxlDecoderCreate(std::ptr::null());
         if dec.is_null() {
             return None;
         }
-        let res = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus_JXL_DEC_BOX);
-        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+        let events = JxlDecoderStatus_JXL_DEC_BOX | JxlDecoderStatus_JXL_DEC_BOX_COMPLETE;
+        if JxlDecoderSubscribeEvents(dec, events) != JxlDecoderStatus_JXL_DEC_SUCCESS {
             JxlDecoderDestroy(dec);
             return None;
         }
-        let res = JxlDecoderSetInput(dec, raw.as_ptr(), raw.len());
-        if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
+        if JxlDecoderSetInput(dec, raw.as_ptr(), raw.len()) != JxlDecoderStatus_JXL_DEC_SUCCESS {
             JxlDecoderDestroy(dec);
             return None;
         }
         JxlDecoderCloseInput(dec);
 
-        let mut box_buf: Vec<u8> = Vec::new();
+        let exif_type: [libc::c_char; 4] = [
+            b'E' as libc::c_char,
+            b'x' as libc::c_char,
+            b'i' as libc::c_char,
+            b'f' as libc::c_char,
+        ];
+
+        let mut acc: Vec<u8> = Vec::new();
+        let mut chunk: Vec<u8> = vec![0u8; CHUNK];
+        let mut capacity: usize = 0;
+        let mut total: u64 = 0;
+        let mut received: u64 = 0;
+        let mut reading = false;
+        let mut finished = false;
+        let mut last_status = i32::MIN;
+        let mut stalled = 0u32;
+
         loop {
             let status = JxlDecoderProcessInput(dec);
-            if status == JxlDecoderStatus_JXL_DEC_ERROR {
+            if status == JxlDecoderStatus_JXL_DEC_ERROR
+                || status == JxlDecoderStatus_JXL_DEC_SUCCESS
+            {
                 break;
             }
-            if status & JxlDecoderStatus_JXL_DEC_BOX != 0 {
-                let mut box_type = [0i8; 4];
-                if JxlDecoderGetBoxType(dec, &mut box_type, JXL_FALSE as libc::c_int)
-                    == JxlDecoderStatus_JXL_DEC_SUCCESS
-                {
-                    let exif_type: [libc::c_char; 4] = [
-                        b'E' as libc::c_char,
-                        b'x' as libc::c_char,
-                        b'i' as libc::c_char,
-                        b'f' as libc::c_char,
-                    ];
-                    if box_type == exif_type {
-                        let mut box_size: u64 = 0;
-                        JxlDecoderGetBoxSizeContents(dec, &mut box_size);
-                        box_buf = vec![0u8; box_size as usize];
-                        JxlDecoderSetBoxBuffer(dec, box_buf.as_mut_ptr(), box_size as usize);
-                    } else {
-                        JxlDecoderSetBoxBuffer(dec, std::ptr::null_mut(), 0);
-                    }
+            if status == last_status {
+                stalled += 1;
+                if stalled > 64 {
+                    break;
                 }
+            } else {
+                last_status = status;
+                stalled = 0;
             }
-            if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
-                break;
+
+            if status == JxlDecoderStatus_JXL_DEC_BOX {
+                let mut box_type = [0i8; 4];
+                let is_exif = JxlDecoderGetBoxType(dec, &mut box_type, JXL_FALSE as libc::c_int)
+                    == JxlDecoderStatus_JXL_DEC_SUCCESS
+                    && box_type == exif_type;
+                let mut box_size: u64 = 0;
+                if is_exif
+                    && JxlDecoderGetBoxSizeContents(dec, &mut box_size)
+                        == JxlDecoderStatus_JXL_DEC_SUCCESS
+                    && box_size > 0
+                    && box_size <= MAX_BOX
+                {
+                    acc.clear();
+                    reading = true;
+                    total = box_size;
+                    received = 0;
+                    capacity = (CHUNK as u64).min(box_size) as usize;
+                    JxlDecoderReleaseBoxBuffer(dec);
+                    if JxlDecoderSetBoxBuffer(dec, chunk.as_mut_ptr(), capacity)
+                        != JxlDecoderStatus_JXL_DEC_SUCCESS
+                    {
+                        reading = false;
+                    }
+                } else {
+                    reading = false;
+                    JxlDecoderReleaseBoxBuffer(dec);
+                    JxlDecoderSetBoxBuffer(dec, std::ptr::null_mut(), 0);
+                }
+            } else if status == JxlDecoderStatus_JXL_DEC_BOX_NEED_MORE_OUTPUT
+                || status == JxlDecoderStatus_JXL_DEC_BOX_COMPLETE
+            {
+                if reading {
+                    let unused = JxlDecoderReleaseBoxBuffer(dec);
+                    let written = capacity.saturating_sub(unused);
+                    acc.extend_from_slice(&chunk[..written]);
+                    received += written as u64;
+                    if status == JxlDecoderStatus_JXL_DEC_BOX_COMPLETE || received >= total {
+                        reading = false;
+                        finished = true;
+                        JxlDecoderSetBoxBuffer(dec, std::ptr::null_mut(), 0);
+                    } else {
+                        capacity = ((total - received).min(CHUNK as u64)) as usize;
+                        if JxlDecoderSetBoxBuffer(dec, chunk.as_mut_ptr(), capacity)
+                            != JxlDecoderStatus_JXL_DEC_SUCCESS
+                        {
+                            reading = false;
+                        }
+                    }
+                } else {
+                    JxlDecoderReleaseBoxBuffer(dec);
+                }
+                if finished {
+                    break;
+                }
             }
         }
         JxlDecoderDestroy(dec);
 
-        if box_buf.len() >= 4 {
-            let off = u32::from_be_bytes([box_buf[0], box_buf[1], box_buf[2], box_buf[3]]) as usize;
-            box_buf.get(off..).map(|b| b.to_vec())
-        } else {
-            None
+        if !finished || acc.len() < 4 {
+            return None;
         }
+        let off = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
+        acc.get(4 + off..).map(|b| b.to_vec())
     }
 }
 
@@ -610,6 +682,7 @@ impl JxlPrepared {
     #[allow(clippy::type_complexity)]
     pub(crate) fn decode(self) -> Result<(image::DynamicImage, Option<Vec<u8>>, Option<Vec<u8>>)> {
         let Self { raw, w, h, grayscale, alpha } = self;
+        let exif_blob = jxl_exif(&raw);
         unsafe {
             let dec_ptr = JxlDecoderCreate(std::ptr::null());
             if dec_ptr.is_null() {
@@ -623,8 +696,7 @@ impl JxlPrepared {
             }
 
             let events = JxlDecoderStatus_JXL_DEC_COLOR_ENCODING
-                | JxlDecoderStatus_JXL_DEC_FULL_IMAGE
-                | JxlDecoderStatus_JXL_DEC_BOX;
+                | JxlDecoderStatus_JXL_DEC_FULL_IMAGE;
             let res = JxlDecoderSubscribeEvents(dec.0, events);
             if res != JxlDecoderStatus_JXL_DEC_SUCCESS {
                 anyhow::bail!("JXL decode failed: JxlDecoderSubscribeEvents: {}", res);
@@ -651,12 +723,25 @@ impl JxlPrepared {
 
             let mut pixels: Vec<u8> = Vec::new();
             let mut icc: Option<Vec<u8>> = None;
-            let mut box_buf: Vec<u8> = Vec::new();
 
+            let mut last_status = i32::MIN;
+            let mut stalled = 0u32;
             loop {
                 let status = JxlDecoderProcessInput(dec.0);
                 if status == JxlDecoderStatus_JXL_DEC_ERROR {
                     anyhow::bail!("JXL decode failed: JxlDecoderProcessInput: {}", status);
+                }
+                if status == JxlDecoderStatus_JXL_DEC_SUCCESS {
+                    break;
+                }
+                if status == last_status {
+                    stalled += 1;
+                    if stalled > 64 {
+                        anyhow::bail!("JXL decode stalled on status {}", status);
+                    }
+                } else {
+                    last_status = status;
+                    stalled = 0;
                 }
                 if status & JxlDecoderStatus_JXL_DEC_COLOR_ENCODING != 0 {
                     let mut icc_size: usize = 0;
@@ -694,39 +779,12 @@ impl JxlPrepared {
                         anyhow::bail!("JXL decode failed: JxlDecoderSetImageOutBuffer: {}", res);
                     }
                 }
-                if status & JxlDecoderStatus_JXL_DEC_BOX != 0 {
-                    let mut box_type = [0i8; 4];
-                    if JxlDecoderGetBoxType(dec.0, &mut box_type, JXL_FALSE as libc::c_int)
-                        == JxlDecoderStatus_JXL_DEC_SUCCESS
-                    {
-                        let exif_type: [libc::c_char; 4] = [
-                            b'E' as libc::c_char,
-                            b'x' as libc::c_char,
-                            b'i' as libc::c_char,
-                            b'f' as libc::c_char,
-                        ];
-                        if box_type == exif_type {
-                            let mut box_size: u64 = 0;
-                            JxlDecoderGetBoxSizeContents(dec.0, &mut box_size);
-                            box_buf = vec![0u8; box_size as usize];
-                            JxlDecoderSetBoxBuffer(dec.0, box_buf.as_mut_ptr(), box_size as usize);
-                        } else {
-                            JxlDecoderSetBoxBuffer(dec.0, std::ptr::null_mut(), 0);
-                        }
-                    }
-                }
                 if status & JxlDecoderStatus_JXL_DEC_FULL_IMAGE != 0 {
                     break;
                 }
             }
 
-            let exif = if box_buf.len() >= 4 {
-                let off =
-                    u32::from_be_bytes([box_buf[0], box_buf[1], box_buf[2], box_buf[3]]) as usize;
-                box_buf.get(off..).map(|b| b.to_vec())
-            } else {
-                None
-            };
+            let exif = exif_blob;
 
             let img = match (grayscale, alpha) {
                 (false, false) => image::RgbImage::from_raw(w, h, pixels)
@@ -803,7 +861,7 @@ pub(crate) fn decode_image(
     anyhow::bail!("{}", msg().err_unsupported)
 }
 
-fn decode_with_limits(raw: &[u8]) -> image::ImageResult<(image::DynamicImage, Option<Vec<u8>>)> {
+pub(crate) fn decode_with_limits(raw: &[u8]) -> image::ImageResult<(image::DynamicImage, Option<Vec<u8>>)> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(raw));
     reader = reader.with_guessed_format()?;
     let mut limits = image::Limits::default();
@@ -1075,12 +1133,21 @@ fn svg_xml_max_depth(raw: &[u8]) -> Option<usize> {
     Some(max)
 }
 
+const MAX_SVG_DECOMPRESSED: u64 = 256 * 1024 * 1024;
+
 pub(crate) fn parse_svg(raw: &[u8], path: Option<&Path>) -> anyhow::Result<ParsedSvg> {
     let mut gz_buf = Vec::new();
     let svg_bytes: &[u8] = if raw.starts_with(&[0x1f, 0x8b]) {
         GzDecoder::new(raw)
+            .take(MAX_SVG_DECOMPRESSED + 1)
             .read_to_end(&mut gz_buf)
             .map_err(|_| anyhow::anyhow!("SVG decompression failed"))?;
+        if gz_buf.len() as u64 > MAX_SVG_DECOMPRESSED {
+            anyhow::bail!(
+                "SVG expands past the {} MB limit — refusing to decompress",
+                MAX_SVG_DECOMPRESSED / (1024 * 1024)
+            );
+        }
         &gz_buf
     } else {
         raw
@@ -1190,6 +1257,21 @@ fn heif_exif(raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+fn pack_heif_rows(data: &[u8], stride: usize, row_size: usize, height: usize) -> Result<Vec<u8>> {
+    let expected = row_size.saturating_mul(height);
+    let mut packed = Vec::with_capacity(expected);
+    for row in data.chunks(stride).take(height) {
+        if row.len() < row_size {
+            anyhow::bail!("{}", msg().err_heif_plane);
+        }
+        packed.extend_from_slice(&row[..row_size]);
+    }
+    if packed.len() != expected {
+        anyhow::bail!("{}", msg().err_heif_plane);
+    }
+    Ok(packed)
+}
+
 fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::DynamicImage> {
     use libheif_rs::{HeifContext, LibHeif, ColorSpace, RgbChroma};
 
@@ -1221,10 +1303,7 @@ fn decode_heif_manual(buf: &[u8], _path: Option<&Path>) -> Result<image::Dynamic
         anyhow::bail!("{}", msg().err_heif_plane);
     }
 
-    let mut packed = Vec::with_capacity(row_size * height as usize);
-    for row in plane.data.chunks_exact(stride).take(height as usize) {
-        packed.extend_from_slice(&row[..row_size]);
-    }
+    let packed = pack_heif_rows(plane.data, stride, row_size, height as usize)?;
 
     let img = match (has_alpha, bpp) {
         (false, 3) => image::RgbImage::from_raw(width, height, packed).map(image::DynamicImage::ImageRgb8),
@@ -1403,3 +1482,82 @@ fn develop_raw(rawimage: rawler::RawImage) -> Result<image::DynamicImage> {
         .context(msg().err_raw_decode)?;
     intermediate.to_dynamic_image().context(msg().err_raw_build)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oversized_bmp() -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"BM");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&40000i32.to_le_bytes());
+        b.extend_from_slice(&40000i32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&0i32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn decode_with_limits_rejects_oversized_embeds() {
+        let err = decode_with_limits(&oversized_bmp()).expect_err("oversized input must be rejected");
+        assert!(matches!(err, image::ImageError::Limits(_)), "expected a limit error, got {err:?}");
+    }
+
+    #[test]
+    fn decode_with_limits_accepts_a_normal_small_input() {
+        let png = include_bytes!("../tests/fixtures/8x8.png");
+        assert!(decode_with_limits(png).is_ok());
+    }
+
+    #[test]
+    fn gzipped_svg_bomb_is_refused() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let block = vec![b'a'; 1024 * 1024];
+        for _ in 0..300 {
+            enc.write_all(&block).unwrap();
+        }
+        let bomb = enc.finish().unwrap();
+        let err = parse_svg(&bomb, None).err().expect("a decompression bomb must be refused");
+        assert!(err.to_string().contains("limit"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn heif_row_packing_keeps_the_last_unpadded_row() {
+        let data = [1u8, 2, 3, 0, 4, 5, 6];
+        assert_eq!(pack_heif_rows(&data, 4, 3, 2).unwrap(), vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn heif_row_packing_rejects_a_short_row() {
+        let data = [1u8, 2];
+        assert!(pack_heif_rows(&data, 4, 3, 2).is_err());
+    }
+
+    #[test]
+    fn a_growing_permit_keeps_holding_the_budget() {
+        use std::sync::{Condvar, Mutex};
+        let budget = MemBudget { total: 4, used: Mutex::new(0), cv: Condvar::new() };
+        let mut permit = MemPermit { budget: &budget, need: 0 };
+        assert!(budget.try_acquire(3));
+        permit.need += 3;
+        assert!(!budget.try_acquire(2));
+        assert!(budget.try_acquire(1));
+        permit.need += 1;
+        assert_eq!(*budget.used.lock().unwrap(), 4);
+        drop(permit);
+        assert_eq!(*budget.used.lock().unwrap(), 0);
+    }
+}
+

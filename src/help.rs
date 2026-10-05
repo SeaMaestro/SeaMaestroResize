@@ -26,6 +26,10 @@ pub(crate) fn pad_right(s: &str, width: usize) -> String {
     fit_cell(s, width)
 }
 
+pub(crate) fn text_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
 fn fit_cell(s: &str, width: usize) -> String {
     let w = UnicodeWidthStr::width(s);
     if w <= width {

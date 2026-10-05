@@ -59,7 +59,9 @@ extern "C" {
 pub(crate) fn usable_ram() -> u64 {
     let mut st: MemoryStatusEx = unsafe { std::mem::zeroed() };
     st.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
-    unsafe { GlobalMemoryStatusEx(&mut st) };
+    if unsafe { GlobalMemoryStatusEx(&mut st) } == 0 {
+        return 8 * 1024 * 1024 * 1024;
+    }
     st.ull_avail_phys
 }
 
@@ -81,6 +83,32 @@ fn path_key(p: &Path) -> String {
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn path_key(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    if path_key(a) == path_key(b) {
+        return true;
+    }
+    static CWD: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    let cwd = match CWD.get_or_init(|| std::env::current_dir().ok()) {
+        Some(dir) => dir,
+        None => return false,
+    };
+    let absolute = |p: &Path| -> PathBuf {
+        let joined = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+        let mut folded = PathBuf::new();
+        for component in joined.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    folded.pop();
+                }
+                other => folded.push(other.as_os_str()),
+            }
+        }
+        folded
+    };
+    path_key(&absolute(a)) == path_key(&absolute(b))
 }
 
 #[cfg(windows)]
@@ -231,7 +259,8 @@ fn cli_command() -> clap::Command {
         .mut_arg("tile", |a| a.help(m.tile_help).help_heading(m.h_cut))
         .mut_arg("no_refine", |a| a.help(m.no_refine_help).help_heading(m.h_cut))
         .mut_arg("bg", |a| a.help(m.bg_help).help_heading(m.h_misc))
-        .mut_arg("preview", |a| a.help(m.preview_help).help_heading(m.h_misc));
+        .mut_arg("preview", |a| a.help(m.preview_help).help_heading(m.h_misc))
+        .mut_arg("name", |a| a.help(m.name_help).help_heading(m.h_misc));
     #[cfg(not(feature = "bg"))]
     {
         cmd = cmd
@@ -289,12 +318,12 @@ enum EpChoice {
     after_help = "INPUT: JPEG JXL PNG WebP AVIF ICO TIFF QOI BMP GIF SVG SVGZ HEIC HEIF HIF\nTGA PNM PBM PGM PPM PAM DDS HDR EXR FF\nRAW: CR2 CR3 CRW NEF NRW ARW SRF SR2 DNG RAF ORF PEF\nRW2 MRW MEF ERF KDC DCS DCR SRW IIQ 3FR MOS X3F ARI\n\
     OUTPUT: webp jpeg avif jxl png ico tiff qoi bmp gif pdf\n\n  \
     CLI EXAMPLES:\n    \
-    seamaestro --size 800 --format webp --quality 80 photo.jpg\n    \
-    seamaestro --size 1024x768 --format jpeg --progressive *.jpg\n    \
-    seamaestro --size 50pct --format avif photo.heic\n    \
-    seamaestro --size 300 --format png --bw --output result.png photo.jpg\n    \
-    seamaestro --merge vacation_folder\n    \
-    cat photo.jpg | seamaestro --format webp > out.webp\n\n  \
+    SeaMaestro.exe --size 800 --format webp --quality 80 photo.jpg\n    \
+    SeaMaestro.exe --size 1024x768 --format jpeg --progressive *.jpg\n    \
+    SeaMaestro.exe --size 50pct --format avif photo.heic\n    \
+    SeaMaestro.exe --size 300 --format png --bw --output result.png photo.jpg\n    \
+    SeaMaestro.exe --merge vacation_folder\n    \
+    type photo.jpg | SeaMaestro.exe --format webp > out.webp\n\n  \
     EXE RENAME EXAMPLES (Windows):\n    \
     SeaMaestro_q80_w800_webp.exe      → quality 80, 800px wide, WebP\n    \
     SeaMaestro1920jpgq85.exe          → 1920px wide, JPEG, quality 85\n    \
@@ -323,6 +352,10 @@ struct Cli {
     no_pause: bool,
     #[arg(long = "norefine", alias = "no-refine", help_heading = "CUT")]
     no_refine: bool,
+    #[arg(long = "name", help_heading = "MISC")]
+    name: bool,
+    #[arg(long = "profile", hide = true, help_heading = "MISC")]
+    profile: bool,
     #[arg(long, help_heading = "MISC")]
     output: Option<String>,
     #[arg(long, help_heading = "MISC")]
@@ -385,6 +418,8 @@ pub(crate) struct Config {
     pub(crate) raw_alpha: bool,
     pub(crate) tile: bool,
     pub(crate) no_refine: bool,
+    pub(crate) keep_names: bool,
+    pub(crate) profile: bool,
     pub(crate) bg_color: Option<String>,
     pub(crate) preview_dir: Option<String>,
 }
@@ -483,7 +518,7 @@ fn main() -> std::process::ExitCode {
     let _ = rayon::ThreadPoolBuilder::new().num_threads(cpus).build_global();
     match run() {
         Ok(config) => {
-            if !config.no_pause {
+            if !config.no_pause && std::io::stdin().is_terminal() {
                 pause();
             }
             if HAD_ERRORS.load(Ordering::Relaxed) {
@@ -494,10 +529,26 @@ fn main() -> std::process::ExitCode {
         }
         Err(e) => {
             eprintln!("  {} {:#}", msg().mayday_captain, e);
-            pause();
+            if !pause_is_disabled() && std::io::stdin().is_terminal() {
+                pause();
+            }
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+fn pause_is_disabled() -> bool {
+    if Config::from_exe_name().map(|c| c.no_pause).unwrap_or(false) {
+        return true;
+    }
+    pause_flag_in_args(env::args())
+}
+
+fn pause_flag_in_args<I: Iterator<Item = String>>(args: I) -> bool {
+    args.filter(|arg| arg.starts_with('-')).any(|arg| {
+        let arg = arg.trim_start_matches('-');
+        arg == "nopause" || arg == "no-pause" || arg == "nopause=true" || arg == "no-pause=true"
+    })
 }
 
 fn pause() {
@@ -553,6 +604,8 @@ pub(crate) fn config_default() -> Config {
         raw_alpha: rename::SOFT_ALPHA_DEFAULT,
         tile: false,
         no_refine: false,
+        keep_names: false,
+        profile: false,
         bg_color: None,
         preview_dir: None,
     }
@@ -650,6 +703,12 @@ fn run() -> Result<Config> {
         if vs("no_refine") {
             config.no_refine = cli.no_refine;
         }
+        if vs("name") {
+            config.keep_names = cli.name;
+        }
+        if vs("profile") {
+            config.profile = cli.profile;
+        }
         if vs("bg") {
             config.bg_color = cli.bg.clone();
         }
@@ -697,11 +756,35 @@ fn run() -> Result<Config> {
 
         let entries = collect_input_files(&cli.files);
         let mut stdin_buf: Option<Vec<u8>> = None;
+        let mut stdin_permit: Option<MemPermit<'static>> = None;
         if entries.is_empty()
             && !std::io::stdin().is_terminal() {
+                let budget = mem_budget();
+                let mut permit = MemPermit { budget, need: 0 };
                 let mut buf = Vec::new();
-                std::io::stdin().read_to_end(&mut buf)?;
+                let mut chunk = [0u8; 64 * 1024];
+                let mut total: u64 = 0;
+                loop {
+                    let n = std::io::stdin().read(&mut chunk)?;
+                    if n == 0 {
+                        break;
+                    }
+                    total += n as u64;
+                    if total > MAX_INPUT_SIZE {
+                        anyhow::bail!("{}", msg().err_too_large.replacen("{}", "<stdin>", 1));
+                    }
+                    if !budget.try_acquire(n as u64) {
+                        anyhow::bail!(
+                            "{}",
+                            msg().err_mem_too_large
+                                .replacen("{}", &(total / (1024 * 1024)).to_string(), 1)
+                        );
+                    }
+                    permit.need += n as u64;
+                    buf.extend_from_slice(&chunk[..n]);
+                }
                 if !buf.is_empty() {
+                    stdin_permit = Some(permit);
                     stdin_buf = Some(buf);
                 }
             }
@@ -733,8 +816,9 @@ fn run() -> Result<Config> {
         }
         banner(&config);
         if let Some(buf) = stdin_buf {
+            let held = stdin_permit.as_ref();
             if config.output.is_none() {
-                run_safely(|| process_and_write_stdout(&buf, &config))?;
+                run_safely(|| process_and_write_stdout(&buf, &config, held))?;
             } else {
                 let out = PathBuf::from(config.output.as_deref().unwrap());
                 if let Some(parent) = out.parent() {
@@ -743,7 +827,7 @@ fn run() -> Result<Config> {
                             .with_context(|| msg().err_mkdir.replacen("{}", &parent.display().to_string(), 1))?;
                     }
                 }
-                let bytes = run_safely(|| process_bytes(&buf, &config))?;
+                let bytes = run_safely(|| process_bytes(&buf, &config, held))?;
                 atomic_write(&out, &bytes)?;
             }
         } else {
@@ -1009,44 +1093,52 @@ fn local_now() -> (i64, u32, u32, u32, u32, u32) {
 }
 
 fn unique_output_dir(base: &Path) -> PathBuf {
-    if fs_path(base).exists() && !is_directory_empty(base) {
-        let (y, mo, d, h, mi, s) = local_now();
-        let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
-        let mut candidate = PathBuf::from(format!("{}_{}", base.display(), stamp));
-        if fs_path(&candidate).exists() && !is_directory_empty(&candidate) {
-            candidate = PathBuf::from(format!(
-                "{}_{}_{}",
-                base.display(),
-                stamp,
-                fastrand::u32(100..999)
-            ));
-        }
-        candidate
-    } else {
-        base.to_path_buf()
+    if !(fs_path(base).exists() && !is_directory_empty(base)) {
+        return base.to_path_buf();
     }
+    let (y, mo, d, h, mi, s) = local_now();
+    let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
+    let mut candidate = PathBuf::from(format!("{}_{}", base.display(), stamp));
+    let mut guard = 0u32;
+    while fs_path(&candidate).exists() && !is_directory_empty(&candidate) {
+        candidate = PathBuf::from(format!(
+            "{}_{}_{}",
+            base.display(),
+            stamp,
+            fastrand::u32(100..999)
+        ));
+        guard += 1;
+        if guard > 100 {
+            break;
+        }
+    }
+    candidate
 }
 
 fn unique_output_dir_reserved(base: &Path, used: &mut HashSet<String>) -> PathBuf {
     let collides = |p: &Path| (fs_path(p).exists() && !is_directory_empty(p)) || used.contains(&path_key(p));
-    if collides(base) {
-        let (y, mo, d, h, mi, s) = local_now();
-        let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
-        let mut candidate = PathBuf::from(format!("{}_{}", base.display(), stamp));
-        if collides(&candidate) {
-            candidate = PathBuf::from(format!(
-                "{}_{}_{}",
-                base.display(),
-                stamp,
-                fastrand::u32(100..999)
-            ));
-        }
-        used.insert(path_key(&candidate));
-        candidate
-    } else {
+    if !collides(base) {
         used.insert(path_key(base));
-        base.to_path_buf()
+        return base.to_path_buf();
     }
+    let (y, mo, d, h, mi, s) = local_now();
+    let stamp = format!("{:04}-{:02}-{:02}_{:02}{:02}{:02}", y, mo, d, h, mi, s);
+    let mut candidate = PathBuf::from(format!("{}_{}", base.display(), stamp));
+    let mut guard = 0u32;
+    while collides(&candidate) {
+        candidate = PathBuf::from(format!(
+            "{}_{}_{}",
+            base.display(),
+            stamp,
+            fastrand::u32(100..999)
+        ));
+        guard += 1;
+        if guard > 100 {
+            break;
+        }
+    }
+    used.insert(path_key(&candidate));
+    candidate
 }
 
 // ── process_files ─────────────────────────────────────────────
@@ -1110,15 +1202,23 @@ fn cut_order_note(config: &Config) -> Option<&'static str> {
     None
 }
 
+fn should_flatten(config: &Config) -> bool {
+    if !config.format.carries_alpha() {
+        return true;
+    }
+    match config.bg_color.as_deref() {
+        Some(text) => !matches!(bgcolor::parse_color(text), Ok(None)),
+        None => false,
+    }
+}
+
 fn cut_format_error(config: &Config) -> Option<String> {
-    let background = match config.bg_color.as_deref() {
-        Some(text) => match bgcolor::parse_color(text) {
-            Ok(value) => value,
-            Err(err) => return Some(format!("{err:#}")),
-        },
-        None => None,
+    let text = config.bg_color.as_deref()?;
+    let background = match bgcolor::parse_color(text) {
+        Ok(value) => value,
+        Err(err) => return Some(format!("{err:#}")),
     };
-    if !config.cut || config.format.carries_alpha() {
+    if config.format.carries_alpha() {
         return None;
     }
     if background.is_none() {
@@ -1333,17 +1433,22 @@ fn process_files(entries: &[InputEntry], config: &Config) {
             fs_path(output_dir).exists() && !is_directory_empty(output_dir)
         });
         let base = compute_output_path(input, config, output_dir, Some(rel));
-        let path_collision = used_paths.contains(&path_key(&base)) || (check_disk && base.exists());
+        let path_collision = used_paths.contains(&path_key(&base))
+            || (check_disk && base.exists())
+            || same_path(&base, input);
 
         let final_path = if (config.output.is_none() || config.output_is_dir) && path_collision {
             let stem = input.file_stem().unwrap_or_default().to_string_lossy();
             let ext = config.format.extension();
-            let suffix = build_suffix(config);
+            let suffix = if config.keep_names { String::new() } else { build_suffix(config) };
             let parent = base.parent().unwrap_or(output_dir);
             let mut counter = 1u32;
             loop {
                 let candidate = parent.join(format!("{}_{}{}.{}", stem, counter, suffix, ext));
-                if !used_paths.contains(&path_key(&candidate)) && (!check_disk || !candidate.exists()) {
+                if !used_paths.contains(&path_key(&candidate))
+                    && (!check_disk || !candidate.exists())
+                    && !same_path(&candidate, input)
+                {
                     break candidate;
                 }
                 counter += 1;
@@ -1551,7 +1656,7 @@ fn compute_output_path(
 ) -> PathBuf {
     let stem = input.file_stem().unwrap_or_default().to_string_lossy();
     let ext = config.format.extension();
-    let suffix = build_suffix(config);
+    let suffix = if config.keep_names { String::new() } else { build_suffix(config) };
     let out_filename = format!("{}{}.{}", stem, suffix, ext);
 
     if let Some(ref out) = config.output {
@@ -1813,12 +1918,20 @@ fn passthrough_jpeg_pdf(raw: &[u8], config: &Config) -> Option<crate::pdf::PdfPa
     Some(crate::pdf::PdfPage::Raster { width, height, gray, dct: true, data: raw.to_vec() })
 }
 
+fn additional_need(full: u64, held: Option<u64>) -> u64 {
+    match held {
+        Some(already_counted) => full.saturating_sub(already_counted),
+        None => full,
+    }
+}
+
 fn run_pipeline(
     raw: &[u8],
     config: &Config,
     path: Option<&Path>,
     svg: Option<&crate::decode::ParsedSvg>,
     svg_render: Option<((u32, u32), bool)>,
+    held: Option<&MemPermit<'_>>,
 ) -> Result<Decoded> {
     let jxl = JxlPrepared::prepare(raw);
     let native = if let Some(s) = svg {
@@ -1834,18 +1947,21 @@ fn run_pipeline(
         Some(n) => ((native.0 * n / 8).max(1), (native.1 * n / 8).max(1)),
         None => native,
     };
-    let need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config)
+    let full_need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config)
         .saturating_add(raw.len() as u64);
+    let need = additional_need(full_need, held.map(|permit| permit.need));
     let budget = mem_budget();
     if !budget.acquire(need) {
         anyhow::bail!(
             "{}",
             msg().err_mem_too_large
-                .replacen("{}", &(need / (1024 * 1024)).to_string(), 1)
+                .replacen("{}", &(full_need / (1024 * 1024)).to_string(), 1)
         );
     }
     let _permit = MemPermit { budget, need };
+    let t_decode = std::time::Instant::now();
     let mut decoded = smart_decode(raw, config, path, svg, svg_render, &preflight, jxl)?;
+    let decode_secs = t_decode.elapsed();
     let orient = !is_svg && !is_heif(raw);
     #[cfg(feature = "bg")]
     let cut_oriented = {
@@ -1873,13 +1989,13 @@ fn run_pipeline(
     #[cfg(feature = "bg")]
     if config.cut {
         decoded.img = cut::apply_cut(&decoded.img, config)?;
-        if matches!(config.format, ImageFormat::Jpeg | ImageFormat::Pdf) {
-            let rgb = match config.bg_color.as_deref() {
-                Some(text) => bgcolor::parse_color(text)?.unwrap_or(bgcolor::WHITE),
-                None => bgcolor::WHITE,
-            };
-            decoded.img = bgcolor::flatten_to_color(&decoded.img, rgb);
-        }
+    }
+    if should_flatten(config) && decoded.img.color().has_alpha() {
+        let rgb = match config.bg_color.as_deref() {
+            Some(text) => bgcolor::parse_color(text)?.unwrap_or(bgcolor::WHITE),
+            None => bgcolor::WHITE,
+        };
+        decoded.img = bgcolor::flatten_to_color(&decoded.img, rgb);
     }
     let stages = build_stages(config);
     #[cfg(feature = "bg")]
@@ -1893,7 +2009,15 @@ fn run_pipeline(
     };
     #[cfg(feature = "bg")]
     let orient = orient && !cut_oriented;
+    let t_effects = std::time::Instant::now();
     decoded.img = apply_stages(decoded.img, &stages, raw, orient, config, &preflight);
+    if config.profile {
+        eprintln!(
+            "  ⏱ decode {:.2} s | effects {:.2} s",
+            decode_secs.as_secs_f64(),
+            t_effects.elapsed().as_secs_f64()
+        );
+    }
     Ok(decoded)
 }
 
@@ -1918,18 +2042,16 @@ fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
 }
 
 fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<PathBuf> {
+    let t_total = std::time::Instant::now();
     let (raw, file_permit) = read_input(input)?;
-    // The permit covers only the read below; run_pipeline re-acquires the budget
-    // with raw.len() folded into need, so holding it across the whole call would
-    // double-count the same bytes and throttle parallelism for nothing.
-    drop(file_permit);
+    let t_read = t_total.elapsed();
 
     let out_path = if config.output.is_some() && !config.output_is_dir {
         PathBuf::from(config.output.as_deref().unwrap())
     } else {
         final_path.to_path_buf()
     };
-    if path_key(&out_path) == path_key(input) {
+    if same_path(&out_path, input) {
         anyhow::bail!("{}", msg().err_overwrite.replacen("{}", &input.display().to_string(), 1));
     }
     if fs_path(&out_path).is_dir() {
@@ -1945,19 +2067,38 @@ fn process_image(input: &Path, config: &Config, final_path: &Path) -> Result<Pat
 
     if !config.sharpen && !config.scan && !config.crop && !config.cut && matches!(config.format, ImageFormat::Pdf) {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
+            if let Some(mut vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
+                apply_vector_bg(&mut vp, config);
                 ensure_dir(&out_path)?;
                 let bytes = crate::pdf::page_pdf(crate::pdf::PdfPage::Vector(vp))?;
                 atomic_write(&out_path, &bytes)?;
+                if config.profile {
+                    eprintln!("  ⏱ vector-pdf {:.2} s", t_total.elapsed().as_secs_f64());
+                }
                 return Ok(out_path);
             }
         }
     }
 
-    let decoded = run_pipeline(&raw, config, Some(input), svg.as_ref(), svg_render)?;
+    let t_pipeline = std::time::Instant::now();
+    let decoded = run_pipeline(&raw, config, Some(input), svg.as_ref(), svg_render, Some(&file_permit))?;
+    let pipeline_secs = t_pipeline.elapsed();
     ensure_dir(&out_path)?;
+    let t_encode = std::time::Instant::now();
     save_image(&decoded.img, &out_path, config, decoded.icc.as_deref(), decoded.exif.as_deref())?;
+    let encode_secs = t_encode.elapsed();
+    let t_preview = std::time::Instant::now();
     write_preview(&decoded.img, config, &input.file_stem().unwrap_or_default().to_string_lossy())?;
+    if config.profile {
+        eprintln!(
+            "  ⏱ read {:.2} s | pipeline {:.2} s | encode {:.2} s | preview {:.2} s | total {:.2} s",
+            t_read.as_secs_f64(),
+            pipeline_secs.as_secs_f64(),
+            encode_secs.as_secs_f64(),
+            t_preview.elapsed().as_secs_f64(),
+            t_total.elapsed().as_secs_f64()
+        );
+    }
     Ok(out_path)
 }
 
@@ -2176,7 +2317,27 @@ where F: FnOnce(&Path) -> Result<()>
 
 // ── process_and_write_stdout / encode_to_vec ──────────────────
 
-fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
+fn pdf_bg_fill(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+    format!(
+        "q\n{} {} {} rg\n0 0 {} {} re\nf\nQ\n",
+        crate::util::fmt_num(rgb[0] as f32 / 255.0),
+        crate::util::fmt_num(rgb[1] as f32 / 255.0),
+        crate::util::fmt_num(rgb[2] as f32 / 255.0),
+        crate::util::fmt_num(width as f32),
+        crate::util::fmt_num(height as f32)
+    )
+    .into_bytes()
+}
+
+fn apply_vector_bg(page: &mut crate::svg_pdf::VectorPage, config: &Config) {
+    let Some(text) = config.bg_color.as_deref() else { return };
+    let Ok(Some(rgb)) = bgcolor::parse_color(text) else { return };
+    let mut prefixed = pdf_bg_fill(page.width, page.height, rgb);
+    prefixed.extend_from_slice(&page.content);
+    page.content = prefixed;
+}
+
+fn process_bytes(raw: &[u8], config: &Config, held: Option<&MemPermit<'_>>) -> Result<Vec<u8>> {
     let svg = if looks_like_svg(raw) {
         Some(parse_svg(raw, None)?)
     } else { None };
@@ -2184,13 +2345,13 @@ fn process_bytes(raw: &[u8], config: &Config) -> Result<Vec<u8>> {
         .as_ref()
         .map(|s| svg_target_dims((s.width, s.height), config.target_size.as_ref()));
 
-    let decoded = run_pipeline(raw, config, None, svg.as_ref(), svg_render)?;
+    let decoded = run_pipeline(raw, config, None, svg.as_ref(), svg_render, held)?;
     let exif = if config.keep_exif { decoded.exif.as_deref() } else { None };
     encode_to_vec(&decoded.img, config, decoded.icc.as_deref(), exif)
 }
 
-fn process_and_write_stdout(raw: &[u8], config: &Config) -> Result<()> {
-    let bytes = process_bytes(raw, config)?;
+fn process_and_write_stdout(raw: &[u8], config: &Config, held: Option<&MemPermit<'_>>) -> Result<()> {
+    let bytes = process_bytes(raw, config, held)?;
     std::io::stdout().write_all(&bytes)?;
     Ok(())
 }
@@ -2241,51 +2402,106 @@ fn banner(config: &Config) {
         ImageFormat::Jpeg if config.progressive => m.fmt_jpeg_progressive.to_string(),
         f => f.extension().to_uppercase(),
     };
-    let top = "═".repeat(62);
     let title = if config.cut { m.banner_title_cut } else { m.banner_title };
-    eprintln!("  ╔{}╗", top);
-    eprintln!("  ║  {}  ║", pad_right(title, 58));
-    eprintln!("  ║  {}  ║", pad_right(m.banner_tagline, 58));
-    eprintln!("  ║  {}  ║", pad_right(&format!("{} Version: {}", m.banner_by, env!("CARGO_PKG_VERSION")), 58));
-    eprintln!("  ║  {}  ║", pad_right("🖂  seamaestro@proton.me", 58));
-    eprintln!("  ║  {}  ║", pad_right("⎇  https://github.com/SeaMaestro/SeaMaestroResize", 58));
-    eprintln!("  ╠{}╣", "─".repeat(62));
-    eprintln!("  ║  {:<13}{}  ║", m.label_size, pad_right(&size_str, 45));
-    eprintln!("  ║  {:<13}{}  ║", m.label_format, pad_right(&fmt_str, 45));
+    let by_line = format!("{} Version: {}", m.banner_by, env!("CARGO_PKG_VERSION"));
+    const EMAIL: &str = "🖂  seamaestro@proton.me";
+    const URL: &str = "⎇  https://github.com/SeaMaestro/SeaMaestroResize";
+
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    pairs.push((m.label_size, size_str));
+    pairs.push((m.label_format, fmt_str));
     if !config.format.is_lossless() && !is_lossless_mode(config) {
-        eprintln!("  ║  {:<13}{}  ║", m.label_quality, pad_right(&format!("{}", config.quality), 45));
+        pairs.push((m.label_quality, format!("{}", config.quality)));
     }
     if is_lossless_mode(config) {
-        eprintln!("  ║  {:<13}{}  ║", m.label_lossless, pad_right(m.on, 45));
+        pairs.push((m.label_lossless, m.on.to_string()));
     }
     if config.progressive && config.format == ImageFormat::Jpeg {
-        eprintln!("  ║  {:<13}{}  ║", m.label_progressive, pad_right(m.on, 45));
+        pairs.push((m.label_progressive, m.on.to_string()));
     }
     if config.grayscale {
-        eprintln!("  ║  {:<13}{}  ║", m.label_grayscale, pad_right(m.on, 45));
+        pairs.push((m.label_grayscale, m.on.to_string()));
     }
     if config.merge {
-        eprintln!("  ║  {:<13}{}  ║", m.label_merge, pad_right(m.on, 45));
+        pairs.push((m.label_merge, m.on.to_string()));
     }
     if config.cut {
-        eprintln!("  ║  {:<13}{}  ║", m.label_cut, pad_right(m.on, 45));
+        pairs.push((m.label_cut, m.on.to_string()));
     }
     if config.keep_exif
         && matches!(config.format, ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP | ImageFormat::Jxl | ImageFormat::Avif)
     {
-        eprintln!("  ║  {:<13}{}  ║", m.label_exif, pad_right(m.on, 45));
+        pairs.push((m.label_exif, m.on.to_string()));
     }
     if config.sharpen {
-        eprintln!("  ║  {:<13}{}  ║", m.label_sharpen, pad_right(m.on, 45));
+        pairs.push((m.label_sharpen, m.on.to_string()));
     }
     if config.crop {
-        eprintln!("  ║  {:<13}{}  ║", m.label_crop, pad_right(m.on, 45));
+        pairs.push((m.label_crop, m.on.to_string()));
     }
     if config.scan {
-        eprintln!("  ║  {:<13}{}  ║", m.label_scan, pad_right(m.on, 45));
+        pairs.push((m.label_scan, m.on.to_string()));
     }
     if config.shanty {
-        eprintln!("  ║  {:<13}{}  ║", m.label_shanty, pad_right(m.on, 45));
+        pairs.push((m.label_shanty, m.on.to_string()));
+    }
+    if config.ep != 0 {
+        pairs.push((m.label_ep, if config.ep == 1 { "CPU" } else { "DirectML" }.to_string()));
+    }
+    if config.threads > 0 {
+        pairs.push((m.label_threads, config.threads.to_string()));
+    }
+    if let Some(bg) = &config.bg_color {
+        pairs.push((m.label_bg, bg.clone()));
+    }
+    if let Some(dir) = &config.preview_dir {
+        pairs.push((m.label_preview, dir.clone()));
+    }
+    if config.keep_names {
+        pairs.push((m.label_name, m.on.to_string()));
+    }
+    if config.profile {
+        pairs.push((m.label_profile, m.on.to_string()));
+    }
+    if config.no_refine {
+        pairs.push((m.label_norefine, m.on.to_string()));
+    }
+    if !config.de_fringe {
+        pairs.push((m.label_plain, m.on.to_string()));
+    }
+    if config.tile {
+        pairs.push((m.label_tile, m.on.to_string()));
+    }
+    if !config.raw_alpha {
+        pairs.push((m.label_hard, m.on.to_string()));
+    }
+
+    let label_w = pairs
+        .iter()
+        .map(|(l, _)| crate::help::text_width(l))
+        .max()
+        .unwrap_or(0)
+        .max(13)
+        + 1;
+    let mut inner = 58usize;
+    for s in [title, m.banner_tagline, by_line.as_str(), EMAIL, URL] {
+        inner = inner.max(crate::help::text_width(s));
+    }
+    for (_, v) in &pairs {
+        inner = inner.max(label_w + crate::help::text_width(v));
+    }
+
+    let top = "═".repeat(inner + 4);
+    eprintln!("  ╔{}╗", top);
+    eprintln!("  ║  {}  ║", pad_right(title, inner));
+    eprintln!("  ║  {}  ║", pad_right(m.banner_tagline, inner));
+    eprintln!("  ║  {}  ║", pad_right(&by_line, inner));
+    eprintln!("  ║  {}  ║", pad_right(EMAIL, inner));
+    eprintln!("  ║  {}  ║", pad_right(URL, inner));
+    eprintln!("  ╠{}╣", "─".repeat(inner + 4));
+    for (label, value) in &pairs {
+        let pad = " ".repeat(label_w.saturating_sub(crate::help::text_width(label)));
+        eprintln!("  ║  {}{}{}  ║", label, pad, pad_right(value, inner - label_w));
     }
     eprintln!("  ╚{}╝", top);
     if config.shanty { eprintln!("  {}", next_shanty()); }
@@ -2712,7 +2928,6 @@ fn process_merge(entries: &[InputEntry], config: &Config) {
 
 fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf::PdfPage> {
     let (raw, file_permit) = read_input(&entry.file)?;
-    drop(file_permit);
 
     if let Some(page) = passthrough_jpeg_pdf(&raw, config) {
         return Ok(page);
@@ -2727,13 +2942,14 @@ fn process_one_to_pdf(entry: &InputEntry, config: &Config) -> Result<crate::pdf:
 
     if !config.sharpen && !config.scan && !config.crop && !config.cut {
         if let (Some(s), Some(((tw, th), true))) = (&svg, svg_render) {
-            if let Some(vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
+            if let Some(mut vp) = crate::svg_pdf::build_vector_page(&s.tree, tw, th, config.grayscale) {
+                apply_vector_bg(&mut vp, config);
                 return Ok(crate::pdf::PdfPage::Vector(vp));
             }
         }
     }
 
-    let decoded = run_pipeline(&raw, config, None, svg.as_ref(), svg_render)?;
+    let decoded = run_pipeline(&raw, config, None, svg.as_ref(), svg_render, Some(&file_permit))?;
     crate::pdf::make_page(&decoded.img, config)
 }
 
@@ -2927,7 +3143,7 @@ fn merge_group_to_pdf(
 
 
 fn unique_merge_pdf(out_dir: &Path, rel: &str, config: &Config) -> PathBuf {
-    let suffix = build_suffix(config);
+    let suffix = if config.keep_names { String::new() } else { build_suffix(config) };
     let base = out_dir.join(format!("{}_Merged{}.pdf", rel, suffix));
     if !fs_path(&base).exists() { return base; }
     let (y, mo, d, h, mi, s) = local_now();
@@ -2965,5 +3181,125 @@ mod cli_tests {
         let alias =
             super::Cli::try_parse_from(["seamaestro", "--no-de-fringe"]).expect("alias must parse");
         assert!(!alias.de_fringe, "--no-de-fringe must turn de-fringe off");
+    }
+
+    #[test]
+    fn name_flag_parses_and_keeps_original_names() {
+        use clap::Parser;
+        let defaults = super::Cli::try_parse_from(["seamaestro"]).expect("defaults must parse");
+        assert!(!defaults.name, "keep-names must be off without --name");
+        let named = super::Cli::try_parse_from(["seamaestro", "--name"]).expect("--name must parse");
+        assert!(named.name, "--name must turn keep-names on");
+    }
+
+    #[test]
+    fn keep_names_drops_suffix_from_output_file() {
+        let mut config = super::config_default();
+        let input = std::path::Path::new("pics/photo.jpg");
+        let dir = std::path::Path::new("out");
+        config.cut = true;
+        config.format = super::ImageFormat::Png;
+        let cut = super::compute_output_path(input, &config, dir, None);
+        assert_eq!(cut.file_name().unwrap(), "photo_cut.png");
+        config.keep_names = true;
+        let kept = super::compute_output_path(input, &config, dir, None);
+        assert_eq!(kept.file_name().unwrap(), "photo.png");
+    }
+
+    #[test]
+    fn background_flattens_alpha_formats_only_when_set() {
+        let mut config = super::config_default();
+        config.format = super::ImageFormat::Jpeg;
+        assert!(super::should_flatten(&config), "formats without alpha are always matted");
+        config.format = super::ImageFormat::Png;
+        assert!(!super::should_flatten(&config), "png without --bg keeps transparency");
+        config.bg_color = Some("#808080".to_string());
+        assert!(super::should_flatten(&config), "explicit --bg mattes any format");
+        config.bg_color = Some("transparent".to_string());
+        assert!(!super::should_flatten(&config), "--bg transparent keeps the alpha");
+        config.bg_color = Some("none".to_string());
+        assert!(!super::should_flatten(&config), "--bg none keeps the alpha");
+    }
+
+    #[test]
+    fn pdf_bg_fill_paints_the_whole_page_in_its_own_state() {
+        let fill = String::from_utf8(super::pdf_bg_fill(10, 20, [128, 128, 128])).unwrap();
+        assert!(fill.starts_with("q\n"), "must isolate graphics state: {fill:?}");
+        assert!(fill.contains("rg"), "colour operator missing: {fill:?}");
+        assert!(fill.contains("0 0 10 20 re"), "page rect missing: {fill:?}");
+        assert!(fill.ends_with("f\nQ\n"), "must restore graphics state: {fill:?}");
+    }
+
+    #[test]
+    fn pause_flag_is_recognised_in_the_argument_vector() {
+        let check = |args: &[&str]| {
+            super::pause_flag_in_args(args.iter().map(|s| s.to_string()))
+        };
+        assert!(check(&["SeaMaestro.exe", "--nopause"]));
+        assert!(check(&["SeaMaestro.exe", "--no-pause"]));
+        assert!(check(&["SeaMaestro.exe", "photo.jpg", "--nopause"]));
+        assert!(check(&["SeaMaestro.exe", "--nopause=true"]));
+        assert!(!check(&["SeaMaestro.exe", "photo.jpg"]));
+        assert!(!check(&["SeaMaestro.exe", "--nopause-typo"]));
+        assert!(!check(&[]));
+    }
+
+    #[test]
+    fn pause_flag_ignores_positional_arguments() {
+        let check = |args: &[&str]| {
+            super::pause_flag_in_args(args.iter().map(|s| s.to_string()))
+        };
+        assert!(!check(&["SeaMaestro.exe", "vacation_nopause.jpg"]));
+        assert!(!check(&["SeaMaestro.exe", "nopause"]));
+        assert!(!check(&["SeaMaestro.exe", "nopause", "--format", "jpeg"]));
+        assert!(check(&["SeaMaestro.exe", "nopause", "--nopause"]));
+    }
+
+    #[test]
+    fn additional_need_does_not_double_count_the_held_read() {
+        assert_eq!(super::additional_need(500, Some(120)), 380);
+        assert_eq!(super::additional_need(500, None), 500);
+        assert_eq!(super::additional_need(100, Some(4096)), 0, "held permit already covers the need");
+    }
+
+    #[test]
+    fn same_path_folds_dot_and_absolute_forms() {
+        let cwd = std::env::current_dir().unwrap();
+        let rel = std::path::Path::new("alpha.png");
+        assert!(super::same_path(rel, rel), "identical paths match");
+        assert!(super::same_path(&cwd.join("alpha.png"), rel), "absolute vs relative match");
+        assert!(super::same_path(std::path::Path::new("./alpha.png"), rel), "dot form matches");
+        assert!(super::same_path(std::path::Path::new("out/../alpha.png"), rel), "parent form matches");
+        assert!(super::same_path(&cwd.join("out/../alpha.png"), rel), "parent form matches absolute");
+        assert!(!super::same_path(std::path::Path::new("beta.png"), rel), "different names differ");
+    }
+
+    #[test]
+    fn transparent_background_is_rejected_for_alpha_less_formats() {
+        let mut config = super::config_default();
+        config.format = super::ImageFormat::Jpeg;
+        config.bg_color = Some("transparent".to_string());
+        assert!(super::cut_format_error(&config).is_some(), "jpeg cannot hold transparency");
+        config.format = super::ImageFormat::Png;
+        assert!(super::cut_format_error(&config).is_none(), "png keeps transparency");
+        config.format = super::ImageFormat::Jpeg;
+        config.bg_color = None;
+        assert!(super::cut_format_error(&config).is_none(), "no --bg: nothing to validate");
+        config.bg_color = Some("#808080".to_string());
+        assert!(super::cut_format_error(&config).is_none(), "a concrete colour is fine");
+    }
+
+    #[test]
+    fn keep_names_keeps_merged_pdf_suffix_free() {
+        let mut config = super::config_default();
+        config.merge = true;
+        config.cut = true;
+        config.format = super::ImageFormat::Pdf;
+        let dir = std::path::Path::new("out");
+        let plain = super::unique_merge_pdf(dir, "doc", &config);
+        assert!(plain.to_string_lossy().contains("_cut"));
+        config.keep_names = true;
+        let kept = super::unique_merge_pdf(dir, "doc", &config);
+        assert_eq!(kept.file_name().unwrap(), "doc_Merged.pdf");
     }
 }

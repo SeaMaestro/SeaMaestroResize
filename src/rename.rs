@@ -187,6 +187,14 @@ pub(crate) fn try_apply_single(config: &mut Config, token: &str) -> bool {
             config.no_refine = true;
             return true;
         }
+        "name" => {
+            config.keep_names = true;
+            return true;
+        }
+        "profile" => {
+            config.profile = true;
+            return true;
+        }
         "nocut" => {
             config.cut = false;
             return true;
@@ -339,7 +347,7 @@ fn get_bare_re() -> &'static Regex {
 pub(crate) const SOFT_ALPHA_DEFAULT: bool = true;
 
 const KEYWORDS_ORDERED: &[&str] = &[
-    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge", "cutout", "cut", "tile", "soft", "hard", "plain", "nopause", "norefine", "nocut", "epcpu", "epdml", "epauto",
+    "jpeg", "jxl", "webp", "avif", "png", "ico", "tiff", "qoi", "bmp", "gif", "jpg", "tif", "pdf", "grayscale", "gray", "grey", "mono", "bw", "lossless", "progressive", "profile", "prog", "shanty", "sharp", "scan", "crop", "exif", "merge", "cutout", "cut", "tile", "soft", "hard", "plain", "nopause", "norefine", "name", "nocut", "epcpu", "epdml", "epauto",
 ];
 
 const LANG_KEYWORDS_ORDERED: &[&str] = &[
@@ -433,6 +441,8 @@ mod tests {
             raw_alpha: SOFT_ALPHA_DEFAULT,
             tile: false,
             no_refine: false,
+            keep_names: false,
+            profile: false,
 
             bg_color: None,
             preview_dir: None,
@@ -496,6 +506,35 @@ mod tests {
         let mut c = config();
         assert!(!try_apply_single(&mut c, "threads0"));
         assert!(!try_apply_single(&mut c, "threads"));
+    }
+
+    #[test]
+    fn exe_token_profile_survives_the_size_prefix() {
+        let mut c = config();
+        assert!(decompose_and_apply(&mut c, "w800profile"));
+        assert!(c.profile, "`profile` must not be eaten by the shorter `prog` keyword");
+        assert!(matches!(c.target_size, Some(Size::Width(800))));
+    }
+
+    #[test]
+    fn exe_token_nopause() {
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "nopause"));
+        assert!(c.no_pause);
+    }
+
+    #[test]
+    fn exe_token_name() {
+        let mut c = config();
+        assert!(try_apply_single(&mut c, "name"));
+        assert!(c.keep_names);
+        let mut c = config();
+        assert!(!try_apply_single(&mut c, "names"));
+        assert!(!c.keep_names);
+        let mut c = config();
+        assert!(decompose_and_apply(&mut c, "w800name"));
+        assert!(c.keep_names);
+        assert!(matches!(c.target_size, Some(Size::Width(800))));
     }
 
     #[test]

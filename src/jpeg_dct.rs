@@ -2,6 +2,18 @@ use std::os::raw::{c_int, c_ulong};
 
 const JPEG_HEADER_OK: c_int = 1;
 
+struct JpegDecompressGuard {
+    dinfo: *mut mozjpeg_sys::jpeg_decompress_struct,
+}
+
+impl Drop for JpegDecompressGuard {
+    fn drop(&mut self) {
+        if !self.dinfo.is_null() {
+            unsafe { mozjpeg_sys::jpeg_destroy_decompress(&mut *self.dinfo) };
+        }
+    }
+}
+
 unsafe extern "C-unwind" fn jpeg_error_exit(_cinfo: &mut mozjpeg_sys::jpeg_common_struct) {
     std::panic::panic_any("jpeg_fatal_error");
 }
@@ -35,12 +47,12 @@ unsafe fn run_scaled_decode(
     let mut dinfo: jpeg_decompress_struct = std::mem::zeroed();
     dinfo.common.err = &mut err;
     jpeg_create_decompress(&mut dinfo);
+    let _guard = JpegDecompressGuard { dinfo: &mut dinfo as *mut _ };
 
     jpeg_mem_src(&mut dinfo, raw.as_ptr(), raw.len() as c_ulong);
     jpeg_save_markers(&mut dinfo, 0xE2, 0xFFFF);
 
     if jpeg_read_header(&mut dinfo, 1) != JPEG_HEADER_OK {
-        jpeg_destroy_decompress(&mut dinfo);
         return None;
     }
 
@@ -62,7 +74,6 @@ unsafe fn run_scaled_decode(
     jpeg_calc_output_dimensions(&mut dinfo);
 
     if jpeg_start_decompress(&mut dinfo) == 0 {
-        jpeg_destroy_decompress(&mut dinfo);
         return None;
     }
 
@@ -70,7 +81,6 @@ unsafe fn run_scaled_decode(
     let h = dinfo.output_height as usize;
     let comps = dinfo.output_components as usize;
     if comps != 1 && comps != 3 {
-        jpeg_destroy_decompress(&mut dinfo);
         return None;
     }
 
@@ -86,7 +96,6 @@ unsafe fn run_scaled_decode(
     }
     let complete = dinfo.output_scanline >= dinfo.output_height;
     jpeg_finish_decompress(&mut dinfo);
-    jpeg_destroy_decompress(&mut dinfo);
 
     if !complete {
         return None;
@@ -98,4 +107,41 @@ unsafe fn run_scaled_decode(
     };
 
     Some((img, icc))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tiny_jpeg() -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([200, 30, 30]),
+        ));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Jpeg)
+            .expect("encode 8x8 jpeg");
+        out
+    }
+
+    #[test]
+    fn intact_jpeg_still_decodes() {
+        let jpeg = tiny_jpeg();
+        let decoded = decode_scaled_jpeg(&jpeg, 4, 8).expect("valid jpeg must decode");
+        assert_eq!((decoded.0.width(), decoded.0.height()), (4, 4));
+    }
+
+    #[test]
+    fn truncated_jpegs_return_none_without_crashing() {
+        let jpeg = tiny_jpeg();
+        assert!(jpeg.len() > 40, "fixture too small: {} bytes", jpeg.len());
+        for divisor in [2usize, 3, 4] {
+            let cut = jpeg.len() / divisor;
+            let broken = &jpeg[..cut];
+            for _ in 0..25 {
+                assert!(decode_scaled_jpeg(broken, 4, 8).is_none(), "cut at {cut} bytes");
+            }
+        }
+    }
 }

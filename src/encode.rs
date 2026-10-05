@@ -217,6 +217,8 @@ unsafe extern "C" fn noop_svt_log(
 ) {
 }
 
+static SVT_LOG_INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
 pub(crate) fn avx2_available() -> bool {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     {
@@ -243,7 +245,9 @@ fn encode_avif_raw(
         anyhow::bail!("{}", msg().warn_avif_no_avx2);
     }
     unsafe {
-        svt_av1_set_log_callback(Some(noop_svt_log), std::ptr::null_mut());
+        SVT_LOG_INIT.get_or_init(|| {
+            svt_av1_set_log_callback(Some(noop_svt_log), std::ptr::null_mut());
+        });
         let encoder = avifEncoderCreate();
         if encoder.is_null() {
             anyhow::bail!("{}", msg().err_avif.replacen("{}", "avifEncoderCreate returned NULL", 1));
@@ -307,6 +311,16 @@ fn encode_avif_raw(
     }
 }
 
+const PNG_FAST_PRESET_MIN_PX: u64 = 8_000_000;
+
+fn png_preset_for(width: u32, height: u32) -> u8 {
+    if width as u64 * height as u64 > PNG_FAST_PRESET_MIN_PX {
+        0
+    } else {
+        1
+    }
+}
+
 fn encode_png_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let mut encoder = image::codecs::png::PngEncoder::new(&mut buf);
@@ -316,7 +330,8 @@ fn encode_png_to_vec(img: &image::DynamicImage, icc: Option<&[u8]>, exif: Option
         }
     }
     img.write_with_encoder(encoder).context(msg().err_png)?;
-    let optimized = oxipng::optimize_from_memory(&buf, &oxipng::Options::from_preset(1))
+    let preset = png_preset_for(img.width(), img.height());
+    let optimized = oxipng::optimize_from_memory(&buf, &oxipng::Options::from_preset(preset))
         .map_err(|e| anyhow::anyhow!("{}", msg().err_oxipng.replacen("{}", &e.to_string(), 1)))?;
     if let Some(blob) = exif.filter(|e| !e.is_empty()) {
         return Ok(png_embed_exif(optimized, blob));
@@ -464,7 +479,10 @@ fn encode_jxl_raw(raw: &[u8], w: u32, h: u32, channels: u32, quality: u8, lossle
                 anyhow::bail!("JXL encode failed: JxlEncoderUseBoxes: {}", res);
             }
             let box_type: [libc::c_char; 4] = [b'E' as libc::c_char, b'x' as libc::c_char, b'i' as libc::c_char, b'f' as libc::c_char];
-            let res = JxlEncoderAddBox(enc.0, &box_type, blob.as_ptr(), blob.len(), 0);
+            let mut payload = Vec::with_capacity(4 + blob.len());
+            payload.extend_from_slice(&0u32.to_be_bytes());
+            payload.extend_from_slice(blob);
+            let res = JxlEncoderAddBox(enc.0, &box_type, payload.as_ptr(), payload.len(), 0);
             if res != JxlEncoderStatus_JXL_ENC_SUCCESS {
                 anyhow::bail!("JXL encode failed: JxlEncoderAddBox: {}", res);
             }
@@ -641,6 +659,336 @@ mod tests {
             png_not_avif_zero * 10 <= total,
             "AVIF lost transparency in {png_not_avif_zero} of {total} pixels"
         );
+    }
+}
+
+#[cfg(test)]
+mod oxipng_probe {
+    use std::time::Instant;
+
+    #[test]
+    fn png_preset_threshold() {
+        use super::png_preset_for;
+        assert_eq!(png_preset_for(1920, 1080), 1);
+        assert_eq!(png_preset_for(2000, 2000), 1);
+        assert_eq!(png_preset_for(2828, 2828), 1);
+        assert_eq!(png_preset_for(2829, 2829), 0);
+        assert_eq!(png_preset_for(4096, 3072), 0);
+        assert_eq!(png_preset_for(5888, 4416), 0);
+    }
+
+    #[test]
+    #[ignore = "diagnostic: run with SM_OXIPNG_PROBE set to a semicolon separated PNG list"]
+    fn report_oxipng_cost() {
+        let list = match std::env::var("SM_OXIPNG_PROBE") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return,
+        };
+        let mut lines: Vec<String> = Vec::new();
+        for path in list.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+            let raw = match std::fs::read(path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    lines.push(format!("file={path} read_error={err}"));
+                    continue;
+                }
+            };
+            let img = match image::load_from_memory(&raw) {
+                Ok(img) => img,
+                Err(err) => {
+                    lines.push(format!("file={path} decode_error={err}"));
+                    continue;
+                }
+            };
+            let reference = img.to_rgba8();
+            lines.push(format!(
+                "file={} px={}x{} source_bytes={}",
+                path,
+                reference.width(),
+                reference.height(),
+                raw.len()
+            ));
+
+            let (bytes, ms) = encode_png_preset(&img, None);
+            lines.push(format!(
+                "  image_encoder_only   {ms:>9.0} ms {:>10} B pixels_equal={}",
+                bytes.len(),
+                pixels_equal(&reference, &bytes)
+            ));
+            dump(&lines);
+
+            let pixels = reference.width() as usize * reference.height() as usize;
+            for preset in [0u8, 1] {
+                let (bytes, ms) = encode_png_preset(&img, Some(preset));
+                lines.push(format!(
+                    "  oxipng_preset_{preset}       {ms:>9.0} ms {:>10} B pixels_equal={}",
+                    bytes.len(),
+                    pixels_equal(&reference, &bytes)
+                ));
+                dump(&lines);
+            }
+            if pixels <= 8_000_000 {
+                let (bytes, ms) = encode_png_preset(&img, Some(2));
+                lines.push(format!(
+                    "  oxipng_preset_2       {ms:>9.0} ms {:>10} B pixels_equal={}",
+                    bytes.len(),
+                    pixels_equal(&reference, &bytes)
+                ));
+                dump(&lines);
+            } else {
+                lines.push(
+                    "  oxipng_preset_2       skipped (>8 MP: exceeds 10 min in this probe)"
+                        .to_string(),
+                );
+                dump(&lines);
+            }
+        }
+        dump(&lines);
+    }
+
+    fn dump(lines: &[String]) {
+        let text = lines.join("\n");
+        println!("{text}");
+        let _ = std::fs::write(std::env::temp_dir().join("sm_oxipng_probe.txt"), &text);
+    }
+
+    fn encode_png_preset(img: &image::DynamicImage, preset: Option<u8>) -> (Vec<u8>, f64) {
+        let rgba = img.to_rgba8();
+        let mut buf = Vec::new();
+        let started = Instant::now();
+        let encoder = image::codecs::png::PngEncoder::new(&mut buf);
+        image::ImageEncoder::write_image(
+            encoder,
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("png encode");
+        if let Some(preset) = preset {
+            buf = oxipng::optimize_from_memory(&buf, &oxipng::Options::from_preset(preset))
+                .expect("oxipng optimize");
+        }
+        (buf, started.elapsed().as_secs_f64() * 1000.0)
+    }
+
+    #[test]
+    fn jxl_exif_round_trips_through_the_encoder() {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([10, 20, 30]),
+        ));
+        let blob: &[u8] = b"MM\x00*\x00\x00\x00\x08\x00\x01\x01\x12\x00\x03";
+        let jxl = super::encode_jxl_to_vec(&img, 90, false, None, Some(blob)).expect("jxl encode");
+        let pos = jxl
+            .windows(4)
+            .position(|w| w == b"Exif")
+            .expect("encoded JXL must carry an Exif box");
+        assert_eq!(
+            &jxl[pos + 4..pos + 8],
+            &0u32.to_be_bytes(),
+            "the TIFF offset field is zero; the TIFF header follows it"
+        );
+        assert_eq!(&jxl[pos + 8..pos + 8 + blob.len()], blob, "the Exif payload must follow the offset");
+    }
+
+    #[test]
+    fn jxl_exif_is_read_back_by_our_own_reader() {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            4,
+            4,
+            image::Rgb([10, 20, 30]),
+        ));
+        let blob: &[u8] = b"MM\x00*\x00\x00\x00\x08\x00\x01\x01\x12\x00\x03";
+        let jxl = super::encode_jxl_to_vec(&img, 90, false, None, Some(blob)).expect("jxl encode");
+        let decoded = crate::decode::jxl_exif(&jxl).expect("exif must survive the round-trip");
+        assert_eq!(decoded, blob);
+    }
+
+    fn pixels_equal(reference: &image::RgbaImage, png: &[u8]) -> bool {
+        match image::load_from_memory(png) {
+            Ok(img) => img.to_rgba8() == *reference,
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod alpha_diff {
+    use std::path::PathBuf;
+
+    #[test]
+    #[ignore = "diagnostic: run with SM_ALPHA_DIFF=\"a.png;b.png;out_dir\""]
+    fn compare_alpha() {
+        let spec = match std::env::var("SM_ALPHA_DIFF") {
+            Ok(value) if !value.trim().is_empty() => value,
+            _ => return,
+        };
+        let parts: Vec<&str> = spec.split(';').map(str::trim).filter(|p| !p.is_empty()).collect();
+        if parts.len() < 3 {
+            println!("usage: SM_ALPHA_DIFF=\"a.png;b.png;out_dir\"");
+            return;
+        }
+        let a = image::open(parts[0]).expect("open A").to_rgba8();
+        let b = image::open(parts[1]).expect("open B").to_rgba8();
+        assert_eq!((a.width(), a.height()), (b.width(), b.height()), "size mismatch");
+        let (w, h) = (a.width() as usize, a.height() as usize);
+        let out = PathBuf::from(parts[2]);
+        std::fs::create_dir_all(&out).expect("out dir");
+
+        let cell = 256usize;
+        let cols = w.div_ceil(cell);
+        let rows = h.div_ceil(cell);
+        let mut cells = vec![0u64; cols * rows];
+        let mut col_sum = vec![0u64; w];
+        let mut row_sum = vec![0u64; h];
+        let mut heat = vec![0u8; w * h];
+        let mut overlay = vec![0u8; w * h * 3];
+        let pa = a.as_raw();
+        let pb = b.as_raw();
+        let mut max = 0u8;
+        let mut sum = 0u64;
+        let mut over = [0u64; 4];
+        let mut fade_out = 0u64;
+        let mut fade_in = 0u64;
+        let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0usize, 0usize);
+        for y in 0..h {
+            for x in 0..w {
+                let index = (y * w + x) * 4;
+                let alpha_a = pa[index + 3];
+                let alpha_b = pb[index + 3];
+                let d = alpha_a.abs_diff(alpha_b);
+                sum += d as u64;
+                max = max.max(d);
+                col_sum[x] += d as u64;
+                row_sum[y] += d as u64;
+                if d > 0 {
+                    over[0] += 1;
+                }
+                if d > 1 {
+                    over[1] += 1;
+                }
+                if d > 4 {
+                    over[2] += 1;
+                }
+                if d > 16 {
+                    over[3] += 1;
+                }
+                if alpha_a > 200 && alpha_b < 64 {
+                    fade_out += 1;
+                }
+                if alpha_a < 64 && alpha_b > 200 {
+                    fade_in += 1;
+                }
+                if d > 0 {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+                heat[y * w + x] = (d as u32 * 8).min(255) as u8;
+                let o = (y * w + x) * 3;
+                overlay[o] = alpha_b;
+                overlay[o + 1] = alpha_a;
+                overlay[o + 2] = (d as u32 * 8).min(255) as u8;
+                cells[(y / cell) * cols + (x / cell)] += d as u64;
+            }
+        }
+        let total = (w * h) as u64;
+        let mut lines = vec![
+            format!("A={}", parts[0]),
+            format!("B={}", parts[1]),
+            format!("size={w}x{h} pixels={total}"),
+            format!(
+                "alpha|d|: max={max} mean={:.5} over0={} over1={} over4={} over16={}",
+                sum as f64 / total as f64,
+                over[0],
+                over[1],
+                over[2],
+                over[3]
+            ),
+        ];
+        if over[0] > 0 {
+            lines.push(format!("bbox=({min_x},{min_y})..({max_x},{max_y})"));
+        }
+        lines.push(format!(
+            "mask_flips: A_opaque->B_clear={fade_out} A_clear->B_opaque={fade_in}"
+        ));
+        let mut order: Vec<usize> = (0..cells.len()).collect();
+        order.sort_by_key(|i| std::cmp::Reverse(cells[*i]));
+        for (rank, index) in order.iter().take(6).enumerate() {
+            if cells[*index] == 0 {
+                break;
+            }
+            let gx = index % cols;
+            let gy = index / cols;
+            lines.push(format!(
+                "hot{rank}: cell=({},{}) side={cell} sum={} center=({},{})",
+                gx * cell,
+                gy * cell,
+                cells[*index],
+                gx * cell + cell / 2,
+                gy * cell + cell / 2
+            ));
+            let pad = 512usize;
+            let x0 = (gx * cell).saturating_sub(pad);
+            let y0 = (gy * cell).saturating_sub(pad);
+            let x1 = (gx * cell + cell + pad).min(w);
+            let y1 = (gy * cell + cell + pad).min(h);
+            let (cw, ch) = ((x1 - x0) as u32, (y1 - y0) as u32);
+            for (tag, img) in [("a", &a), ("b", &b)] {
+                let crop = image::imageops::crop_imm(img, x0 as u32, y0 as u32, cw, ch).to_image();
+                crop.save(out.join(format!("hot{rank}_{tag}_x{x0}_y{y0}.png")))
+                    .expect("crop save");
+            }
+        }
+        let stats = |v: &[u64]| -> (u64, u64) {
+            let mut s = v.to_vec();
+            s.sort_unstable();
+            (s[s.len() / 2], s[s.len() * 99 / 100])
+        };
+        let (col_med, col_p99) = stats(&col_sum);
+        let (row_med, row_p99) = stats(&row_sum);
+        let mut cols_idx: Vec<usize> = (0..w).collect();
+        cols_idx.sort_by_key(|i| std::cmp::Reverse(col_sum[*i]));
+        let mut rows_idx: Vec<usize> = (0..h).collect();
+        rows_idx.sort_by_key(|i| std::cmp::Reverse(row_sum[*i]));
+        lines.push(format!("col_profile: median={col_med} p99={col_p99}"));
+        lines.push(format!(
+            "col_top10: {}",
+            cols_idx
+                .iter()
+                .take(10)
+                .map(|i| format!("x{i}={}", col_sum[*i]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        lines.push(format!("row_profile: median={row_med} p99={row_p99}"));
+        lines.push(format!(
+            "row_top10: {}",
+            rows_idx
+                .iter()
+                .take(10)
+                .map(|i| format!("y{i}={}", row_sum[*i]))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        let heat_path = out.join("alpha_diff_heat.png");
+        image::GrayImage::from_raw(w as u32, h as u32, heat)
+            .expect("heat buffer")
+            .save(&heat_path)
+            .expect("heat save");
+        let overlay_path = out.join("alpha_overlay_Rb_Ga_Bdiff.png");
+        image::RgbImage::from_raw(w as u32, h as u32, overlay)
+            .expect("overlay buffer")
+            .save(&overlay_path)
+            .expect("overlay save");
+        lines.push(format!("heatmap={}", heat_path.display()));
+        lines.push(format!("overlay={}", overlay_path.display()));
+        let text = lines.join("\n");
+        println!("{text}");
+        let _ = std::fs::write(std::env::temp_dir().join("sm_alpha_diff.txt"), &text);
     }
 }
 

@@ -54,23 +54,14 @@ impl PdfPage {
     }
 }
 
-fn flatten_alpha_white(img: &DynamicImage) -> DynamicImage {
-    let rgba = img.to_rgba8();
-    let mut rgb = image::RgbImage::new(rgba.width(), rgba.height());
-    for (src, dst) in rgba.pixels().zip(rgb.pixels_mut()) {
-        let a = src[3] as u32;
-        let r = (src[0] as u32 * a + 255 * (255 - a)) / 255;
-        let g = (src[1] as u32 * a + 255 * (255 - a)) / 255;
-        let b = (src[2] as u32 * a + 255 * (255 - a)) / 255;
-        *dst = image::Rgb([r as u8, g as u8, b as u8]);
-    }
-    DynamicImage::ImageRgb8(rgb)
-}
-
 pub(crate) fn make_page(img: &DynamicImage, config: &Config) -> Result<PdfPage> {
     let owned;
     let img: &DynamicImage = if img.color().has_alpha() {
-        owned = flatten_alpha_white(img);
+        let rgb = match config.bg_color.as_deref() {
+            Some(text) => crate::bgcolor::parse_color(text)?.unwrap_or(crate::bgcolor::WHITE),
+            None => crate::bgcolor::WHITE,
+        };
+        owned = crate::bgcolor::flatten_to_color(img, rgb);
         &owned
     } else {
         img

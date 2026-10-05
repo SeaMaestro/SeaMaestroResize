@@ -176,7 +176,7 @@ fn chroma_denoise(buf: &mut [u8], w: usize, h: usize, ch: usize, r: usize) {
 
     let need = (w as u64).saturating_mul(h as u64).saturating_mul(5);
     let budget = crate::decode::mem_budget();
-    if !budget.acquire(need) {
+    if !budget.try_acquire(need) {
         eprintln!("  {}", crate::msg().note_mem_skip);
         return;
     }

@@ -1,3 +1,166 @@
+## SeaMaestro v2.5.5
+
+## ✨ What's New
+
+**Keep the original file names — `--name`.** By default SeaMaestro marks its
+output (`photo_cut.png`, `photo_w800_q85.jpg`, …) so you can tell a converted
+file from the original at a glance. When you want the names out of the way, add
+`--name` (or put `name` in the exe name, e.g. `SeaMaestroCut_w800_name.exe`): the
+output keeps the original stem — `photo.png`, `photo.jpg` — with no `_cut`,
+`_w800`, `_q85`, `_bw`, `_crop` or `_scan` appended. Everything else is
+unchanged: the same output folder, the same folder structure for whole
+directories, the same pixels. A name clash is still resolved with a counter
+(`photo_1.png`), so nothing is ever overwritten on disk. The flag works in both
+builds and also covers merged PDFs (`--merge`: `report_Merged.pdf` instead of
+`report_Merged_cut.pdf`). If you pass `--output` explicitly, that path still wins.
+
+**Crisper edges where the refine used to give up (adaptive scale).** Refining the
+edge at native resolution was all-or-nothing: if the edge band needed more tiles
+than one pass allows — a 26 MP frame on the CPU, or an extremely tall frame (up to
+10000 px) on the GPU — the refine switched off completely and the whole edge
+stayed soft. Now SeaMaestro steps the tile size up instead (×2, then ×4) until the
+work fits the budget, and says so in plain words: *"The edge is refined at reduced
+scale s=2 — that much fine rigging can't be overhauled in one watch (6 tiles,
+limit 12). Sharper than no refine at all."* The default 26 MP frame on the GPU is
+untouched (scale 1, byte-for-byte the same output), and the reduced scale only
+ever replaces a soft edge, never a sharp one.
+
+## 🐛 Bug Fixes
+
+**`--bg` now works for every format.** The backdrop colour used to be applied only
+where transparency is impossible (JPEG/PDF); for PNG, WebP, AVIF, JXL or TIFF it was
+silently ignored, so `--cut --format png --bg gray` still gave you a transparent PNG.
+If you ask for a colour, you get it: any format is now matted on the colour you set
+(alpha is dropped, exactly as with JPEG). Asking for transparency explicitly
+(`--bg transparent`, `--bg none`) keeps the alpha, exactly as before. PDF honours the
+colour too — with `--cut` and for a transparent source converted straight to PDF, which
+used to be forced onto white (that covers the raster path and the vector SVG→PDF path,
+where the page is now painted before the artwork is drawn). `--preview` keeps using the colour as before.
+Without `--bg` nothing changes — alpha formats stay transparent, JPEG/PDF stay on white.
+
+**A transparent source no longer loses its alpha in silence.** Converting a transparent
+PNG straight to JPEG (or PDF) used to drop the alpha channel with no backdrop at all,
+which left those pixels black; the frame is now matted — on the colour you set, or on
+white when you don't. The same validation now covers `--bg transparent` for a format that
+cannot hold transparency (JPEG/PDF): instead of a silent white you get the plain-language
+refusal that already existed for `--cut`.
+
+**JXL and HEIF round-trips are complete now.** An EXIF block written into a `.jxl`
+used to be unreadable — SeaMaestro's own reader (and every other tool) skips the 4-byte
+TIFF offset the format requires, and the encoder was not writing one; it is written now.
+HEIF frames whose last row is not padded to the stride lost that row and failed to decode
+entirely; the row is kept. Images embedded in an SVG are now decoded under the same memory
+limits as everything else, instead of being able to allocate gigabytes behind the budget.
+
+**Piped input is now checked against the memory budget while it is read.** An
+oversized pipe used to be pulled into RAM in full before the budget was consulted,
+so on a small machine — or in a container — the OS could kill the process before it
+ever got the chance to report that the input was too large. The stream is now read
+in 64 KiB chunks, each chunk is checked against the budget as it arrives and the
+memory it needs is held until the input has been processed, so the read stops at the
+budget instead of overshooting it; the input-size cap is enforced in the same loop.
+The `Press Enter to exit` prompt is no longer printed when there is no console to
+press it in (piped or redirected input), and `--nopause` is now honoured on the
+error path as well.
+
+**Two smaller fixes.** `w800profile` in an exe name is no longer split as `prog` + `ile`
+(keep-names and profile tokens are matched whole), and an output path written as
+`out/../photo.png` is recognised as the input file, so the overwrite guard fires.
+
+**The banner now lists every setting in force.** Flags that used to run without
+ever showing up in the header — no-refine, the plain (raw) edge, tiled cutting,
+the hard edge, the backend (`--ep cpu`), `--threads`, `--bg`, `--preview` and the
+new keep-names — are printed now, each one only when it differs from the default.
+You can see at a glance what the current run is actually doing.
+
+**The banner no longer cuts long lines short.** The header box used to be a fixed
+width, so the Spanish and German titles lost their last words to "…". The box now
+sizes itself to the longest line it has to print (localized labels included), so
+every language fits.
+
+## 🔧 Under the hood
+
+- Tiled cut and reduced-scale refine report the tile size they really use (×2 and
+  ×4 at reduced scale), instead of the base 1024 px constant.
+
+- PNG saving on large frames is faster. Above 8 MP the lossless PNG optimizer runs
+  at a lighter preset: on the 26 MP reference frame the save stage drops from
+  ~57 s to ~8 s at the cost of a ~10–15 % larger file (33.2 MB vs 29.6 MB). The
+  pixels are identical — this is compression effort, not image quality. Frames of
+  8 MP and below are encoded exactly as before.
+- Edge cleanup (de-fringe) now checks free memory instead of a hard 4 MP pixel
+  threshold, so a strip can still run in parallel on a machine that has headroom.
+  The result is byte-identical; only the peak memory is lower.
+- Cutting on the CPU is announced once: *"Main engine's out — we're on the oars
+  (CPU). Slow going, but every seam gets stitched by hand: the edge comes out
+  crisp and clean."*, together with the reminder that `--norefine` (or `_norefine`
+  in the exe name) makes port sooner, at the cost of a softer edge. The note is
+  printed at most once per run.
+- Memory accounting is tighter. The frame being read now stays inside the memory
+  budget for the whole run instead of only while the file is being read, and the
+  perspective crop (`--crop`) reserves its output buffer before allocating it — a
+  huge deskew used to be able to ask for ~3 GB behind the budget's back. On a busy
+  machine that is the difference between a slow run and a swap storm.
+- Edge cases in the deskew were closed too: a document photographed at roughly 45°
+  (a diamond-shaped corner order) is now ordered correctly instead of silently
+  skipping the perspective correction, and the AVIF encoder's logging hook is set
+  up once instead of from every worker thread.
+- `--profile` is new — a hidden measuring switch (`--profile`, not listed in
+  `--help`, also available as `_profile` in the exe name). It prints where the time
+  went: `read / decode / effects / cut (infer / refine / tiled / de-fringe) /
+  encode / preview / total`. It changes nothing in the output, it works in both
+  builds — the resizer shows the stages it has, while the cut stages appear only in
+  the cut build — and it is the first thing to switch on when a run feels slow.
+- The raw ONNX Runtime log lines no longer spill into the console. When the GPU
+  runs out of memory or the driver hiccups, you used to see the runtime's own
+  red `[E:onnxruntime:…]` text just before SeaMaestro's own note — true, but it
+  looked like a crash report. The runtime logger is now routed through the tool,
+  so you get only the plain-language message (the fallback to the CPU happens
+  exactly as before). Need the technical log for a bug report? Set
+  `SEAMAESTRO_ORT_LOG=1` in the environment and the full runtime output comes back.
+
+## 📦 The two files
+
+| file | what it is | size |
+| --- | --- | --- |
+| `SeaMaestro.exe` | the resizer: resize, crop, smart scan, formats, PDF and merge | ~35 MB |
+| `SeaMaestroCut.exe` | the same resizer plus AI background cut (BEN2, DirectML GPU or CPU) | ~300 MB |
+
+The cut build is a background remover by default, and the file name is what switches
+it on (`cut` inside `SeaMaestroCut.exe`), so no flag is needed: drop a photo onto it —
+or run `SeaMaestroCut.exe photo.jpg` — and you get a transparent PNG. Renaming the
+light build to a name containing `cut` enables nothing: the light build has no cut
+engine in it, it only reminds you to take the cut build instead.
+
+Want the cut build to behave exactly like the light one? Rename it so the name has no
+`cut`/`cutout` in it (`SeaMaestroRenamed.exe`), or pass `--nocut`. Then the pipeline,
+the options and the output are identical to `SeaMaestro.exe`, and the inference
+runtime is never unpacked from the executable.
+
+
+## 🔔 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED
+SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED
+Size: TO_BE_FILLED MB (PE executable, 64-bit)
+VirusTotal (light build): TO_BE_FILLED
+VirusTotal (cut build): TO_BE_FILLED
+
+The release contains two files: `SeaMaestro.exe` (resizer) and
+`SeaMaestroCut.exe` (resizer + background cut). The cut build writes its
+inference runtime into `%LOCALAPPDATA%\SeaMaestro\ort\` on first use; an
+unsigned executable that drops DLLs can trip antivirus heuristics — if the cut
+fails to start, check Windows Security → Protection history.
+
+## 📄 License
+
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
 ## SeaMaestro v2.5.4
 
 ## ✨ What's New
@@ -83,6 +246,8 @@ even with flags present, and `--lang` keeps the last word.
   (`--bg white`, `--ep cpu`, `--threads 4`) keep working.
 - The cut model is fed the ImageNet mean/std normalisation it was trained with — the
   same setting the reference frames in the release gate were produced with.
+
+---
 
 ## SeaMaestro v2.5.3
 

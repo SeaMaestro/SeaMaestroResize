@@ -2507,7 +2507,38 @@ fn order_corners(c: &[(f32, f32); 4]) -> [(f32, f32); 4] {
             bl = i;
         }
     }
-    [c[tl], c[tr], c[br], c[bl]]
+    let degenerate = tl == tr || tl == br || tl == bl || tr == br || tr == bl || br == bl;
+    if !degenerate {
+        return [c[tl], c[tr], c[br], c[bl]];
+    }
+    order_corners_by_angle(c)
+}
+
+/// Fallback для вырожденных квадов (ромбы ~45°), где min/max(x+y) и min/max(x−y)
+/// дают дубли индексов. Сортировка по углу вокруг центроида, старт — от min(x+y),
+/// чтобы сохранить канонический порядок TL→TR→BR→BL: в экранных координатах (y
+/// вниз) `atan2` растёт по часовой стрелке, поэтому обход от TL идёт TR→BR→BL.
+fn order_corners_by_angle(c: &[(f32, f32); 4]) -> [(f32, f32); 4] {
+    let cx = (c[0].0 + c[1].0 + c[2].0 + c[3].0) / 4.0;
+    let cy = (c[0].1 + c[1].1 + c[2].1 + c[3].1) / 4.0;
+    let mut idx = [0usize, 1, 2, 3];
+    idx.sort_by(|&a, &b| {
+        let angle_a = (c[a].1 - cy).atan2(c[a].0 - cx);
+        let angle_b = (c[b].1 - cy).atan2(c[b].0 - cx);
+        angle_a.partial_cmp(&angle_b).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let start = (0..4)
+        .min_by(|&a, &b| {
+            let sum_a = c[idx[a]].0 + c[idx[a]].1;
+            let sum_b = c[idx[b]].0 + c[idx[b]].1;
+            sum_a.partial_cmp(&sum_b).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    let mut out = [(0.0f32, 0.0f32); 4];
+    for k in 0..4 {
+        out[k] = c[idx[(start + k) % 4]];
+    }
+    out
 }
 
 fn validate(c: &[(f32, f32); 4], dw: f32, dh: f32) -> bool {
@@ -3015,6 +3046,16 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::D
         return None;
     }
 
+    let budget = crate::decode::mem_budget();
+    let need = ((dw as u64) * (dh as u64) + (img.width() as u64) * (img.height() as u64)) * 3;
+    if !budget.try_acquire(need) {
+        if crop_debug() {
+            eprintln!("  [crop] warp fallback reason=budget need={} MiB -> original", need / (1024 * 1024));
+        }
+        return None;
+    }
+    let _permit = crate::decode::MemPermit { budget, need };
+
     let src_rgb = img.to_rgb8();
     let (sw, sh) = (src_rgb.width() as i32, src_rgb.height() as i32);
     let src = src_rgb.as_raw();
@@ -3495,6 +3536,28 @@ mod tests {
         let br = (96.0f32, 104.0f32);
         let bl = (12.0f32, 100.0f32);
         assert_eq!(order_corners(&[br, bl, tl, tr]), [tl, tr, br, bl]);
+    }
+
+    #[test]
+    fn order_corners_handles_diagonal_quads() {
+        let diamond = [
+            (0.0f32, -10.0f32),
+            (10.0f32, 0.0f32),
+            (0.0f32, 10.0f32),
+            (-10.0f32, 0.0f32),
+        ];
+        let canon = order_corners(&diamond);
+        let mut distinct: Vec<(f32, f32)> = Vec::new();
+        for p in canon {
+            assert!(!distinct.contains(&p), "order_corners duplicated a corner: {p:?}");
+            distinct.push(p);
+        }
+        assert_eq!(distinct.len(), 4);
+        for p in permutations4() {
+            let q = [diamond[p[0]], diamond[p[1]], diamond[p[2]], diamond[p[3]]];
+            assert_eq!(order_corners(&q), canon, "perm={:?}", p);
+        }
+        assert_eq!(order_corners(&canon), canon, "not idempotent on a diamond");
     }
 
     #[test]

@@ -104,7 +104,7 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         return None;
     }
     let budget = mem_budget();
-    if !budget.acquire(vec_need) {
+    if !budget.try_acquire(vec_need) {
         eprintln!("  {}", crate::msg().note_mem_skip);
         return None;
     }
@@ -1436,7 +1436,7 @@ fn webp_icc(raw: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn decode_image_rgba(raw: &[u8], lut: Option<&[u8; 256]>) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let img = image::load_from_memory(raw).ok()?;
+    let img = crate::decode::decode_with_limits(raw).ok().map(|(img, _)| img)?;
     let rgba = img.to_rgba8();
     let mut rgb = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize) * 3);
     let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
@@ -1464,7 +1464,7 @@ fn decode_image_rgba(raw: &[u8], lut: Option<&[u8; 256]>) -> Option<(Vec<u8>, Op
 }
 
 fn decode_image_gray_raw(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let img = image::load_from_memory(raw).ok()?;
+    let img = crate::decode::decode_with_limits(raw).ok().map(|(img, _)| img)?;
     let rgba = img.to_rgba8();
     let mut gray = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
     let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
@@ -1486,7 +1486,7 @@ fn decode_image_gray_raw(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
 }
 
 fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
-    let img = image::load_from_memory(raw).ok()?;
+    let img = crate::decode::decode_with_limits(raw).ok().map(|(img, _)| img)?;
     let rgba = img.to_rgba8();
     let mut gray = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
     let mut alpha = Vec::with_capacity((rgba.width() as usize) * (rgba.height() as usize));
@@ -1506,4 +1506,17 @@ fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         None
     };
     Some((gray, smask))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_embedded_images_still_decode_through_the_limits() {
+        let png = include_bytes!("../tests/fixtures/8x8.png");
+        assert!(decode_image_rgba(png, None).is_some(), "rgba path must keep working");
+        assert!(decode_image_gray(png).is_some(), "gray path must keep working");
+        assert!(decode_image_gray_raw(png).is_some(), "gray raw path must keep working");
+    }
 }

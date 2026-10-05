@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -30,6 +31,14 @@ pub(crate) const EP_CPU: u8 = 1;
 pub(crate) const EP_DML: u8 = 2;
 
 static SESSION: Mutex<Option<(Session, bool)>> = Mutex::new(None);
+static CPU_REFINE_NOTE_SHOWN: AtomicBool = AtomicBool::new(false);
+
+fn cpu_refine_note_once(is_dml: bool) -> bool {
+    if is_dml {
+        return false;
+    }
+    !CPU_REFINE_NOTE_SHOWN.swap(true, Ordering::Relaxed)
+}
 
 fn ort_err<R>(err: ort::Error<R>) -> anyhow::Error {
     anyhow::anyhow!("{err}")
@@ -215,9 +224,8 @@ fn post_alpha(values: Vec<f32>) -> Vec<f32> {
     alpha
 }
 
-fn tile_origins(width: u32, height: u32) -> Vec<(u32, u32)> {
-    let tile = INPUT_SIZE as u32;
-    let step = tile - TILE_OVERLAP;
+fn tile_origins(width: u32, height: u32, tile: u32, overlap: u32) -> Vec<(u32, u32)> {
+    let step = tile - overlap;
     let last_x = width.saturating_sub(tile);
     let last_y = height.saturating_sub(tile);
     let mut xs = Vec::new();
@@ -274,24 +282,31 @@ const EDGE_REFINE_LOW: f32 = 0.03;
 const EDGE_REFINE_HIGH: f32 = 0.97;
 const EDGE_REFINE_MAX_TILES: usize = 48;
 const EDGE_REFINE_MAX_TILES_CPU: usize = 12;
+const EDGE_REFINE_SCALES: [u32; 3] = [1, 2, 4];
 
-fn edge_tiles(coarse: &[f32], width: u32, height: u32) -> Vec<(u32, u32, usize)> {
+fn edge_tiles(
+    coarse: &[f32],
+    width: u32,
+    height: u32,
+    tile: u32,
+    overlap: u32,
+) -> Vec<(u32, u32, usize)> {
     let small = INPUT_SIZE;
     let mut picked: Vec<(u32, u32, usize)> = Vec::new();
-    for (x, y) in tile_origins(width, height) {
-        let inner_x = if x == 0 { 0 } else { x + TILE_OVERLAP / 2 };
-        let inner_y = if y == 0 { 0 } else { y + TILE_OVERLAP / 2 };
-        let right = (x + INPUT_SIZE as u32).min(width);
-        let bottom = (y + INPUT_SIZE as u32).min(height);
+    for (x, y) in tile_origins(width, height, tile, overlap) {
+        let inner_x = if x == 0 { 0 } else { x + overlap / 2 };
+        let inner_y = if y == 0 { 0 } else { y + overlap / 2 };
+        let right = (x + tile).min(width);
+        let bottom = (y + tile).min(height);
         let inner_right = if right >= width {
             width
         } else {
-            right.saturating_sub(TILE_OVERLAP / 2)
+            right.saturating_sub(overlap / 2)
         };
         let inner_bottom = if bottom >= height {
             height
         } else {
-            bottom.saturating_sub(TILE_OVERLAP / 2)
+            bottom.saturating_sub(overlap / 2)
         };
         let inner_w = inner_right.saturating_sub(inner_x).max(1);
         let inner_h = inner_bottom.saturating_sub(inner_y).max(1);
@@ -336,6 +351,27 @@ fn grid_extreme(src: &[f32], size: usize, radius: isize, want_min: bool) -> Vec<
     out
 }
 
+enum RefinePlan {
+    Empty,
+    Scaled(u32, Vec<(u32, u32, usize)>),
+    Capped,
+}
+
+fn refine_plan(coarse: &[f32], width: u32, height: u32, cap: usize) -> RefinePlan {
+    for scale in EDGE_REFINE_SCALES {
+        let tile = INPUT_SIZE as u32 * scale;
+        let overlap = TILE_OVERLAP * scale;
+        let picked = edge_tiles(coarse, width, height, tile, overlap);
+        if picked.is_empty() {
+            return RefinePlan::Empty;
+        }
+        if picked.len() <= cap {
+            return RefinePlan::Scaled(scale, picked);
+        }
+    }
+    RefinePlan::Capped
+}
+
 #[allow(clippy::too_many_arguments)]
 fn refine_edge_logits(
     session: &mut Session,
@@ -346,23 +382,36 @@ fn refine_edge_logits(
     height: u32,
     cap: usize,
     is_dml: bool,
-) -> Result<usize> {
-    let picked = edge_tiles(coarse, width, height);
-    if picked.is_empty() {
-        return Ok(0);
+) -> Result<(usize, u32)> {
+    if cpu_refine_note_once(is_dml) {
+        eprintln!("  {}", crate::msg().note_cpu_refine_slow);
     }
-    if picked.len() > cap {
-        let note = if is_dml {
-            crate::msg().note_refine_skip_dml
-        } else {
-            crate::msg().note_refine_skip_cpu
-        };
-        eprintln!("  {}", note);
-        return Ok(0);
+    let (scale, picked) = match refine_plan(coarse, width, height, cap) {
+        RefinePlan::Empty => return Ok((0, 1)),
+        RefinePlan::Capped => {
+            let note = if is_dml {
+                crate::msg().note_refine_skip_dml
+            } else {
+                crate::msg().note_refine_skip_cpu
+            };
+            eprintln!("  {}", note);
+            return Ok((0, 1));
+        }
+        RefinePlan::Scaled(scale, picked) => (scale, picked),
+    };
+    if scale > 1 {
+        eprintln!(
+            "  {}",
+            crate::msg()
+                .note_refine_scaled
+                .replacen("{}", &scale.to_string(), 1)
+                .replacen("{}", &picked.len().to_string(), 1)
+                .replacen("{}", &cap.to_string(), 1)
+        );
     }
     let w = width as usize;
     let h = height as usize;
-    let overlap = TILE_OVERLAP as usize;
+    let overlap = (TILE_OVERLAP * scale) as usize;
     let guard_grid = coarse.len() == INPUT_SIZE * INPUT_SIZE;
     let (coarse_min, coarse_max) = if guard_grid {
         (
@@ -374,9 +423,10 @@ fn refine_edge_logits(
     };
     let mut value = vec![0f32; full.len()];
     let mut weight_total = vec![0f32; full.len()];
+    let patch_side = INPUT_SIZE as u32 * scale;
     for (x, y, _) in &picked {
-        let patch_width = (INPUT_SIZE as u32).min(width - x);
-        let patch_height = (INPUT_SIZE as u32).min(height - y);
+        let patch_width = patch_side.min(width - x);
+        let patch_height = patch_side.min(height - y);
         let patch = img.crop_imm(*x, *y, patch_width, patch_height);
         let logits = infer(session, preprocess(&patch)?)?;
         let small = resize_logits(&logits, patch_width, patch_height);
@@ -417,7 +467,7 @@ fn refine_edge_logits(
             *slot = blended;
         }
     }
-    Ok(picked.len())
+    Ok((picked.len(), scale))
 }
 
 fn frame_logits(
@@ -427,27 +477,39 @@ fn frame_logits(
     cap: usize,
     is_dml: bool,
     no_refine: bool,
-) -> Result<(Vec<f32>, usize)> {
+    profile: bool,
+) -> Result<(Vec<f32>, usize, u32, u32)> {
     let width = img.width();
     let height = img.height();
     let tile = INPUT_SIZE as u32;
     if !tiled || (width <= tile && height <= tile) {
+        let t_infer = std::time::Instant::now();
         let logits = infer(session, preprocess(img)?)?;
         let mut combined = resize_logits(&logits, width, height);
-        let refined = if (width > tile || height > tile) && !no_refine {
+        let infer_secs = t_infer.elapsed();
+        let t_refine = std::time::Instant::now();
+        let (refined, scale) = if (width > tile || height > tile) && !no_refine {
             let coarse = post_alpha(logits);
             refine_edge_logits(session, img, &coarse, &mut combined, width, height, cap, is_dml)?
         } else {
-            0
+            (0, 1)
         };
-        return Ok((combined, 1 + refined));
+        if profile {
+            eprintln!(
+                "  ⏱ cut infer {:.2} s | refine {:.2} s",
+                infer_secs.as_secs_f64(),
+                t_refine.elapsed().as_secs_f64()
+            );
+        }
+        return Ok((combined, 1 + refined, tile * scale, TILE_OVERLAP * scale));
     }
     let (w, h) = (width as usize, height as usize);
     let overlap = TILE_OVERLAP as usize;
+    let t_tile = std::time::Instant::now();
     let mut combined = vec![0f32; w * h];
     let mut total = vec![0f32; w * h];
     let mut count = 0usize;
-    for (x, y) in tile_origins(width, height) {
+    for (x, y) in tile_origins(width, height, tile, TILE_OVERLAP) {
         let patch_width = tile.min(width - x);
         let patch_height = tile.min(height - y);
         let patch = img.crop_imm(x, y, patch_width, patch_height);
@@ -469,7 +531,14 @@ fn frame_logits(
     for index in 0..combined.len() {
         combined[index] /= total[index].max(1e-6);
     }
-    Ok((combined, count))
+    if profile {
+        eprintln!(
+            "  ⏱ cut tiled {:.2} s ({} tiles)",
+            t_tile.elapsed().as_secs_f64(),
+            count
+        );
+    }
+    Ok((combined, count, tile, TILE_OVERLAP))
 }
 
 fn box_blur(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
@@ -566,6 +635,12 @@ fn refine_channel(
 }
 
 const DE_FRINGE_PARALLEL_MAX_PX: usize = 4 * 1024 * 1024;
+const DE_FRINGE_PARALLEL_BYTES_PER_PX: u64 = 192;
+
+fn de_fringe_parallel_ok(pixels: usize) -> bool {
+    pixels <= DE_FRINGE_PARALLEL_MAX_PX
+        || crate::usable_ram() >= (pixels as u64).saturating_mul(DE_FRINGE_PARALLEL_BYTES_PER_PX)
+}
 
 fn refine_channels(
     channels: &[Vec<f32>; 3],
@@ -587,7 +662,7 @@ fn refine_channels(
             radius,
         )
     };
-    if width * height <= DE_FRINGE_PARALLEL_MAX_PX {
+    if de_fringe_parallel_ok(width * height) {
         use rayon::prelude::*;
         channels.par_iter().map(refine).collect()
     } else {
@@ -719,6 +794,17 @@ fn exe_side_runtime() -> Option<PathBuf> {
     }
 }
 
+fn ort_logger() -> ort::logging::LoggerFunction {
+    std::sync::Arc::new(
+        |level: ort::logging::LogLevel, category: &str, _id: &str, location: &str, message: &str| {
+            if std::env::var_os("SEAMAESTRO_ORT_LOG").is_none() {
+                return;
+            }
+            eprintln!("  {level:?} {category} {location}: {message}");
+        },
+    )
+}
+
 fn init_from(path: &Path) -> Result<()> {
     crate::ort_runtime::prepare(path)?;
     ort::init_from(path)
@@ -730,6 +816,7 @@ fn init_from(path: &Path) -> Result<()> {
                     .replacen("{}", &path.display().to_string(), 1)
             )
         })?
+        .with_logger(ort_logger())
         .commit();
     Ok(())
 }
@@ -858,11 +945,12 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
         } else {
             EDGE_REFINE_MAX_TILES_CPU
         };
+        let t_model = std::time::Instant::now();
         let first = {
             let (session, _) = guard.as_mut().expect("session is initialized above");
-            frame_logits(session, img, config.tile, cap, is_dml, config.no_refine)
+            frame_logits(session, img, config.tile, cap, is_dml, config.no_refine, config.profile)
         };
-        let (logits, tiles) = match first {
+        let (logits, tiles, patch_px, overlap_px) = match first {
             Ok(result) => result,
             Err(err) if err.is::<DmlFatal>() && matches!(guard.as_ref(), Some((_, true))) => {
                 let oom = matches!(
@@ -901,7 +989,7 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
                     eprintln!("  {}", crate::msg().note_cut_cpu_slow);
                 }
                 let (session, _) = guard.as_mut().expect("session is initialized above");
-                frame_logits(session, img, config.tile, EDGE_REFINE_MAX_TILES_CPU, false, config.no_refine)?
+                frame_logits(session, img, config.tile, EDGE_REFINE_MAX_TILES_CPU, false, config.no_refine, config.profile)?
             }
             Err(err) if err.is::<DmlFatal>() => {
                 bail!("{}", crate::msg().err_cut_oom_no_fallback);
@@ -914,13 +1002,20 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
                 crate::msg()
                     .note_tiles
                     .replacen("{}", &tiles.to_string(), 1)
-                    .replacen("{}", &INPUT_SIZE.to_string(), 1)
-                    .replacen("{}", &TILE_OVERLAP.to_string(), 1)
+                    .replacen("{}", &patch_px.to_string(), 1)
+                    .replacen("{}", &overlap_px.to_string(), 1)
             );
+        }
+        if config.profile {
+            eprintln!("  ⏱ cut model {:.2} s", t_model.elapsed().as_secs_f64());
         }
         logits
     };
+    let t_de_fringe = std::time::Instant::now();
     let rgba = finish_frame(logits, img, config.de_fringe, config.raw_alpha);
+    if config.profile {
+        eprintln!("  ⏱ cut de-fringe {:.2} s", t_de_fringe.elapsed().as_secs_f64());
+    }
     Ok(DynamicImage::ImageRgba8(rgba))
 }
 
@@ -928,7 +1023,7 @@ pub(crate) fn apply_cut(img: &DynamicImage, config: &Config) -> Result<DynamicIm
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_dml_failure, DmlFailure};
+    use super::{classify_dml_failure, cpu_refine_note_once, DmlFailure};
 
     #[test]
     fn oom_signatures_are_classified_as_oom() {
@@ -944,6 +1039,22 @@ mod tests {
         );
         assert_eq!(classify_dml_failure("E_OUTOFMEMORY"), Some(DmlFailure::Oom));
         assert_eq!(classify_dml_failure("dml out of memory"), Some(DmlFailure::Oom));
+    }
+
+    #[test]
+    fn cpu_refine_note_fires_once_and_only_on_cpu() {
+        assert!(
+            !cpu_refine_note_once(true),
+            "a GPU backend must never show the CPU note"
+        );
+        assert!(
+            cpu_refine_note_once(false),
+            "the first CPU refine pass must show the note"
+        );
+        assert!(
+            !cpu_refine_note_once(false),
+            "the note must not repeat for the next files"
+        );
     }
 
     #[test]
@@ -1018,7 +1129,10 @@ mod strip_probe {
 
 #[cfg(test)]
 mod tile_probe {
-    use super::{edge_tiles, EDGE_REFINE_MAX_TILES, INPUT_SIZE};
+    use super::{
+        edge_tiles, refine_plan, RefinePlan, EDGE_REFINE_MAX_TILES, EDGE_REFINE_MAX_TILES_CPU,
+        INPUT_SIZE, TILE_OVERLAP,
+    };
     use image::GenericImageView;
 
     #[test]
@@ -1049,7 +1163,7 @@ mod tile_probe {
             for (index, pixel) in small.pixels().enumerate() {
                 coarse[index] = pixel.0[3] as f32 / 255.0;
             }
-            let picked = edge_tiles(&coarse, w, h);
+            let picked = edge_tiles(&coarse, w, h, INPUT_SIZE as u32, TILE_OVERLAP);
             lines.push(format!(
                 "{w}x{h}  tiles_needed={}  cap={EDGE_REFINE_MAX_TILES}  capped={}",
                 picked.len(),
@@ -1058,5 +1172,61 @@ mod tile_probe {
             lines.push(format!("  file={path}"));
         }
         let _ = std::fs::write(std::env::temp_dir().join("sm_tile_probe.txt"), lines.join("\n"));
+    }
+
+    fn flat_edge(value: f32) -> Vec<f32> {
+        vec![value; INPUT_SIZE * INPUT_SIZE]
+    }
+
+    #[test]
+    fn scale_plan_keeps_native_when_it_fits_the_cap() {
+        let picked = match refine_plan(&flat_edge(0.5), 5888, 4416, EDGE_REFINE_MAX_TILES) {
+            RefinePlan::Scaled(scale, picked) => {
+                assert_eq!(scale, 1, "native scale must win while it fits");
+                picked
+            }
+            _ => panic!("expected a native-scale plan"),
+        };
+        assert_eq!(picked.len(), 48);
+        assert!(picked.iter().any(|(x, y, _)| *x == 0 && *y == 0));
+        assert!(picked.iter().any(|(x, y, _)| *x == 4864 && *y == 3392));
+    }
+
+    #[test]
+    fn scale_plan_steps_down_for_tight_caps() {
+        let coarse = flat_edge(0.5);
+        for (cap, expected) in [(12usize, 2u32), (4usize, 4u32)] {
+            match refine_plan(&coarse, 5888, 4416, cap) {
+                RefinePlan::Scaled(scale, picked) => {
+                    assert_eq!(scale, expected);
+                    assert!(picked.len() <= cap);
+                }
+                _ => panic!("expected a scaled plan for cap {cap}"),
+            }
+        }
+    }
+
+    #[test]
+    fn scale_plan_separates_empty_from_capped() {
+        let blank = flat_edge(0.0);
+        assert!(matches!(
+            refine_plan(&blank, 5888, 4416, EDGE_REFINE_MAX_TILES),
+            RefinePlan::Empty
+        ));
+        assert!(matches!(
+            refine_plan(&flat_edge(0.5), 5888, 4416, 0),
+            RefinePlan::Capped
+        ));
+    }
+
+    #[test]
+    fn scale_plan_keeps_single_tile_native() {
+        match refine_plan(&flat_edge(0.5), 1024, 1024, EDGE_REFINE_MAX_TILES_CPU) {
+            RefinePlan::Scaled(scale, picked) => {
+                assert_eq!(scale, 1);
+                assert_eq!(picked.len(), 1);
+            }
+            _ => panic!("expected a single native tile"),
+        }
     }
 }
