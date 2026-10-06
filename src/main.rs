@@ -1306,7 +1306,9 @@ fn process_all(entries: Vec<InputEntry>, config: &Config) {
 fn process_files(entries: &[InputEntry], config: &Config) {
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
-    set_avif_threads(total);
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let max_workers = if config.cut { 1 } else { cpus };
+    set_avif_threads(total, max_workers);
 
     if config.merge && total > 1 {
         process_merge(entries, config);
@@ -1460,8 +1462,6 @@ fn process_files(entries: &[InputEntry], config: &Config) {
         final_tasks.push((input.clone(), final_path));
     }
 
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let max_workers = if config.cut { 1 } else { cpus };
     let task_idx = AtomicUsize::new(0);
     let (tx, rx) = std::sync::mpsc::channel();
     let task_idx = &task_idx;
@@ -3002,6 +3002,7 @@ fn merge_group_to_pdf(
         let slice = &ordered[offset..end];
         let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
         let chunk_workers = if config.cut { 1 } else { cpus.min(slice.len()) };
+        set_avif_threads(group_total, chunk_workers);
         let task_idx = AtomicUsize::new(0);
         let (tx, rx) = std::sync::mpsc::channel();
         let task_idx = &task_idx;

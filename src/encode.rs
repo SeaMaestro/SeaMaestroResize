@@ -39,14 +39,43 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static AVIF_THREADS: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn set_avif_threads(total_files: usize) {
+pub(crate) fn codec_threads_for(total_files: usize, workers: usize) -> usize {
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
-    let threads = if total_files <= 1 {
+    if total_files <= 1 || workers <= 1 {
         cpus.min(8)
     } else {
         1
-    };
-    AVIF_THREADS.store(threads, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn set_avif_threads(total_files: usize, workers: usize) {
+    AVIF_THREADS.store(codec_threads_for(total_files, workers), Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod codec_threads {
+    use super::codec_threads_for;
+
+    #[test]
+    fn a_serial_run_lets_the_codec_use_the_cores() {
+        assert_eq!(
+            codec_threads_for(10, 1),
+            codec_threads_for(1, 1),
+            "one file in flight must get the same thread budget as a single-file run"
+        );
+    }
+
+    #[test]
+    fn parallel_files_keep_the_codec_single_threaded() {
+        assert_eq!(codec_threads_for(10, 4), 1);
+        assert_eq!(codec_threads_for(2, 2), 1);
+    }
+
+    #[test]
+    fn a_single_file_is_never_serialised() {
+        assert_eq!(codec_threads_for(1, 8), codec_threads_for(1, 1));
+        assert!(codec_threads_for(1, 8) >= 1);
+    }
 }
 
 pub(crate) fn avif_threads() -> usize {
