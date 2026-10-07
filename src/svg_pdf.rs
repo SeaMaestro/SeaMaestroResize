@@ -76,6 +76,19 @@ enum GradientPaint {
     Pattern(String),
 }
 
+/// A non-finite number cannot be written into a PDF content stream: `fmt_num` would emit `NaN`/`inf`,
+/// which is not a valid PDF number, and the page would be broken without anybody noticing. The two
+/// correct results of this generator are "vector, correct" and "raster, correct"; vector is preferred
+/// only when it is *also* correct. So the whole page is validated once, at the single point where the
+/// stream is finished, instead of trusting six emit sites to remember the rule.
+///
+/// The scan is sound because every token in this stream is a number, an operator, a `/Name` or a
+/// `<hex>` string: text is written as hex (`0-9A-F`), so the words `NaN` and `inf` cannot occur by
+/// accident — if they are present, a non-finite value leaked in.
+fn content_is_finite(content: &str) -> bool {
+    !content.contains("NaN") && !content.contains("inf")
+}
+
 pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32, grayscale: bool) -> Option<VectorPage> {
     let size = tree.size();
     let sw = size.width();
@@ -138,6 +151,10 @@ pub(crate) fn build_vector_page(tree: &usvg::Tree, target_w: u32, target_h: u32,
         if !emit_node(node, s, th, grayscale, &mut out, &mut ext_gs, &mut gs_names, &mut shadings, &mut patterns, &mut images, &mut fonts, fontdb, 0) {
             return None;
         }
+    }
+
+    if !content_is_finite(&out) {
+        return None;
     }
 
     Some(VectorPage {
@@ -1511,6 +1528,27 @@ fn decode_image_gray(raw: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_non_finite_number_never_reaches_the_pdf_stream() {
+        assert!(content_is_finite("1 0 0 1 10 20 cm"));
+        assert!(content_is_finite("/P0 scn 0 0 100 100 re f"));
+        assert!(!content_is_finite("1 0 0 1 NaN 20 cm"));
+        assert!(!content_is_finite("1 0 0 1 inf 20 cm"));
+        assert!(!content_is_finite("-inf 0 0 -inf 0 0 cm"));
+        assert!(!content_is_finite("0 0 m 10 NaN l"));
+    }
+
+    #[test]
+    fn hex_encoded_nan_bytes_do_not_trip_the_gate() {
+        // The gate checks the stream as text and never decodes hex: those bytes are data, not a value,
+        // so a page whose text happens to spell "NaN" must stay vector. If somebody ever "improves"
+        // the gate to decode hex first, this test goes red on purpose.
+        assert!(
+            content_is_finite("BT /F0 12 Tf <4E614E> Tj ET"),
+            "hex-encoded text is data, not a value - it must not trigger the raster fallback"
+        );
+    }
 
     #[test]
     fn small_embedded_images_still_decode_through_the_limits() {

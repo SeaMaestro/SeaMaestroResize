@@ -55,8 +55,24 @@ extern "C" {
     fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
 }
 
+fn ram_override_bytes() -> Option<u64> {
+    ram_override_from(std::env::var("SEAMAESTRO_RAM_MB").ok())
+}
+
+fn ram_override_from(value: Option<String>) -> Option<u64> {
+    let text = value?;
+    let mb: u64 = text.trim().parse().ok()?;
+    if mb == 0 {
+        return None;
+    }
+    Some(mb * 1024 * 1024)
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn usable_ram() -> u64 {
+    if let Some(overridden) = ram_override_bytes() {
+        return overridden;
+    }
     let mut st: MemoryStatusEx = unsafe { std::mem::zeroed() };
     st.dw_length = std::mem::size_of::<MemoryStatusEx>() as u32;
     if unsafe { GlobalMemoryStatusEx(&mut st) } == 0 {
@@ -67,6 +83,9 @@ pub(crate) fn usable_ram() -> u64 {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn usable_ram() -> u64 {
+    if let Some(overridden) = ram_override_bytes() {
+        return overridden;
+    }
     16 * 1024 * 1024 * 1024
 }
 
@@ -506,7 +525,8 @@ fn main() -> std::process::ExitCode {
                 return;
             }
         }
-        if info.payload().downcast_ref::<String>().is_some() {
+        if let Some(s) = info.payload().downcast_ref::<String>() {
+            let _ = writeln!(std::io::stderr(), "SeaMaestro internal error: {s}");
             return;
         }
         default_hook(info);
@@ -776,8 +796,9 @@ fn run() -> Result<Config> {
                     if !budget.try_acquire(n as u64) {
                         anyhow::bail!(
                             "{}",
-                            msg().err_mem_too_large
+                            msg().err_mem_file_too_large
                                 .replacen("{}", &(total / (1024 * 1024)).to_string(), 1)
+                                .replacen("{}", &(crate::decode::budget_total() / (1024 * 1024)).to_string(), 1)
                         );
                     }
                     permit.need += n as u64;
@@ -1186,6 +1207,50 @@ fn out_sub_suffix(config: &Config) -> &'static str {
 
 pub(crate) const CUT_MAX_FRINGE_SIDE: u32 = 4096;
 
+pub(crate) const CUT_MAX_WORKERS: usize = 2;
+const CUT_PROBE_FILES: usize = 8;
+const CUT_PROBE_BYTES: u64 = 64 * 1024;
+const CUT_NEED_FALLBACK: u64 = 512 * 1024 * 1024;
+
+fn cut_workers_for_budget(budget: u64, per_frame: u64, cpus: usize) -> usize {
+    let by_ram = (budget / per_frame.max(1)) as usize;
+    by_ram.clamp(1, CUT_MAX_WORKERS).min(cpus.max(1))
+}
+
+fn probe_frame_need(path: &Path, config: &Config) -> Option<u64> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut limited = Read::take(file, CUT_PROBE_BYTES);
+    let mut head = Vec::new();
+    limited.read_to_end(&mut head).ok()?;
+    let (w, h) = crate::decode::probe_dims(&head)?;
+    let is_svg = crate::decode::looks_like_svg(&head);
+    let (target, _) = svg_target_dims((w, h), config.target_size.as_ref());
+    let cut_dims = cut_stage_dims((w, h), target, config);
+    Some(compute_need_inner(&head, w, h, w, h, cut_dims, is_svg, config))
+}
+
+fn batch_frame_need(entries: &[InputEntry], config: &Config) -> u64 {
+    let mut worst = 0u64;
+    for entry in entries.iter().take(CUT_PROBE_FILES) {
+        if let Some(need) = probe_frame_need(&entry.file, config) {
+            worst = worst.max(need);
+        }
+    }
+    if worst == 0 { CUT_NEED_FALLBACK } else { worst }
+}
+
+fn cut_workers(entries: &[InputEntry], config: &Config, cpus: usize) -> usize {
+    if let Ok(text) = std::env::var("SEAMAESTRO_CUT_WORKERS") {
+        if let Ok(n) = text.trim().parse::<usize>() {
+            if n > 0 {
+                return n.min(cpus.max(1)).min(CUT_MAX_WORKERS * 2);
+            }
+        }
+    }
+    cut_workers_for_budget(crate::decode::budget_total(), batch_frame_need(entries, config), cpus)
+}
+
 fn cut_stage_need(width: u32, height: u32, config: &Config) -> u64 {
     if !config.cut {
         return 0;
@@ -1193,6 +1258,20 @@ fn cut_stage_need(width: u32, height: u32, config: &Config) -> u64 {
     let pixels = width as u64 * height as u64;
     let per_pixel = if config.de_fringe && width.max(height) <= CUT_MAX_FRINGE_SIDE { 64 } else { 16 };
     pixels.saturating_mul(per_pixel)
+}
+
+fn cut_stage_dims(decode: (u32, u32), target: (u32, u32), config: &Config) -> (u32, u32) {
+    let resized_before_cut = config.cut
+        && config.target_size.is_some()
+        && !config.crop
+        && !config.scan
+        && !config.tile
+        && !config.merge
+        && !matches!(config.format, ImageFormat::Pdf)
+        && target.0 <= decode.0
+        && target.1 <= decode.1
+        && (target.0 < decode.0 || target.1 < decode.1);
+    if resized_before_cut { target } else { decode }
 }
 
 fn cut_order_note(config: &Config) -> Option<&'static str> {
@@ -1303,11 +1382,32 @@ fn process_all(entries: Vec<InputEntry>, config: &Config) {
     }
 }
 
+/// Fill `{}` placeholders left to right. Unlike a chain of `str::replacen`, substituted text is never
+/// scanned again, so a file name containing `{}` cannot shift the fields that follow it.
+fn fill_braces(template: &str, args: &[String]) -> String {
+    let mut out = String::with_capacity(template.len() + 64);
+    let mut rest = template;
+    let mut next = 0;
+    while let Some(pos) = rest.find("{}") {
+        out.push_str(&rest[..pos]);
+        match args.get(next) {
+            Some(v) => {
+                out.push_str(v);
+                next += 1;
+            }
+            None => out.push_str("{}"),
+        }
+        rest = &rest[pos + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn process_files(entries: &[InputEntry], config: &Config) {
     let total = entries.len();
     if total == 0 { captain_log(0); return; }
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-    let max_workers = if config.cut { 1 } else { cpus };
+    let max_workers = if config.cut { cut_workers(entries, config, cpus) } else { cpus };
     set_avif_threads(total, max_workers);
 
     if config.merge && total > 1 {
@@ -1512,15 +1612,19 @@ fn process_files(entries: &[InputEntry], config: &Config) {
                                     .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
                                     .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
                             };
-                            m.file_line
-                                .replacen("{}", &current.to_string(), 1)
-                                .replacen("{}", &total.to_string(), 1)
-                                .replacen("{}", &short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
-                                .replacen("{}", &short_name(&out_path.file_name().unwrap_or_default().to_string_lossy(), 28), 1)
-                                .replacen("{}", &human_size(in_size), 1)
-                                .replacen("{}", &human_size(out_size), 1)
-                                .replacen("{}", &diff_str, 1)
-                                .replacen("{}", remark, 1)
+                            fill_braces(
+                                m.file_line,
+                                &[
+                                    current.to_string(),
+                                    total.to_string(),
+                                    short_name(&input.file_name().unwrap_or_default().to_string_lossy(), 28).to_string(),
+                                    short_name(&out_path.file_name().unwrap_or_default().to_string_lossy(), 28).to_string(),
+                                    human_size(in_size).to_string(),
+                                    human_size(out_size).to_string(),
+                                    diff_str.to_string(),
+                                    remark.to_string(),
+                                ],
+                            )
                         }
                         Err(_) => m.file_error
                             .replacen("{}", &current.to_string(), 1)
@@ -1762,7 +1866,8 @@ fn smart_decode(
     Ok(Decoded { img, icc, exif })
 }
 
-fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decode_h: u32, is_svg: bool, config: &Config) -> u64 {
+#[allow(clippy::too_many_arguments)]
+fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decode_h: u32, cut_dims: (u32, u32), is_svg: bool, config: &Config) -> u64 {
     let ((tw, th), _) = svg_target_dims((orig_w, orig_h), config.target_size.as_ref());
     let decode_raster = if is_svg { raster_need(tw, th) } else { raster_need(decode_w, decode_h) };
     let target_raster = raster_need(tw, th);
@@ -1794,7 +1899,7 @@ fn compute_need_inner(raw: &[u8], orig_w: u32, orig_h: u32, decode_w: u32, decod
     let encode_need = target_raster.saturating_mul(out_mult).saturating_add(out_oh * 1024 * 1024);
     decode_need
         .max(encode_need)
-        .saturating_add(cut_stage_need(decode_w, decode_h, config))
+        .saturating_add(cut_stage_need(cut_dims.0, cut_dims.1, config))
 }
 
 fn exif_orientation(raw: &[u8]) -> Option<u32> {
@@ -1934,12 +2039,19 @@ fn run_pipeline(
     held: Option<&MemPermit<'_>>,
 ) -> Result<Decoded> {
     let jxl = JxlPrepared::prepare(raw);
-    let native = if let Some(s) = svg {
-        (s.width, s.height)
+    // When the container is one we cannot measure, remember that the dimensions are unknown:
+    // a fabricated 32768x32768 estimate must not decide the memory gate, otherwise files we
+    // simply do not support are reported as "not enough memory" (the decoders keep their own
+    // limits: image::Limits max_alloc + 32768 caps, SVG depth/gzip caps, per-format guards).
+    let (native, dims_known) = if let Some(s) = svg {
+        ((s.width, s.height), true)
     } else if let Some(j) = &jxl {
-        j.dims()
+        (j.dims(), true)
     } else {
-        probe_dims(raw).unwrap_or((32768, 32768))
+        match probe_dims(raw) {
+            Some(dims) => (dims, true),
+            None => ((32768, 32768), false),
+        }
     };
     let is_svg = svg.is_some();
     let preflight = preflight(raw, config, is_svg, native);
@@ -1947,15 +2059,30 @@ fn run_pipeline(
         Some(n) => ((native.0 * n / 8).max(1), (native.1 * n / 8).max(1)),
         None => native,
     };
-    let full_need = compute_need_inner(raw, native.0, native.1, decode_dims.0, decode_dims.1, is_svg, config)
-        .saturating_add(raw.len() as u64);
-    let need = additional_need(full_need, held.map(|permit| permit.need));
+    let cut_dims = cut_stage_dims(decode_dims, preflight.target, config);
+    let full_need = compute_need_inner(
+        raw,
+        native.0,
+        native.1,
+        decode_dims.0,
+        decode_dims.1,
+        cut_dims,
+        is_svg,
+        config,
+    )
+    .saturating_add(raw.len() as u64);
+    let need = if dims_known {
+        additional_need(full_need, held.map(|permit| permit.need))
+    } else {
+        0
+    };
     let budget = mem_budget();
     if !budget.acquire(need) {
         anyhow::bail!(
             "{}",
             msg().err_mem_too_large
                 .replacen("{}", &(full_need / (1024 * 1024)).to_string(), 1)
+                .replacen("{}", &(crate::decode::budget_total() / (1024 * 1024)).to_string(), 1)
         );
     }
     let _permit = MemPermit { budget, need };
@@ -2032,8 +2159,9 @@ fn read_input(path: &Path) -> Result<(Vec<u8>, MemPermit<'static>)> {
     if !budget.acquire(len) {
         anyhow::bail!(
             "{}",
-            msg().err_mem_too_large
+            msg().err_mem_file_too_large
                 .replacen("{}", &(len / (1024 * 1024)).to_string(), 1)
+                .replacen("{}", &(crate::decode::budget_total() / (1024 * 1024)).to_string(), 1)
         );
     }
     let permit = MemPermit { budget, need: len };
@@ -3045,15 +3173,19 @@ fn merge_group_to_pdf(
                                         .replacen("{}", &human_size(out_size.saturating_sub(in_size)), 1)
                                         .replacen("{:.0}", &format!("{:.0}", change_pct), 1)
                                 };
-                                let line = m.file_line
-                                    .replacen("{}", &current.to_string(), 1)
-                                    .replacen("{}", &total.to_string(), 1)
-                                    .replacen("{}", &short_name(&name, 28), 1)
-                                    .replacen("{}", &short_name(out_name, 28), 1)
-                                    .replacen("{}", &human_size(in_size), 1)
-                                    .replacen("{}", &human_size(out_size), 1)
-                                    .replacen("{}", &diff_str, 1)
-                                    .replacen("{}", remark, 1);
+                                let line = fill_braces(
+                                    m.file_line,
+                                    &[
+                                        current.to_string(),
+                                        total.to_string(),
+                                        short_name(&name, 28).to_string(),
+                                        short_name(out_name, 28).to_string(),
+                                        human_size(in_size).to_string(),
+                                        human_size(out_size).to_string(),
+                                        diff_str.to_string(),
+                                        remark.to_string(),
+                                    ],
+                                );
                                 match pb {
                                     Some(pb) => pb.println(line),
                                     None => eprintln!("{}", line),
@@ -3302,5 +3434,50 @@ mod cli_tests {
         config.keep_names = true;
         let kept = super::unique_merge_pdf(dir, "doc", &config);
         assert_eq!(kept.file_name().unwrap(), "doc_Merged.pdf");
+    }
+
+    #[test]
+    fn cut_workers_follow_the_budget_with_a_hard_ceiling() {
+        assert_eq!(super::cut_workers_for_budget(0, 512 * 1024 * 1024, 8), 1);
+        assert_eq!(super::cut_workers_for_budget(600 * 1024 * 1024, 512 * 1024 * 1024, 8), 1);
+        assert_eq!(super::cut_workers_for_budget(1024 * 1024 * 1024, 512 * 1024 * 1024, 8), 2);
+        assert_eq!(super::cut_workers_for_budget(64 * 1024 * 1024 * 1024, 512 * 1024 * 1024, 8), 2);
+        assert_eq!(super::cut_workers_for_budget(64 * 1024 * 1024 * 1024, 512 * 1024 * 1024, 1), 1);
+        assert_eq!(super::cut_workers_for_budget(4800 * 1024 * 1024, 2590 * 1024 * 1024, 8), 1);
+        assert_eq!(super::cut_workers_for_budget(19_200 * 1024 * 1024, 2590 * 1024 * 1024, 8), 2);
+    }
+
+    #[test]
+    fn ram_override_reads_megabytes_only() {
+        assert_eq!(super::ram_override_from(Some("4096".to_string())), Some(4096 * 1024 * 1024));
+        assert_eq!(super::ram_override_from(Some(" 2048 ".to_string())), Some(2048 * 1024 * 1024));
+        assert_eq!(super::ram_override_from(Some("0".to_string())), None);
+        assert_eq!(super::ram_override_from(Some("lots".to_string())), None);
+        assert_eq!(super::ram_override_from(None), None);
+    }
+
+    #[test]
+    fn cut_stage_dims_follow_the_resize_before_cut_rule() {
+        let mut config = super::config_default();
+        config.cut = true;
+        config.target_size = Some(super::Size::LongEdge(4000));
+        assert_eq!(super::cut_stage_dims((5888, 4416), (4000, 3000), &config), (4000, 3000));
+        assert_eq!(super::cut_stage_dims((4000, 3000), (4000, 3000), &config), (4000, 3000));
+        assert_eq!(super::cut_stage_dims((3000, 2000), (4000, 3000), &config), (3000, 2000));
+        config.crop = true;
+        assert_eq!(super::cut_stage_dims((5888, 4416), (4000, 3000), &config), (5888, 4416));
+        config.crop = false;
+        config.cut = false;
+        assert_eq!(super::cut_stage_dims((5888, 4416), (4000, 3000), &config), (5888, 4416));
+    }
+
+    #[test]
+    fn braces_in_a_file_name_cannot_shift_the_fields_that_follow() {
+        let two = |a: &str, b: &str| super::fill_braces("{} {}", &[a.to_string(), b.to_string()]);
+        assert_eq!(two("a", "b"), "a b");
+        assert_eq!(two("a{}b", "c"), "a{}b c", "text substituted in must never be scanned again");
+        assert_eq!(super::fill_braces("{} {} {}", &["a".to_string(), "b".to_string()]), "a b {}");
+        assert_eq!(super::fill_braces("{}", &["a".to_string(), "b".to_string()]), "a");
+        assert_eq!(super::fill_braces("no slots", &["a".to_string()]), "no slots");
     }
 }

@@ -61,7 +61,7 @@ pub fn write_document_bmp(path: &Path, w: u32, h: u32) {
         (wf * 0.92, hf * 0.86),
         (wf * 0.13, hf * 0.90),
     ];
-    let stride = ((w as usize * 3 + 3) / 4) * 4;
+    let stride = (w as usize * 3).div_ceil(4) * 4;
     let mut data = Vec::with_capacity(stride * h as usize);
     for y in (0..h).rev() {
         let mut row = Vec::with_capacity(stride);

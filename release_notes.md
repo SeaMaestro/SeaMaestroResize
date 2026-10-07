@@ -1,3 +1,144 @@
+## SeaMaestro v2.5.6
+
+## ✨ What's New
+
+**Background cut now overlaps frames when the machine has the memory for it.** The
+cut build used to process strictly one frame at a time, which left the CPU
+idle while the GPU was thinking. SeaMaestro now looks at the frames you are about to
+process (their dimensions, the output format and the `--size` you asked for), works out
+how much memory one finished frame needs, and overlaps as many frames as the free-memory
+budget allows — never more than that. Measured on a three-frame 26 MP batch: **314 s
+instead of 447 s** with JXL output (−30 %), and single-digit percent on PNG. On a
+modest machine nothing changes — the memory budget lets only the work that fits start,
+exactly as it already does for every other stage. Output bytes are identical either way.
+
+**A downscaled cut is no longer refused.** With `--cut --size 4000` the memory estimate
+was made from the *original* frame, so a large photo could be turned away on a machine
+that had room for the work it actually asked for. The estimate now follows the size you
+asked for.
+
+**Very large frames get a real answer instead of a scare.** A 201-megapixel frame
+(16384×12288) is handled in plain words: either the *frame* is too large for the memory
+budget, or the *input file* exceeds the size cap — two different messages now, because
+they are two different problems. Cutting 201 MP into JXL needs about 15.9 GB, so on an
+ordinary laptop it is refused **before a single pixel is decoded** rather than dying
+half-way through with the process killed by the system.
+
+## 🐛 Bug Fixes
+
+**Batch jobs no longer run the codec single-threaded by mistake.** The thread count
+handed to the JXL/AVIF codec was derived from "how many files are coming", so a job that
+processed files one at a time (background cut, and merged PDFs) told the codec to use one
+thread even when a single file was in flight. The count now follows the *actual* number of
+workers: a lone file keeps every core, a parallel batch gives each worker one thread so
+the cores are not oversubscribed, and the `--merge` path sets its own. Output bytes are
+unchanged — verified byte-for-byte against the sealed 26 MP references, both for a single
+file and for a batch, and identical between 1 and 2 workers.
+
+**TGA files were listed as supported but never decoded.** `--help` has always advertised
+TGA among the input formats, yet every real `.tga` was refused as an unsupported file.
+The reason is structural: TGA is the only promised format with no signature bytes, so the
+decoder — which picks a format by looking at the content — had nothing to recognise it by.
+TGA is now dispatched by file name, and a stream that has no name (a pipe) is recognised by its
+18-byte header instead — so both routes work. A file is still never *guessed* to be a TGA when its
+name says something else: the header is only consulted when there is no name at all.
+
+**AVIF files that announce themselves as `mif1` were refused.** ISO/IEC 14496-12 lets a file name a
+primary brand and then list the formats it is compatible with, and some writers put `mif1` first with
+`avif` in that list — which is a perfectly valid AVIF. SeaMaestro only ever looked at the primary
+brand, so such files fell through to the HEIF reader, which cannot decode AV1, and came back as
+unsupported. Both brand lists are now read, and a file that claims AVIF anywhere in them is decoded
+as AVIF, before the generic HEIF reader gets a chance at it. Verified against a third-party AVIF with
+its brand rewritten: it decodes to the same pixels as the original.
+
+**EXIF written by another tool was dropped from AVIF files.** Files produced by our own
+encoder were fine, which is exactly why this stayed hidden: our writer and our reader shared
+the same assumption about where the TIFF header starts. Other writers keep a 4-byte offset
+field in front of it, so their metadata was silently discarded. The payload is now trimmed to
+its TIFF header — the same normalisation the HEIF path has used all along. Verified with a
+file tagged by `exiftool`, an entirely separate writer.
+
+**`--exif` is no longer silently ignored.** When the target format cannot store EXIF
+(TIFF, PDF, BMP, GIF, ICO, QOI), or when a metadata blob cannot be rewritten for the new frame
+size, SeaMaestro now says so instead of producing a file without metadata and no comment.
+
+**A file name containing `{}` could corrupt the per-file progress line.** Every `{}` was
+filled one call at a time, re-scanning text that had already been inserted, so a name like
+`my{}file.jpg` shifted all the following fields and left a literal `{}` behind. Placeholders
+are now filled in a single pass over the template; inserted text is never looked at again.
+
+## 🔧 Under the hood
+
+Determinism was re-checked end to end on the 26 MP reference frame: 1 worker and 2 workers
+produce the same bytes, and the cut-PNG output still matches the sealed reference exactly.
+Peak memory for two overlapping frames grows by well under 10 % on a 32 GB machine,
+because the budget and the single inference session keep roughly one frame in flight. Two
+frames at a time is also where the gain stops: on PNG three workers change nothing and four
+are measurably slower (the encoders and the shared work queues start competing), so the cut
+build stays at two.
+
+Two diagnostic knobs were added for measuring this on real hardware. `SEAMAESTRO_RAM_MB=4096`
+makes SeaMaestro behave like a machine with that much RAM (every memory-adaptive decision
+follows it), and `SEAMAESTRO_CUT_WORKERS=1` pins the number of cut workers. Both are for
+measurement only and are ignored when unset — normal runs are unaffected.
+
+**The background-cut runtime is unpacked more carefully.** On first use the cut build writes
+its inference runtime into `%LOCALAPPDATA%\SeaMaestro\ort\...`. Two things changed: the
+version-cleaning step now removes *only* directories whose name matches the exact pattern
+SeaMaestro itself created (and does nothing at all when `SEAMAESTRO_RUNTIME_DIR` points at a
+directory you chose — that one is not ours to tidy), and temporary files are written under an
+unpredictable name and created exclusively, so a write can never follow a link planted by
+another account, and a leftover file from a crashed run cannot block the next start.
+
+**Release acceptance grew from 10 checks to 21**, and each of the new ones has now actually
+been executed against a real build. Added gates: crafted broken containers must produce a
+truthful verdict (never a memory scare), PPM and TGA must decode, HEIF baselines must be
+unchanged, EXIF must survive when the tags were written by a *different* tool (`exiftool`),
+orientation must be normalised in the output, the EXIF size tags must follow the resized
+image, a file name containing braces must not corrupt the log, an unsupported file must be
+named as unsupported — and a 201 MP cut+JXL job must still be refused before a single pixel is
+decoded. One of them rewrites the brand of a third-party AVIF into the `mif1` form described above
+and requires the same pixels out of it, so the sample lives inside the harness instead of in a temp
+folder where nobody would remember it. The sealed 26 MP PNG and JXL references are unchanged by this
+release.
+
+**A vector PDF page is never drawn half-finished.** If a coordinate or a gradient turns out to be
+non-finite, the whole page is rasterised instead — the same outcome as for a gradient the generator
+cannot represent. A PDF has two correct results, vector and raster, and the vector one is preferred
+only when it is *also* correct.
+
+**The memory accounting for the scan path stopped being optimistic.** The scratch buffers used by
+chroma denoising were allocated per call and were not covered by the reservation the tool makes
+before it starts: it asked for five planes' worth and used eleven. Those buffers are now reused and
+the request matches what is actually held. The reservation therefore went up while the real
+consumption went down — which means a machine that is borderline on memory may now decline that step
+instead of overcommitting. That is the intended trade: skipping a denoise beats lying about our own
+appetite.
+
+## 🔔 Signing
+
+This release is **unsigned**. Windows SmartScreen may show an "Unknown
+publisher" warning on first run.
+
+SHA-256 (light build, SeaMaestro.exe): TO_BE_FILLED
+SHA-256 (cut build, SeaMaestroCut.exe): TO_BE_FILLED
+Size: TO_BE_FILLED MB (PE executable, 64-bit)
+VirusTotal (light build): TO_BE_FILLED
+VirusTotal (cut build): TO_BE_FILLED
+
+The release contains two files: `SeaMaestro.exe` (resizer) and
+`SeaMaestroCut.exe` (resizer + background cut). The cut build writes its
+inference runtime into `%LOCALAPPDATA%\SeaMaestro\ort\` on first use; an
+unsigned executable that drops DLLs can trip antivirus heuristics — if the cut
+fails to start, check Windows Security → Protection history.
+
+## 📄 License
+
+MIT. See LICENSE and THIRD_PARTY_LICENSES.md.
+
+---
+
+
 ## SeaMaestro v2.5.5
 
 ## ✨ What's New

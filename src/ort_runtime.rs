@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -43,6 +44,10 @@ fn fingerprint(bytes: &[u8]) -> (u32, usize) {
     (crc32fast::hash(bytes), bytes.len())
 }
 
+fn matches_exactly(on_disk: &[u8], embedded: &[u8]) -> bool {
+    on_disk == embedded
+}
+
 fn base_dir() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("SEAMAESTRO_RUNTIME_DIR") {
         if !dir.trim().is_empty() {
@@ -74,7 +79,7 @@ fn present_verified(dir: &Path) -> bool {
 
 fn on_disk_matches(path: &Path, bytes: &[u8]) -> bool {
     fs::read(path)
-        .map(|on_disk| fingerprint(&on_disk) == fingerprint(bytes))
+        .map(|on_disk| matches_exactly(&on_disk, bytes))
         .unwrap_or(false)
 }
 
@@ -86,11 +91,16 @@ fn matches_embedded(dir: &Path) -> bool {
 
 fn write_verified(dir: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     let target = dir.join(name);
-    let temp = dir.join(format!("{}.tmp{}", name, std::process::id()));
-    let _ = fs::remove_file(&temp);
-    fs::write(&temp, bytes).with_context(|| format!("cannot write {}", temp.display()))?;
+    let temp = dir.join(format!("{}.tmp.{}", name, fastrand::u64(..)));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .with_context(|| format!("cannot create {}", temp.display()))?;
+    file.write_all(bytes).with_context(|| format!("cannot write {}", temp.display()))?;
+    drop(file);
     let written = fs::read(&temp).with_context(|| format!("cannot read back {}", temp.display()))?;
-    if fingerprint(&written) != fingerprint(bytes) {
+    if !matches_exactly(&written, bytes) {
         let _ = fs::remove_file(&temp);
         bail!(
             "runtime file {} did not survive the write ({} bytes on disk, {} embedded)",
@@ -129,12 +139,26 @@ fn extract_all(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A directory under our runtime root is ours only when its name is the hex key built by `dir_key`.
+/// The key length is passed in because `dir_key` hashes the embedded runtime (tens of megabytes) and
+/// must never be recomputed once per directory entry. Anything else there is somebody else's and is
+/// not removed.
+fn is_key_dir_name(name: &str, key_len: usize) -> bool {
+    name.len() == key_len && name.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 fn cleanup_other_versions(dir: &Path, keep: &str) {
+    let overridden = std::env::var("SEAMAESTRO_RUNTIME_DIR").is_ok_and(|v| !v.trim().is_empty());
+    if overridden {
+        return;
+    }
+    let key_len = dir_key().len();
     if let Some(root) = dir.parent() {
         if let Ok(entries) = fs::read_dir(root) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() && entry.file_name().to_string_lossy() != keep {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if path.is_dir() && name != keep && is_key_dir_name(&name, key_len) {
                     let _ = fs::remove_dir_all(&path);
                 }
             }
@@ -223,6 +247,16 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
+    fn runtime_files_are_compared_byte_for_byte() {
+        let embedded = vec![7u8; 4096];
+        let mut altered = embedded.clone();
+        altered[2048] = 8;
+        assert!(matches_exactly(&embedded, &embedded));
+        assert!(!matches_exactly(&altered, &embedded), "same length, different byte accepted");
+        assert!(!matches_exactly(&embedded[..4095], &embedded), "truncated file accepted");
+    }
+
+    #[test]
     fn runtime_is_extracted_then_reused() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = std::env::temp_dir().join(format!("sm_ort_{}", std::process::id()));
@@ -263,6 +297,20 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
     }
 
+    #[test]
+    fn only_our_own_key_directories_are_cleaned_up() {
+        let k = dir_key().len();
+        assert_eq!(k, 48);
+        assert!(is_key_dir_name(&dir_key(), k), "our own key must be recognised");
+        assert!(!is_key_dir_name("Documents", k), "a user directory is never ours");
+        assert!(!is_key_dir_name("2f0eb0d0aa3c", k), "a shorter hex name is not ours");
+        assert!(!is_key_dir_name(&"z".repeat(k), k), "a non-hex name is not ours");
+        assert!(!is_key_dir_name("", k));
+    }
+
+    // On Windows `set_readonly(false)` is the only way back from the read-only bit set above, and the
+    // Unix-oriented lint behind this (a file becoming world writable) cannot apply to this module.
+    #[allow(clippy::permissions_set_readonly_false)]
     #[test]
     fn existing_verified_file_survives_a_lost_rename() {
         let tmp = std::env::temp_dir().join(format!("sm_ort_lock_{}", std::process::id()));

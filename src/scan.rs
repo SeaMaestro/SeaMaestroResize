@@ -138,9 +138,21 @@ fn luma(row: &[u8], x: usize, ch: usize, ncolor: usize) -> u32 {
     }
 }
 
-fn box_blur_chan(src: &[u8], w: usize, h: usize, stride: usize, ncolor: usize, r: usize) -> Vec<u8> {
-    let mut tmp = vec![0u8; w * h * ncolor];
-    let mut out = vec![0u8; w * h * ncolor];
+/// Blurs one plane into `out`, using `tmp` as scratch. Both slices are owned by the caller and reused
+/// across calls: a fresh `w*h*ncolor` pair allocated per call was the part of `chroma_denoise` that the
+/// memory budget did not account for. `tmp` is fully rewritten before it is read, so reusing it cannot
+/// leak data between calls. Each slice must hold exactly `w*h*ncolor` bytes.
+#[allow(clippy::too_many_arguments)]
+fn box_blur_chan_into(
+    src: &[u8],
+    w: usize,
+    h: usize,
+    stride: usize,
+    ncolor: usize,
+    r: usize,
+    tmp: &mut [u8],
+    out: &mut [u8],
+) {
     for c in 0..ncolor {
         tmp.par_chunks_mut(w * ncolor).enumerate().for_each(|(y, row)| {
             for x in 0..w {
@@ -165,6 +177,16 @@ fn box_blur_chan(src: &[u8], w: usize, h: usize, stride: usize, ncolor: usize, r
             }
         }
     }
+}
+
+/// Allocating wrapper, kept for the one caller outside the hot path: the background plane at the top of
+/// this file is a small downscaled image and its blur happens once, so a transient `tmp`/`out` pair is
+/// negligible there. The path that *is* in a loop (`chroma_denoise`) uses `box_blur_chan_into` with
+/// caller-owned buffers, so its scratch is covered by the memory reservation instead of allocated.
+fn box_blur_chan(src: &[u8], w: usize, h: usize, stride: usize, ncolor: usize, r: usize) -> Vec<u8> {
+    let mut tmp = vec![0u8; w * h * ncolor];
+    let mut out = vec![0u8; w * h * ncolor];
+    box_blur_chan_into(src, w, h, stride, ncolor, r, &mut tmp, &mut out);
     out
 }
 
@@ -174,7 +196,9 @@ fn chroma_denoise(buf: &mut [u8], w: usize, h: usize, ch: usize, r: usize) {
     }
     let stride = w * ch;
 
-    let need = (w as u64).saturating_mul(h as u64).saturating_mul(5);
+    // luma_map + the two blurred planes + one scratch plane sized for the widest call (3 channels):
+    // the blur helper used to allocate its own pair per call, and that was not covered by this budget.
+    let need = (w as u64).saturating_mul(h as u64).saturating_mul(8);
     let budget = crate::decode::mem_budget();
     if !budget.try_acquire(need) {
         eprintln!("  {}", crate::msg().note_mem_skip);
@@ -190,8 +214,11 @@ fn chroma_denoise(buf: &mut [u8], w: usize, h: usize, ch: usize, r: usize) {
         }
     }
 
-    let bl = box_blur_chan(&luma_map, w, h, 1, 1, r);
-    let br = box_blur_chan(buf, w, h, ch, 3, r);
+    let mut scratch = vec![0u8; w * h * 3];
+    let mut bl = vec![0u8; w * h];
+    let mut br = vec![0u8; w * h * 3];
+    box_blur_chan_into(&luma_map, w, h, 1, 1, r, &mut scratch[..w * h], &mut bl);
+    box_blur_chan_into(buf, w, h, ch, 3, r, &mut scratch, &mut br);
 
     buf.par_chunks_mut(stride).enumerate().for_each(|(y, row)| {
         for x in 0..w {

@@ -50,9 +50,32 @@ pub fn messages(lang: Lang) -> &'static Messages {
     }
 }
 
+// The message tables below are consts, not test items: keeping this module first is deliberate, so
+// moving it to the end of the file would bury every real change in an unreadable diff.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_language_fills_the_exif_notes_and_keeps_the_placeholder_count() {
+        // The compiler already guarantees that every locale fills the fields; what it cannot see is an
+        // empty string or a translation that dropped (or added) a `{}` — that is what this covers.
+        for m in [EN, RU, UK, DE, ES, FR, EL, FIL] {
+            assert!(!m.note_exif_not_kept.trim().is_empty(), "empty exif note in a locale");
+            assert!(!m.note_exif_rewrite_failed.trim().is_empty(), "empty exif note in a locale");
+            assert_eq!(
+                m.note_exif_not_kept.matches("{}").count(),
+                EN.note_exif_not_kept.matches("{}").count(),
+                "a translation has a different placeholder count than EN"
+            );
+            assert_eq!(
+                m.note_exif_rewrite_failed.matches("{}").count(),
+                EN.note_exif_rewrite_failed.matches("{}").count(),
+                "a translation has a different placeholder count than EN"
+            );
+        }
+    }
 
     fn row_texts(rows: &'static [HelpRow]) -> Vec<&'static str> {
         let mut out = Vec::new();
@@ -205,6 +228,8 @@ pub struct Messages {
     pub err_ico_write: &'static str,
     pub err_qoi: &'static str,
     pub err_unsupported: &'static str,
+    pub note_exif_not_kept: &'static str,
+    pub note_exif_rewrite_failed: &'static str,
     pub err_heif_read: &'static str,
     pub err_heif_primary: &'static str,
     pub err_heif_decode: &'static str,
@@ -251,6 +276,7 @@ pub struct Messages {
     #[cfg_attr(not(feature = "bg"), allow(dead_code))]
     pub note_cut_low_ram: &'static str,
     pub err_mem_too_large: &'static str,
+    pub err_mem_file_too_large: &'static str,
     #[allow(dead_code)]
     pub note_dml_oom_fallback: &'static str,
     #[cfg_attr(not(feature = "bg"), allow(dead_code))]
@@ -347,7 +373,8 @@ pub const EN: Messages = Messages {
     warn_avif_no_avx2: "🛢️ The main engine won't pull on fuel this heavy, the purifier's choked (AVIF: CPU lacks AVX2). Switching to light diesel — use PNG, WebP or JPEG.",
     note_cut_cpu_slow: "☕ The spray gun's down — rolling the paint by hand (cutting on CPU). Slow going, but we'll get it done — plenty of time to grab a coffee.",
     note_cut_low_ram: "🔌 The main plant is running on tight margins — switching to the auxiliaries before we trip the breaker (low free RAM for GPU, cutting on CPU). Close a few programs to bring her back on the GPU.",
-    err_mem_too_large: "⚖️ Plimsoll mark is underwater — that's it, port won't clear us to sail, need to offload (needs ~{} MB of memory). Pick a lighter photo or close a few programs.",
+    err_mem_too_large: "⚖️ Plimsoll mark is underwater — that's it, port won't clear us to sail, need to offload: this frame wants ~{} MB and only ~{} MB are free. Run it at a smaller size (`--size N`), or pick `--format png`/`jpeg` instead of `jxl`; or close a few programs.",
+    err_mem_file_too_large: "⚖️ Plimsoll mark is underwater — the cargo itself is too heavy to take aboard (this file alone is ~{} MB, and only ~{} MB of memory is free). Close a few programs, or use a smaller copy of the file.",
     note_dml_oom_fallback: "🔧 Berthed for loading and the hydraulics burst — hatches won't open (GPU: low on memory). Opening covers with the crane (CPU): slower, but we'll load her. Close a few windows to bring the hydraulics back.",
     note_dml_gpu_fallback: "⚡ The main generator threw a rod — head blown off, pistons out (GPU: driver fault, switched to CPU). Running on the emergency set, slower, but we keep headway. Restart the program, or we'll make it in as is.",
     note_cpu_refine_slow: "🧭 Main engine's out — we're on the oars (CPU). Slow going, but every seam gets stitched by hand: the edge comes out crisp and clean. In a hurry? Signal `--norefine` (or `_norefine` in the exe name): we'll make port sooner, but the edge stays soft.",
@@ -600,6 +627,8 @@ pub const EN: Messages = Messages {
     err_ico_write: "ICO write failed",
     err_qoi: "QOI encode failed",
     err_unsupported: "Unsupported image format",
+    note_exif_not_kept: "  note: this output format cannot carry EXIF metadata",
+    note_exif_rewrite_failed: "  note: EXIF was dropped - it could not be rewritten for the new size",
     err_heif_read: "HEIF: failed to read bytes",
     err_heif_primary: "HEIF: no primary image",
     err_heif_decode: "HEIF: decode failed",
@@ -745,7 +774,8 @@ pub const RU: Messages = Messages {
     warn_avif_no_avx2: "🛢️ С таким тяжёлым топливом главный не потянет, сепаратор захлебнулся (AVIF: процессор без AVX2). Переходим на лёгкую дизельку — берите PNG, WebP или JPEG.",
     note_cut_cpu_slow: "☕ Пульверизатор встал — катаем вручную валиками (режем на CPU). Медленно, но закатаем — как раз успеете сделать кофе.",
     note_cut_low_ram: "🔌 На главный сейчас мощности впритык — чтобы не было блэкаута, запускаем вспомогачи (мало свободной памяти под GPU, режем на CPU). Закройте пару программ, чтобы перевести нагрузку на видеокарту.",
-    err_mem_too_large: "⚖️ Грузовая марка утоплена — всё, приехали, порт не выпускает, надо разгружаться (нужно ~{} МБ памяти, а столько нет). Возьмите фото полегче или закройте лишние программы.",
+    err_mem_too_large: "⚖️ Грузовая марка утоплена — всё, приехали, порт не выпускает, надо разгружаться: кадру нужно ~{} МБ, а свободно только ~{} МБ. Прогоните его меньшим размером (`--size N`) или в `--format png`/`jpeg` вместо `jxl`; либо закройте лишние программы.",
+    err_mem_file_too_large: "⚖️ Грузовая марка утоплена — сам груз слишком тяжёлый, чтобы взять его на борт (один этот файл ~{} МБ, а свободно только ~{} МБ памяти). Закройте лишние программы или возьмите файл поменьше.",
     note_dml_oom_fallback: "🔧 Встали под погрузку, лопнула гидравлика — трюма не открываются (GPU: мало памяти). Открываем крышки краном (CPU): помедленнее, но погрузимся. Закройте пару окон, чтобы вернуть гидравлику.",
     note_dml_gpu_fallback: "⚡ Главный генератор выкинул копыта наружу (GPU: сбой драйвера, перешли на CPU). Сидим на аварийном, идём помедленнее, но ход держим. Перезапустите программу — или спокойно дотянем так.",
     note_cpu_refine_slow: "🧭 Главный не тянет — идём на вёслах (CPU). Медленно, зато каждый шов прошиваем вручную: кромка выйдет резкой и чистой. Торопишься — скомандуй `--norefine` (или `_norefine` в имени exe): придём раньше, но кромка будет мягче.",
@@ -998,6 +1028,8 @@ pub const RU: Messages = Messages {
     err_ico_write: "Не удалось записать ICO",
     err_qoi: "Не удалось закодировать QOI",
     err_unsupported: "Неподдерживаемый формат изображения",
+    note_exif_not_kept: "  внимание: этот формат не сохраняет метаданные EXIF",
+    note_exif_rewrite_failed: "  внимание: EXIF потерян — не удалось переписать под новый размер",
     err_heif_read: "HEIF: не удалось прочитать байты",
     err_heif_primary: "HEIF: нет основного изображения",
     err_heif_decode: "HEIF: не удалось декодировать",
@@ -1142,7 +1174,8 @@ pub const UK: Messages = Messages {
     warn_avif_no_avx2: "🛢️ З таким важким мазутом головний не потягне, сепаратор захлинувся (AVIF: процесор без AVX2). Переходимо на легку дизельку — беріть PNG, WebP або JPEG.",
     note_cut_cpu_slow: "☕ Пульверизатор став — катаємо вручну валиками (ріжемо на CPU). Повільно, але закатаємо — якраз устигнете зробити каву.",
     note_cut_low_ram: "🔌 На головний зараз потужності впритул — щоб не було блекауту, запускаємо допоміжні (мало вільної пам'яті під GPU, ріжемо на CPU). Заплющте пару програм, щоб перевести навантаження на відеокарту.",
-    err_mem_too_large: "⚖️ Вантажна марка утоплена — все, приїхали, порт не випускає, треба розвантажуватись (потрібно ~{} МБ пам'яті, а стільки немає). Візьміть фото легше або заплющте зайві програми.",
+    err_mem_too_large: "⚖️ Вантажна марка утоплена — все, приїхали, порт не випускає, треба розвантажуватись: кадру потрібно ~{} МБ, а вільно лише ~{} МБ. Проженіть його меншим розміром (`--size N`) або у `--format png`/`jpeg` замість `jxl`; або заплющте зайві програми.",
+    err_mem_file_too_large: "⚖️ Вантажна марка утоплена — сам вантаж заважкий, щоб узяти його на борт (один цей файл ~{} МБ, а вільно лише ~{} МБ пам'яті). Заплющте зайві програми або візьміть файл менший.",
     note_dml_oom_fallback: "🔧 Стали під завантаження, лопнула гідравліка — трюма не відкриваються (GPU: мало пам'яті). Відкриваємо кришки краном (CPU): повільніше, але завантажимось. Заплющте пару вікон, щоб повернути гідравліку.",
     note_dml_gpu_fallback: "⚡ Головний генератор викинув копита назовні (GPU: збій драйвера, перейшли на CPU). Сидимо на аварійному, йдемо повільніше, але хід тримаємо. Перезапустіть програму — або спокійно дотягнемо так.",
     note_cpu_refine_slow: "🧭 Головний не тягне — йдемо на веслах (CPU). Повільно, зате кожен шов прошиваємо вручну: край вийде різким і чистим. Поспішаєш — скомандуй `--norefine` (або `_norefine` в імені exe): прийдемо раніше, але край буде м'якшим.",
@@ -1395,6 +1428,8 @@ pub const UK: Messages = Messages {
     err_ico_write: "Не вдалося записати ICO",
     err_qoi: "Не вдалося закодувати QOI",
     err_unsupported: "Непідтримуваний формат зображення",
+    note_exif_not_kept: "  увага: цей формат не зберігає метадані EXIF",
+    note_exif_rewrite_failed: "  увага: EXIF втрачено — не вдалося переписати під новий розмір",
     err_heif_read: "HEIF: не вдалося прочитати байти",
     err_heif_primary: "HEIF: немає основного зображення",
     err_heif_decode: "HEIF: не вдалося декодувати",
@@ -1542,7 +1577,8 @@ pub const DE: Messages = Messages {
     warn_avif_no_avx2: "🛢️ Mit so schwerem Treibstoff zieht der Hauptmotor nicht, der Separator ist zugesetzt (AVIF: CPU ohne AVX2). Wir gehen auf leichten Diesel — nehmen Sie PNG, WebP oder JPEG.",
     note_cut_cpu_slow: "☕ Der Sprühkopf ist ausgefallen — wir rollen die Farbe von Hand (Schnitt läuft auf der CPU). Langsam, aber wir schaffen es — genug Zeit für einen Kaffee.",
     note_cut_low_ram: "🔌 Für die Hauptmaschine ist die Reserve zu knapp — wir starten die Hilfsgeneratoren, damit das Bordnetz nicht dunkel wird (wenig freier Speicher für die GPU, Schnitt auf CPU). Schließen Sie ein paar Programme, um die Last zurück auf die Grafikkarte zu legen.",
-    err_mem_too_large: "⚖️ Die Plimsoll-Marke ist unter Wasser — das war's, der Hafen lässt uns nicht auslaufen, wir müssen löschen (braucht ~{} MB Speicher, so viel ist nicht frei). Ein leichteres Foto nehmen oder ein paar Programme schließen.",
+    err_mem_too_large: "⚖️ Die Plimsoll-Marke ist unter Wasser — das war's, der Hafen lässt uns nicht auslaufen, wir müssen löschen: dieses Bild will ~{} MB, frei sind nur ~{} MB. Rechnen Sie es kleiner (`--size N`) oder nehmen Sie `--format png`/`jpeg` statt `jxl`; oder schließen Sie ein paar Programme.",
+    err_mem_file_too_large: "⚖️ Die Plimsoll-Marke ist unter Wasser — die Ladung selbst ist zu schwer, um sie an Bord zu nehmen (diese Datei allein ist ~{} MB, frei sind nur ~{} MB Speicher). Schließen Sie ein paar Programme oder nehmen Sie eine kleinere Datei.",
     note_dml_oom_fallback: "🔧 Anlegen zum Laden, und die Hydraulik ist geplatzt — die Luken öffnen nicht (GPU: zu wenig Speicher). Wir öffnen die Deckel per Kran (CPU): langsamer, aber wir laden. Ein paar Fenster schließen, damit die Hydraulik wiederkommt.",
     note_dml_gpu_fallback: "⚡ Der Hauptgenerator hat ein Pleuel rausgeworfen — Kopf weg, Kolben raus (GPU: Treiberfehler, auf CPU umgeschaltet). Wir laufen auf dem Notaggregat, langsamer, aber wir halten Fahrt. Programm neu starten — oder wir kommen so rein.",
     note_cpu_refine_slow: "🧭 Die Hauptmaschine will nicht — wir rudern (CPU). Langsam, dafür wird jede Naht von Hand vernäht: der Rand kommt scharf und sauber. In Eile? Gib `--norefine` (oder `_norefine` im Exe-Namen) — wir kommen früher an, aber der Rand bleibt weicher.",
@@ -1795,6 +1831,8 @@ pub const DE: Messages = Messages {
     err_ico_write: "ICO schreiben fehlgeschlagen",
     err_qoi: "QOI-Kodierung fehlgeschlagen",
     err_unsupported: "Nicht unterstütztes Bildformat",
+    note_exif_not_kept: "  Hinweis: dieses Ausgabeformat kann keine EXIF-Daten speichern",
+    note_exif_rewrite_failed: "  Hinweis: EXIF wurde verworfen - Umschreiben auf die neue Größe nicht möglich",
     err_heif_read: "HEIF: Bytes konnten nicht gelesen werden",
     err_heif_primary: "HEIF: kein primäres Bild",
     err_heif_decode: "HEIF: Dekodierung fehlgeschlagen",
@@ -1942,7 +1980,8 @@ pub const ES: Messages = Messages {
     warn_avif_no_avx2: "🛢️ Con combustible tan pesado el motor principal no tira, el separador está saturado (AVIF: CPU sin AVX2). Pasamos a diésel ligero: use PNG, WebP o JPEG.",
     note_cut_cpu_slow: "☕ La pistola se ha parado — pintamos a rodillo (recortamos en la CPU). Va lento, pero lo acabamos: tiempo de sobra para un café.",
     note_cut_low_ram: "🔌 La reserva para la máquina principal va muy justa — arrancamos los auxiliares para que no haya apagón a bordo (poca memoria libre para la GPU, recortamos en CPU). Cierre un par de programas para devolver la carga a la tarjeta gráfica.",
-    err_mem_too_large: "⚖️ La marca Plimsoll está bajo el agua — hasta aquí llegamos, el puerto no nos deja salir, hay que descargar (necesita ~{} MB de memoria y no los hay). Tome una foto más ligera o cierre programas.",
+    err_mem_too_large: "⚖️ La marca Plimsoll está bajo el agua — hasta aquí llegamos, el puerto no nos deja salir, hay que descargar: esta imagen pide ~{} MB y solo hay ~{} MB libres. Procésela en tamaño menor (`--size N`) o en `--format png`/`jpeg` en vez de `jxl`; o cierre programas.",
+    err_mem_file_too_large: "⚖️ La marca Plimsoll está bajo el agua — la carga en sí pesa demasiado para subirla a bordo (solo este archivo son ~{} MB y solo hay ~{} MB de memoria libre). Cierre algunos programas o use una copia más pequeña del archivo.",
     note_dml_oom_fallback: "🔧 Atracados para cargar y revienta la hidráulica — las bodegas no abren (GPU: poca memoria). Abrimos con grúa (CPU): más lento, pero cargamos. Cierre unas ventanas para recuperar la hidráulica.",
     note_dml_gpu_fallback: "⚡ El generador principal tiró una biela — culata fuera, pistones afuera (GPU: fallo del controlador, pasamos a CPU). Vamos con el grupo de emergencia, más lento, pero mantenemos arrancada. Reinicie el programa o llegamos así.",
     note_cpu_refine_slow: "🧭 La máquina principal no tira — vamos a remo (CPU). Despacio, pero cada costura se cose a mano: el borde sale nítido y limpio. ¿Con prisa? Da `--norefine` (o `_norefine` en el nombre del exe): llegamos antes, pero el borde queda más blando.",
@@ -2195,6 +2234,8 @@ pub const ES: Messages = Messages {
     err_ico_write: "Error al escribir ICO",
     err_qoi: "Error en la codificación QOI",
     err_unsupported: "Formato de imagen no soportado",
+    note_exif_not_kept: "  nota: este formato de salida no admite metadatos EXIF",
+    note_exif_rewrite_failed: "  nota: se descartaron los EXIF - no se pudieron reescribir al nuevo tamaño",
     err_heif_read: "HEIF: error al leer los bytes",
     err_heif_primary: "HEIF: no hay imagen primaria",
     err_heif_decode: "HEIF: error de decodificación",
@@ -2342,7 +2383,8 @@ pub const FR: Messages = Messages {
     warn_avif_no_avx2: "🛢️ Avec un fioul aussi lourd, le moteur principal ne tire pas, le séparateur est saturé (AVIF : CPU sans AVX2). On passe au diesel léger — prenez PNG, WebP ou JPEG.",
     note_cut_cpu_slow: "☕ La pulvérisatrice est en panne — on peint au rouleau (détourage sur le CPU). Lentement, mais on finit : le temps d'aller prendre un café.",
     note_cut_low_ram: "🔌 La réserve pour la machine principale est trop juste — on démarre les auxiliaires pour éviter la panne de bord (peu de mémoire libre pour le GPU, détourage sur le CPU). Fermez deux programmes pour remettre la charge sur la carte graphique.",
-    err_mem_too_large: "⚖️ La marque de franc-bord est sous l'eau — c'est fini, le port ne nous laisse pas partir, il faut décharger (il faut ~{} Mo de mémoire, on ne les a pas). Prenez une photo plus légère ou fermez des programmes.",
+    err_mem_too_large: "⚖️ La marque de franc-bord est sous l'eau — c'est fini, le port ne nous laisse pas partir, il faut décharger : cette image veut ~{} Mo et il n'y a que ~{} Mo de libre. Traitez-la en plus petit (`--size N`) ou en `--format png`/`jpeg` plutôt que `jxl` ; ou fermez des programmes.",
+    err_mem_file_too_large: "⚖️ La marque de franc-bord est sous l'eau — la cargaison elle-même est trop lourde pour monter à bord (ce fichier seul fait ~{} Mo, et il n'y a que ~{} Mo de mémoire libre). Fermez des programmes ou prenez une copie plus petite du fichier.",
     note_dml_oom_fallback: "🔧 À quai pour charger, l'hydraulique a lâché — les panneaux ne s'ouvrent pas (GPU : peu de mémoire). On ouvre à la grue (CPU) : plus lent, mais on chargera. Fermez des fenêtres pour récupérer l'hydraulique.",
     note_dml_gpu_fallback: "⚡ Le générateur principal a jeté une bielle — culasse envolée, pistons dehors (GPU : panne du pilote, passage au CPU). On tourne sur le groupe de secours, plus lentement, mais on garde de l'erre. Redémarrez le programme, ou on rentre comme ça.",
     note_cpu_refine_slow: "🧭 La machine principale ne tire pas — on rame (CPU). Lentement, mais chaque couture est cousue à la main : le bord sort net et propre. Pressé ? Signalez `--norefine` (ou `_norefine` dans le nom de l'exe) : on arrive plus tôt, mais le bord reste plus doux.",
@@ -2595,6 +2637,8 @@ pub const FR: Messages = Messages {
     err_ico_write: "Échec de l'écriture ICO",
     err_qoi: "Échec de l'encodage QOI",
     err_unsupported: "Format d'image non pris en charge",
+    note_exif_not_kept: "  note : ce format de sortie ne peut pas contenir de métadonnées EXIF",
+    note_exif_rewrite_failed: "  note : métadonnées EXIF perdues - réécriture impossible à la nouvelle taille",
     err_heif_read: "HEIF : échec de lecture des octets",
     err_heif_primary: "HEIF : aucune image principale",
     err_heif_decode: "HEIF : échec du décodage",
@@ -2742,7 +2786,8 @@ pub const EL: Messages = Messages {
     warn_avif_no_avx2: "🛢️ Με τόσο βαρύ καύσιμο ο κύριος δεν τραβάει, ο διαχωριστής βούλωσε (AVIF: CPU χωρίς AVX2). Πάμε σε ελαφρύ ντίζελ — πάρτε PNG, WebP ή JPEG.",
     note_cut_cpu_slow: "☕ Το πιστόλι βαφής σταμάτησε — βάφουμε με ρολά (κόβουμε στην CPU). Αργά, αλλά θα το τελειώσουμε: προλάβετε έναν καφέ.",
     note_cut_low_ram: "🔌 Το απόθεμα για τη βασική μηχανή είναι πολύ λίγο — βάζουμε τους βοηθητικούς για να μην πέσει το δίκτυο (λίγη ελεύθερη μνήμη για GPU, κόβουμε στην CPU). Κλείστε δύο προγράμματα για να ξαναπάει η κάρτα γραφικών.",
-    err_mem_too_large: "⚖️ Το σημάδι φόρτωσης είναι κάτω από το νερό — τελειώσαμε, το λιμάνι δεν μας αφήνει να φύγουμε, πρέπει να ξεφορτώσουμε (χρειάζεται ~{} MB μνήμης και δεν τα έχουμε). Πάρτε ελαφρύτερη φωτογραφία ή κλείστε προγράμματα.",
+    err_mem_too_large: "⚖️ Το σημάδι φόρτωσης είναι κάτω από το νερό — τελειώσαμε, το λιμάνι δεν μας αφήνει να φύγουμε, πρέπει να ξεφορτώσουμε: αυτό το καρέ θέλει ~{} MB και ελεύθερα είναι μόνο ~{} MB. Τρέξτε το σε μικρότερο μέγεθος (`--size N`) ή σε `--format png`/`jpeg` αντί για `jxl`· ή κλείστε μερικά προγράμματα.",
+    err_mem_file_too_large: "⚖️ Το σημάδι φόρτωσης είναι κάτω από το νερό — το ίδιο το φορτίο είναι πολύ βαρύ για να μπει στο πλοίο (μόνο αυτό το αρχείο είναι ~{} MB και ελεύθερα είναι ~{} MB μνήμης). Κλείστε μερικά προγράμματα ή πάρτε μικρότερο αντίγραφο του αρχείου.",
     note_dml_oom_fallback: "🔧 Δέσαμε για φόρτωση και έσκασε το υδραυλικό — τα αμπάρια δεν ανοίγουν (GPU: λίγη μνήμη). Ανοίγουμε με γερανό (CPU): πιο αργά, αλλά θα φορτώσουμε. Κλείστε λίγα παράθυρα για να επανέλθει το υδραυλικό.",
     note_dml_gpu_fallback: "⚡ Η κύρια γεννήτρια πέταξε μπιέλα — κεφαλή έξω, πιστόνια έξω (GPU: βλάβη οδηγού, πήγαμε σε CPU). Δουλεύουμε με το εφεδρικό, πιο αργά, αλλά κρατάμε πορεία. Επανεκκινήστε το πρόγραμμα — ή φτάνουμε κι έτσι.",
     note_cpu_refine_slow: "🧭 Η κύρια μηχανή δεν τραβάει — κωπηλατούμε (CPU). Αργά, αλλά κάθε ραφή ράβεται στο χέρι: το άκρο βγαίνει κοφτερό και καθαρό. Βιάζεσαι; Δώσε `--norefine` (ή `_norefine` στο όνομα του exe): φτάνουμε νωρίτερα, αλλά το άκρο μένει πιο μαλακό.",
@@ -2995,6 +3040,8 @@ pub const EL: Messages = Messages {
     err_ico_write: "Αποτυχία εγγραφής ICO",
     err_qoi: "Η κωδικοποίηση QOI απέτυχε",
     err_unsupported: "Μη υποστηριζόμενη μορφή εικόνας",
+    note_exif_not_kept: "  σημείωση: αυτή η μορφή εξόδου δεν αποθηκεύει μεταδεδομένα EXIF",
+    note_exif_rewrite_failed: "  σημείωση: τα EXIF χάθηκαν - αδύνατη η επανεγγραφή στο νέο μέγεθος",
     err_heif_read: "HEIF: αποτυχία ανάγνωσης bytes",
     err_heif_primary: "HEIF: δεν υπάρχει κύρια εικόνα",
     err_heif_decode: "HEIF: η αποκωδικοποίηση απέτυχε",
@@ -3142,7 +3189,8 @@ pub const FIL: Messages = Messages {
     warn_avif_no_avx2: "🛢️ Sa ganoong kabigat na fuel, hindi kakayanin ng main engine, barado ang separator (AVIF: CPU na walang AVX2). Lumaboy tayo sa magaan na diesel — gamitin ang PNG, WebP o JPEG.",
     note_cut_cpu_slow: "☕ Tumirik ang spray gun — rollo na lang ang gamit (nag-cut sa CPU). Mabagal, pero matatapos din: may oras pa para sa kape.",
     note_cut_low_ram: "🔌 Napakasikip ng reserba para sa pangunahing makina — pinapasok namin ang mga auxiliary para hindi mawalan ng ilaw (kaunting libreng memory para sa GPU, sa CPU muna ang pag-cut). Isara ang ilang programa para makabalik ang graphics card.",
-    err_mem_too_large: "⚖️ Nalubog ang Plimsoll mark — tapos na, hindi tayo papayagan ng daungan, kailangang magbaba ng karga (kailangan ng ~{} MB na memory at wala tayo nito). Kumuha ng mas magaan na litrato o isara ang ilang programa.",
+    err_mem_too_large: "⚖️ Nalubog ang Plimsoll mark — tapos na, hindi tayo papayagan ng daungan, kailangang magbaba ng karga: kailangan ng frame na ito ng ~{} MB, pero ~{} MB lang ang libre. Patakbuhin ito sa mas maliit na sukat (`--size N`) o sa `--format png`/`jpeg` imbes na `jxl`; o isara ang ilang programa.",
+    err_mem_file_too_large: "⚖️ Nalubog ang Plimsoll mark — masyadong mabigat ang karga para maisakay (ang file na ito lang ay ~{} MB, at ~{} MB lang ang libreng memory). Isara ang ilang programa o kumuha ng mas maliit na kopya ng file.",
     note_dml_oom_fallback: "🔧 Naka-berth na para magkarga, sumabog ang hydraulics — ayaw bumukas ng mga hatch (GPU: kulang ang memory). Bubuksan namin gamit ang crane (CPU): mas mabagal, pero makakapagkarga. Isara ang ilang bintana para bumalik ang hydraulics.",
     note_dml_gpu_fallback: "⚡ Naglabas ng connecting rod ang main generator — tanggal ang head, lumabas ang mga piston (GPU: driver fault, lumipat sa CPU). Sa emergency set muna, mas mabagal, pero tuloy ang takbo. I-restart ang programa — o makakarating din tayo nito.",
     note_cpu_refine_slow: "🧭 Ayaw nang tumulak ng main engine — sagwan muna tayo (CPU). Mabagal, pero tahi-tahi sa kamay ang bawat seam: matalim at malinis ang gilid. Nagmamadali? Ibigay ang `--norefine` (o `_norefine` sa pangalan ng exe): mas maaga tayong dadating, pero mas malambot ang gilid.",
@@ -3395,6 +3443,8 @@ pub const FIL: Messages = Messages {
     err_ico_write: "Sablay sa pag-save ng ICO",
     err_qoi: "Sablay ang QOI encode",
     err_unsupported: "Hindi supported ang image format",
+    note_exif_not_kept: "  paalala: hindi kayang itago ng output na ito ang EXIF metadata",
+    note_exif_rewrite_failed: "  paalala: nawala ang EXIF - hindi maisulat muli para sa bagong sukat",
     err_heif_read: "HEIF: sablay sa pagbasa ng bytes",
     err_heif_primary: "HEIF: walang primary image",
     err_heif_decode: "HEIF: sablay ang pag-decode",

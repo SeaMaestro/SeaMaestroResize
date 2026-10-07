@@ -95,6 +95,10 @@ pub(crate) fn mem_budget() -> &'static MemBudget {
     })
 }
 
+pub(crate) fn budget_total() -> u64 {
+    runtime_limits().budget
+}
+
 pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
     if looks_like_svg(raw) {
         return probe_svg_dims(raw);
@@ -109,10 +113,23 @@ pub(crate) fn probe_dims(raw: &[u8]) -> Option<(u32, u32)> {
         let h = u16::from_le_bytes([raw[8], raw[9]]) as u32;
         return Some((w, h));
     }
-    if raw.len() >= 26 && raw.starts_with(b"BM") {
-        let w = i32::from_le_bytes([raw[18], raw[19], raw[20], raw[21]]).unsigned_abs();
-        let h = i32::from_le_bytes([raw[22], raw[23], raw[24], raw[25]]).unsigned_abs();
-        return Some((w, h));
+    if raw.starts_with(b"BM") {
+        let header = if raw.len() >= 18 {
+            u32::from_le_bytes([raw[14], raw[15], raw[16], raw[17]])
+        } else {
+            0
+        };
+        if header == 12 && raw.len() >= 22 {
+            let w = u16::from_le_bytes([raw[18], raw[19]]) as u32;
+            let h = u16::from_le_bytes([raw[20], raw[21]]) as u32;
+            return Some((w, h));
+        }
+        if header >= 40 && raw.len() >= 26 {
+            let w = i32::from_le_bytes([raw[18], raw[19], raw[20], raw[21]]).unsigned_abs();
+            let h = i32::from_le_bytes([raw[22], raw[23], raw[24], raw[25]]).unsigned_abs();
+            return Some((w, h));
+        }
+        return None;
     }
     if raw.len() >= 14 && raw.starts_with(b"qoif") {
         let w = u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]);
@@ -189,7 +206,7 @@ fn webp_dims(raw: &[u8]) -> Option<(u32, u32)> {
             let h = u16::from_le_bytes([raw[28], raw[29]]) & 0x3FFF;
             Some((w as u32, h as u32))
         }
-        _ => Some((16383, 16383)),
+        _ => None,
     }
 }
 
@@ -806,6 +823,19 @@ impl JxlPrepared {
     }
 }
 
+/// The 18-byte TGA header is the only way to recognise a TGA that arrives without a file name (a
+/// pipe). It is consulted last and only when there is no name at all, so it can never override a
+/// real extension, and its four checks never see a file another format already claimed.
+fn looks_like_tga(raw: &[u8]) -> bool {
+    if raw.len() < 18 {
+        return false;
+    }
+    matches!(raw[2], 1 | 2 | 3 | 9 | 10 | 11)
+        && matches!(raw[16], 8 | 15 | 16 | 24 | 32)
+        && u16::from_le_bytes([raw[12], raw[13]]) > 0
+        && u16::from_le_bytes([raw[14], raw[15]]) > 0
+}
+
 #[allow(clippy::type_complexity)]
 pub(crate) fn decode_image(
     raw: &[u8],
@@ -840,14 +870,18 @@ pub(crate) fn decode_image(
             return Ok((img, None, exif));
         }
     }
-    if is_heif(raw) {
-        if let Ok(img) = decode_heif_manual(raw, path) {
-            return Ok((img, None, exif));
-        }
-    }
+    // `avif` goes first: a file whose primary brand is `mif1` but which lists `avif` among its
+    // compatible brands is an AVIF — and `mif1` matches `is_heif` as well, while libheif cannot decode
+    // AV1. The more specific claim has to win; if the avif decoder fails we fall through to heif,
+    // which then gets its attempt.
     if is_avif(raw) {
         if let Ok((img, icc, avif_exif)) = decode_avif(raw) {
             return Ok((img, icc, avif_exif));
+        }
+    }
+    if is_heif(raw) {
+        if let Ok(img) = decode_heif_manual(raw, path) {
+            return Ok((img, None, exif));
         }
     }
     if let Ok((img, icc)) = decode_with_limits(raw) {
@@ -858,12 +892,35 @@ pub(crate) fn decode_image(
             return Ok((img, None, exif));
         }
     }
+    // TGA is the only promised input format with no magic bytes, so content sniffing cannot recognise
+    // it. A file name wins: `.tga` is decoded as TGA, and a named `.tga` that fails is *not* retried
+    // through the header path (one attempt, one message). Only a nameless stream (a pipe) is allowed
+    // to fall back to the header check. Neither path ever touches `probe_dims`, so a random binary is
+    // never sized as a TGA container.
+    let named_tga = path.is_some_and(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("tga")));
+    let nameless_tga = path.is_none() && looks_like_tga(raw);
+    if named_tga || nameless_tga {
+        if let Ok((img, icc)) = decode_with_limits_fmt(raw, Some(image::ImageFormat::Tga)) {
+            return Ok((img, icc, exif));
+        }
+    }
     anyhow::bail!("{}", msg().err_unsupported)
 }
 
 pub(crate) fn decode_with_limits(raw: &[u8]) -> image::ImageResult<(image::DynamicImage, Option<Vec<u8>>)> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(raw));
-    reader = reader.with_guessed_format()?;
+    decode_with_limits_fmt(raw, None)
+}
+
+fn decode_with_limits_fmt(
+    raw: &[u8],
+    format: Option<image::ImageFormat>,
+) -> image::ImageResult<(image::DynamicImage, Option<Vec<u8>>)> {
+    // `ImageReader::with_format` is an associated function taking the reader first (not a method):
+    // see image-0.25.10/src/io/image_reader_type.rs:101.
+    let mut reader = match format {
+        Some(f) => image::ImageReader::with_format(std::io::Cursor::new(raw), f),
+        None => image::ImageReader::new(std::io::Cursor::new(raw)).with_guessed_format()?,
+    };
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(32768);
     limits.max_image_height = Some(32768);
@@ -937,9 +994,29 @@ fn svg_options(path: Option<&Path>) -> usvg::Options<'static> {
     }
 }
 
+/// A gzip payload is taken as SVGZ only when its decompressed head contains markup: a plain
+/// .gz/.tar.gz archive is not an image and must fall through to the normal format checks instead
+/// of being reported as "SVG parse failed". A real SVGZ (including one that trips the expansion
+/// limit) always contains markup in its head, so it keeps its own message.
+fn gzipped_head_mentions_markup(raw: &[u8]) -> bool {
+    const HEAD: usize = 256;
+    let mut head = Vec::with_capacity(HEAD);
+    if GzDecoder::new(raw)
+        .take(HEAD as u64)
+        .read_to_end(&mut head)
+        .is_err()
+    {
+        return false;
+    }
+    // `<svg` (not a bare `<`) is the practical marker: every real SVGZ has that root element in
+    // its head, while a plain archive (even one with '<' in a tar file name) or a gzipped non-SVG
+    // document simply has nothing to find.
+    find_subslice(&head, 0, b"<svg").is_some()
+}
+
 pub(crate) fn looks_like_svg(raw: &[u8]) -> bool {
     if raw.starts_with(&[0x1f, 0x8b]) {
-        return true;
+        return gzipped_head_mentions_markup(raw);
     }
     let raw = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
     let first = raw.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(raw.len());
@@ -1231,12 +1308,51 @@ fn unpremultiply_rgba(buf: &mut [u8]) {
 
 // ── HEIF helpers (libheif-rs 2.7 + image feature) ─────────────
 
+/// Brands a `ftyp` box declares: the major brand plus the compatible ones (ISO/IEC 14496-12). A box
+/// size of 0 means "extends to the end of the file" — MP4 muxers do write that, so it is honoured
+/// instead of swallowing the brand list. A truncated box (a declared size larger than the buffer)
+/// yields None instead of a panic, and `chunks_exact` ignores a trailing partial brand. `min_len` is
+/// the shortest header still trusted: 12 for AVIF, 13 for HEIF — see the predicates.
+fn ftyp_brands(raw: &[u8], min_len: usize) -> Option<Vec<[u8; 4]>> {
+    if raw.len() < min_len || &raw[4..8] != b"ftyp" {
+        return None;
+    }
+    let declared = u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let size = if declared == 0 { raw.len() } else { declared as usize };
+    // The major brand needs 12 bytes; a real box is >= 16, but a size-0 box in a short buffer (and a
+    // synthetic header in a test) may stop right after the major brand. A too-small or truncated box
+    // yields None, so the brand list is never read out of bounds.
+    if size < 12 || size > raw.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity((size.saturating_sub(16)) / 4 + 1);
+    out.push([raw[8], raw[9], raw[10], raw[11]]);
+    if size > 16 {
+        for c in raw[16..size].chunks_exact(4) {
+            out.push([c[0], c[1], c[2], c[3]]);
+        }
+    }
+    Some(out)
+}
+
+/// True when the file declares one of `wanted` as its major brand or anywhere in the compatible list.
+fn has_brand(raw: &[u8], wanted: &[[u8; 4]], min_len: usize) -> bool {
+    ftyp_brands(raw, min_len).is_some_and(|brands| brands.iter().any(|b| wanted.contains(b)))
+}
+
+/// True when any declared brand starts with one of `prefixes` (`hei`/`hev` families).
+fn has_brand_prefix(raw: &[u8], prefixes: &[[u8; 3]], min_len: usize) -> bool {
+    ftyp_brands(raw, min_len).is_some_and(|brands| {
+        brands.iter().any(|b| prefixes.iter().any(|p| b[..3] == *p))
+    })
+}
+
+/// HEIF needs 13 bytes. This is not derived from a principle: it is the contract the existing test
+/// `avif_keeps_its_own_decoder` asserts (`a 12-byte header must be refused`), and it is kept on
+/// purpose — a short header carries only the major brand, so we simply do not claim it. Changing it
+/// without a symptom is not wanted.
 pub(crate) fn is_heif(buf: &[u8]) -> bool {
-    buf.len() > 12 && (
-        &buf[4..11] == b"ftyphei"   ||
-        &buf[4..12] == b"ftypmif1"  ||
-        &buf[4..12] == b"ftypmsf1"
-    )
+    has_brand(buf, &[*b"mif1", *b"msf1"], 13) || has_brand_prefix(buf, &[*b"hei", *b"hev"], 13)
 }
 
 fn heif_exif(raw: &[u8]) -> Option<Vec<u8>> {
@@ -1351,7 +1467,9 @@ impl Drop for AvifImageGuard {
 }
 
 pub(crate) fn is_avif(buf: &[u8]) -> bool {
-    buf.len() >= 12 && (&buf[4..12] == b"ftypavif" || &buf[4..12] == b"ftypavis")
+    // 12 is the old contract too (`is_avif` accepted a 12-byte header before the brand scan was
+    // added), and it is enough for a major brand; the compatible list needs 16 bytes anyway.
+    has_brand(buf, &[*b"avif", *b"avis", *b"av01"], 12)
 }
 
 pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
@@ -1375,6 +1493,26 @@ pub(crate) fn probe_avif_dims(buf: &[u8]) -> Option<(u32, u32)> {
         }
         Some(((*image).width, (*image).height))
     }
+}
+
+/// An Exif payload can carry a leading field before the TIFF header: HEIF/AVIF items hold a 4-byte
+/// offset there (ISO/IEC 23008-12 Annex A — and writers differ: libavif hands us an already-trimmed
+/// payload, while items written by other tools arrive with the offset intact), and APP1-style blobs
+/// start with `Exif\0\0`. `normalize_exif` expects the TIFF header first, so drop whatever precedes
+/// it. The window is 64 bytes because the spec-conformant offset is 0 (TIFF at byte 4) while
+/// non-conformant writers put it further along — `exiftool` reads such files, so we do too. Do not
+/// "simplify" this to a fixed `blob[4..]` (breaks offset != 4) or to a plain `blob` (breaks every
+/// trimmed payload): a false TIFF-magic found in a foreign blob is harmless anyway, because
+/// `normalize_exif` validates the structure and returns None for anything that is not real EXIF.
+/// `heif_exif` applies the same rule.
+pub(crate) fn trim_to_tiff_header(blob: Vec<u8>) -> Vec<u8> {
+    for i in 0..64.min(blob.len().saturating_sub(4)) {
+        let s = &blob[i..i + 4];
+        if s == b"II*\0" || s == b"MM\0*" {
+            return blob[i..].to_vec();
+        }
+    }
+    blob
 }
 
 #[allow(clippy::type_complexity)]
@@ -1404,7 +1542,8 @@ pub(crate) fn decode_avif(buf: &[u8]) -> Result<(image::DynamicImage, Option<Vec
         };
 
         let exif = if (*image.0).exif.size > 0 && !(*image.0).exif.data.is_null() {
-            Some(std::slice::from_raw_parts((*image.0).exif.data, (*image.0).exif.size).to_vec())
+            let blob = std::slice::from_raw_parts((*image.0).exif.data, (*image.0).exif.size).to_vec();
+            Some(trim_to_tiff_header(blob))
         } else {
             None
         };
@@ -1487,6 +1626,37 @@ fn develop_raw(rawimage: rawler::RawImage) -> Result<image::DynamicImage> {
 mod tests {
     use super::*;
 
+    fn ftyp_header(brand: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 16];
+        buf[4..8].copy_from_slice(b"ftyp");
+        buf[8..8 + brand.len()].copy_from_slice(brand);
+        buf
+    }
+
+    #[test]
+    fn heif_brands_are_recognised_by_their_magic() {
+        for brand in ["heic", "heix", "heim", "heis", "hevc", "hevx", "mif1", "msf1"] {
+            assert!(
+                is_heif(&ftyp_header(brand.as_bytes())),
+                "brand {brand} was not recognised as heif"
+            );
+        }
+    }
+
+    #[test]
+    fn avif_keeps_its_own_decoder() {
+        for brand in ["avif", "avis", "isom"] {
+            assert!(
+                !is_heif(&ftyp_header(brand.as_bytes())),
+                "brand {brand} must not be routed to the heif path"
+            );
+        }
+        assert!(
+            !is_heif(&ftyp_header(b"heic")[..12]),
+            "a 12-byte header must be refused"
+        );
+    }
+
     fn oversized_bmp() -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(b"BM");
@@ -1517,6 +1687,172 @@ mod tests {
     fn decode_with_limits_accepts_a_normal_small_input() {
         let png = include_bytes!("../tests/fixtures/8x8.png");
         assert!(decode_with_limits(png).is_ok());
+    }
+
+    fn gzip_bytes(payload: &[u8]) -> Vec<u8> {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(payload).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn tar_gz_with_angle_bracket_in_name_is_not_svg() {
+        let mut tar_header = vec![0u8; 512];
+        tar_header[0..13].copy_from_slice(b"<unnamed>.txt");
+        let archive = gzip_bytes(&tar_header);
+        assert!(
+            !looks_like_svg(&archive),
+            "a tar header containing '<' must not be routed to the svg path"
+        );
+    }
+
+    #[test]
+    fn plain_gzip_archive_is_not_treated_as_svg() {
+        let archive = gzip_bytes(b"not an svg at all, just a plain archive payload");
+        assert!(
+            !looks_like_svg(&archive),
+            "a plain gzip archive must not be reported as svg"
+        );
+    }
+
+    #[test]
+    fn gzipped_svg_stays_on_the_svg_path() {
+        let svgz = gzip_bytes(
+            b"<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"/>",
+        );
+        assert!(looks_like_svg(&svgz), "a gzipped svg must keep its own path");
+    }
+
+    fn tga_bytes() -> Vec<u8> {
+        let mut b = vec![0u8; 18];
+        b[2] = 2;
+        b[12] = 4;
+        b[14] = 4;
+        b[16] = 24;
+        b[17] = 32;
+        b.extend(vec![0x40u8; 4 * 4 * 3]);
+        b
+    }
+
+    #[test]
+    fn tga_is_dispatched_by_name_or_header_for_a_pipe() {
+        let bytes = tga_bytes();
+        let ok = decode_image(&bytes, Some(Path::new("tiny.tga")), None, None);
+        assert!(
+            ok.is_ok(),
+            "a valid .tga must decode by extension, got {:?}",
+            ok.err().map(|e| e.to_string())
+        );
+        let wrong = decode_image(&bytes, Some(Path::new("tiny.png")), None, None);
+        assert!(wrong.is_err(), "the same bytes named .png must stay unsupported");
+        let piped = decode_image(&bytes, None, None, None);
+        assert!(
+            piped.is_ok(),
+            "a nameless stream is recognised by its TGA header, got {:?}",
+            piped.err().map(|e| e.to_string())
+        );
+        let mut garbage = vec![0u8; 64];
+        garbage[2] = 0x7F;
+        assert!(
+            decode_image(&garbage, None, None, None).is_err(),
+            "a nameless stream that is not a TGA header must still be refused"
+        );
+    }
+
+    #[test]
+    fn mif1_with_a_compatible_avif_brand_is_recognised() {
+        let mut raw = vec![0u8; 32];
+        raw[4..8].copy_from_slice(b"ftyp");
+        raw[8..12].copy_from_slice(b"mif1");
+        raw[16..20].copy_from_slice(b"avif");
+        raw[20..24].copy_from_slice(b"miaf");
+        assert!(is_avif(&raw), "avif in the compatible list must be seen");
+        assert!(is_heif(&raw), "mif1 as the major brand is a heif claim as well");
+    }
+
+    #[test]
+    fn a_zero_ftyp_size_means_to_the_end_of_the_file() {
+        let mut raw = vec![0u8; 24];
+        raw[4..8].copy_from_slice(b"ftyp");
+        raw[8..12].copy_from_slice(b"mif1");
+        raw[16..20].copy_from_slice(b"avif");
+        assert!(is_avif(&raw), "size 0 means 'to the end of file', as mp4 muxers write");
+        raw[0..4].copy_from_slice(&12u32.to_be_bytes());
+        assert!(!is_avif(&raw), "a too-small ftyp box must not be trusted");
+    }
+
+    #[test]
+    fn exif_payload_is_trimmed_to_its_tiff_header() {
+        let tiff = b"II*\0\x08\0\0\0rest of the ifd".to_vec();
+        assert_eq!(
+            trim_to_tiff_header(tiff.clone()),
+            tiff,
+            "an already trimmed payload must stay as it is"
+        );
+        let mut with_offset = vec![0u8; 4];
+        with_offset.extend_from_slice(&tiff);
+        assert_eq!(
+            trim_to_tiff_header(with_offset),
+            tiff,
+            "the 4-byte item offset must be dropped"
+        );
+        let mut non_conformant = vec![0u8; 20];
+        non_conformant.extend_from_slice(&tiff);
+        assert_eq!(
+            trim_to_tiff_header(non_conformant),
+            tiff,
+            "an offset beyond the spec (20) must be dropped too - exiftool reads such files"
+        );
+        let mut app1 = b"Exif\0\0".to_vec();
+        app1.extend_from_slice(&tiff);
+        assert_eq!(
+            trim_to_tiff_header(app1),
+            tiff,
+            "the app1 marker must be dropped"
+        );
+        assert_eq!(
+            trim_to_tiff_header(vec![1, 2, 3]),
+            vec![1, 2, 3],
+            "a short blob is returned untouched"
+        );
+    }
+
+    #[test]
+    fn avif_is_recognised_by_every_primary_brand_encoders_write() {
+        for brand in ["avif", "avis", "av01"] {
+            let mut raw = vec![0u8; 16];
+            raw[4..8].copy_from_slice(b"ftyp");
+            raw[8..12].copy_from_slice(brand.as_bytes());
+            assert!(is_avif(&raw), "brand {brand} must reach the avif decoder");
+        }
+        let mut raw = vec![0u8; 16];
+        raw[4..8].copy_from_slice(b"ftyp");
+        raw[8..12].copy_from_slice(b"heic");
+        assert!(!is_avif(&raw), "heic must not be routed to the avif decoder");
+    }
+
+    #[test]
+    fn webp_with_an_unknown_chunk_has_no_guessed_size() {
+        let mut raw = vec![0u8; 32];
+        raw[0..4].copy_from_slice(b"RIFF");
+        raw[8..12].copy_from_slice(b"WEBP");
+        raw[12..16].copy_from_slice(b"XXXX");
+        assert!(
+            probe_dims(&raw).is_none(),
+            "an unreadable webp header must not invent a 16383x16383 size"
+        );
+    }
+
+    #[test]
+    fn os2_core_header_bmp_reports_its_real_size() {
+        let mut raw = vec![0u8; 74];
+        raw[0..2].copy_from_slice(b"BM");
+        raw[14..18].copy_from_slice(&12u32.to_le_bytes());
+        raw[18..20].copy_from_slice(&4u16.to_le_bytes());
+        raw[20..22].copy_from_slice(&4u16.to_le_bytes());
+        assert_eq!(probe_dims(&raw), Some((4, 4)));
     }
 
     #[test]

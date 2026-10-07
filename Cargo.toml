@@ -7,14 +7,14 @@ panic = "unwind"
 
 [package]
 name = "SeaMaestro"
-version = "2.5.5"
+version = "2.5.6"
 edition = "2021"
 rust-version = "1.82"
 
 [dependencies]
 crc32fast = "1"
 clap = { version = "4.6", features = ["derive"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff", "bmp", "gif", "ico", "qoi"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "tiff", "bmp", "gif", "ico", "qoi", "tga", "pnm", "dds", "hdr", "exr", "ff"] }
 rayon = "1.12"
 mozjpeg = "0.10"
 mozjpeg-sys = { version = "2.2", features = ["icc_io"] }

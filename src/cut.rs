@@ -541,13 +541,42 @@ fn frame_logits(
     Ok((combined, count, tile, TILE_OVERLAP))
 }
 
-fn box_blur(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32> {
+struct BlurScratch {
+    sat: Vec<f64>,
+}
+
+impl BlurScratch {
+    fn new() -> Self {
+        Self { sat: Vec::new() }
+    }
+}
+
+fn box_blur_into(
+    src: &[f32],
+    width: usize,
+    height: usize,
+    radius: usize,
+    scratch: &mut BlurScratch,
+    out: &mut [f32],
+) {
+    let pixels = width * height;
     if radius <= 1 {
-        return src.to_vec();
+        out[..pixels].copy_from_slice(&src[..pixels]);
+        return;
     }
     let r = radius / 2;
     let stride = width + 1;
-    let mut sat = vec![0f64; stride * (height + 1)];
+    let need = stride * (height + 1);
+    if scratch.sat.len() < need {
+        scratch.sat.resize(need, 0f64);
+    }
+    let sat = &mut scratch.sat[..need];
+    for value in sat.iter_mut().take(stride) {
+        *value = 0f64;
+    }
+    for row in 1..=height {
+        sat[row * stride] = 0f64;
+    }
     for y in 0..height {
         let mut row_sum = 0f64;
         for x in 0..width {
@@ -555,7 +584,6 @@ fn box_blur(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32>
             sat[(y + 1) * stride + x + 1] = sat[y * stride + x + 1] + row_sum;
         }
     }
-    let mut out = vec![0f32; width * height];
     for y in 0..height {
         let y0 = y.saturating_sub(r);
         let y1 = (y + r + 1).min(height);
@@ -568,7 +596,6 @@ fn box_blur(src: &[f32], width: usize, height: usize, radius: usize) -> Vec<f32>
             out[y * width + x] = (sum / area) as f32;
         }
     }
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -581,28 +608,36 @@ fn fb_estimate(
     width: usize,
     height: usize,
     radius: usize,
+    scratch: &mut BlurScratch,
 ) -> (Vec<f32>, Vec<f32>) {
     let pixels = width * height;
-    let mut foreground_scaled = vec![0f32; pixels];
+    let mut refined = vec![0f32; pixels];
     let mut background_scaled = vec![0f32; pixels];
     for index in 0..pixels {
         let a = alpha[index];
-        foreground_scaled[index] = foreground[index] * a;
+        refined[index] = foreground[index] * a;
         background_scaled[index] = background[index] * (1.0 - a);
     }
-    let blurred_foreground = box_blur(&foreground_scaled, width, height, radius);
-    let blurred_background = box_blur(&background_scaled, width, height, radius);
-    let mut refined = vec![0f32; pixels];
-    let mut background_out = vec![0f32; pixels];
+    let mut blurred_foreground = vec![0f32; pixels];
+    let mut blurred_background = vec![0f32; pixels];
+    box_blur_into(&refined, width, height, radius, scratch, &mut blurred_foreground);
+    box_blur_into(
+        &background_scaled,
+        width,
+        height,
+        radius,
+        scratch,
+        &mut blurred_background,
+    );
     for index in 0..pixels {
         let a = alpha[index];
         let ba = blurred_alpha[index];
         let f_star = blurred_foreground[index] / (ba + 1e-5);
         let b_star = blurred_background[index] / ((1.0 - ba) + 1e-5);
-        background_out[index] = b_star;
+        background_scaled[index] = b_star;
         refined[index] = f_star + a * (image[index] - a * f_star - (1.0 - a) * b_star);
     }
-    (refined, background_out)
+    (refined, background_scaled)
 }
 
 fn de_fringe_radius(max_side: u32) -> usize {
@@ -610,6 +645,7 @@ fn de_fringe_radius(max_side: u32) -> usize {
     (scaled.round() as usize).max(DE_FRINGE_MIN_RADIUS)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refine_channel(
     image: &[f32],
     alpha: &[f32],
@@ -618,9 +654,19 @@ fn refine_channel(
     width: usize,
     height: usize,
     radius: usize,
+    scratch: &mut BlurScratch,
 ) -> Vec<f32> {
-    let (first, background) =
-        fb_estimate(image, image, image, alpha, blurred_alpha, width, height, radius);
+    let (first, background) = fb_estimate(
+        image,
+        image,
+        image,
+        alpha,
+        blurred_alpha,
+        width,
+        height,
+        radius,
+        scratch,
+    );
     let (second, _) = fb_estimate(
         image,
         &first,
@@ -630,6 +676,7 @@ fn refine_channel(
         width,
         height,
         6,
+        scratch,
     );
     second
 }
@@ -642,6 +689,7 @@ fn de_fringe_parallel_ok(pixels: usize) -> bool {
         || crate::usable_ram() >= (pixels as u64).saturating_mul(DE_FRINGE_PARALLEL_BYTES_PER_PX)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn refine_channels(
     channels: &[Vec<f32>; 3],
     alpha: &[f32],
@@ -650,23 +698,42 @@ fn refine_channels(
     width: usize,
     height: usize,
     radius: usize,
+    scratches: &mut [BlurScratch; 3],
 ) -> Vec<Vec<f32>> {
-    let refine = |channel: &Vec<f32>| {
-        refine_channel(
-            channel,
-            alpha,
-            blurred_alpha,
-            blurred_alpha_second,
-            width,
-            height,
-            radius,
-        )
-    };
     if de_fringe_parallel_ok(width * height) {
         use rayon::prelude::*;
-        channels.par_iter().map(refine).collect()
+        channels
+            .par_iter()
+            .zip(scratches.par_iter_mut())
+            .map(|(channel, scratch)| {
+                refine_channel(
+                    channel,
+                    alpha,
+                    blurred_alpha,
+                    blurred_alpha_second,
+                    width,
+                    height,
+                    radius,
+                    scratch,
+                )
+            })
+            .collect()
     } else {
-        channels.iter().map(refine).collect()
+        channels
+            .iter()
+            .map(|channel| {
+                refine_channel(
+                    channel,
+                    alpha,
+                    blurred_alpha,
+                    blurred_alpha_second,
+                    width,
+                    height,
+                    radius,
+                    &mut scratches[0],
+                )
+            })
+            .collect()
     }
 }
 
@@ -681,8 +748,12 @@ fn apply_de_fringe(rgba: &mut RgbaImage, radius: usize) {
             channels[channel][index] = *value as f32 / 255.0;
         }
     }
-    let blurred_alpha = box_blur(&alpha, width, height, radius);
-    let blurred_alpha_second = box_blur(&alpha, width, height, 6);
+    let mut blur_scratch = BlurScratch::new();
+    let mut blurred_alpha = vec![0f32; pixels];
+    let mut blurred_alpha_second = vec![0f32; pixels];
+    box_blur_into(&alpha, width, height, radius, &mut blur_scratch, &mut blurred_alpha);
+    box_blur_into(&alpha, width, height, 6, &mut blur_scratch, &mut blurred_alpha_second);
+    let mut channel_scratch = [BlurScratch::new(), BlurScratch::new(), BlurScratch::new()];
     let refined_channels = refine_channels(
         &channels,
         &alpha,
@@ -691,6 +762,7 @@ fn apply_de_fringe(rgba: &mut RgbaImage, radius: usize) {
         width,
         height,
         radius,
+        &mut channel_scratch,
     );
     for (index, pixel) in rgba.pixels_mut().enumerate() {
         for (channel, value) in pixel.0.iter_mut().take(3).enumerate() {
@@ -720,6 +792,8 @@ fn apply_de_fringe_strips(rgba: &mut RgbaImage, radius: usize, strip_h: usize) {
         return;
     }
     let margin = radius / 2 + 8;
+    let mut blur_scratch = BlurScratch::new();
+    let mut channel_scratch = [BlurScratch::new(), BlurScratch::new(), BlurScratch::new()];
     let mut y0 = 0usize;
     while y0 < height {
         let y1 = (y0 + strip_h).min(height);
@@ -742,8 +816,17 @@ fn apply_de_fringe_strips(rgba: &mut RgbaImage, radius: usize, strip_h: usize) {
                 }
             }
         }
-        let blurred_alpha = box_blur(&alpha, width, rows, radius);
-        let blurred_alpha_second = box_blur(&alpha, width, rows, 6);
+        let mut blurred_alpha = vec![0f32; width * rows];
+        let mut blurred_alpha_second = vec![0f32; width * rows];
+        box_blur_into(&alpha, width, rows, radius, &mut blur_scratch, &mut blurred_alpha);
+        box_blur_into(
+            &alpha,
+            width,
+            rows,
+            6,
+            &mut blur_scratch,
+            &mut blurred_alpha_second,
+        );
         let refined_channels = refine_channels(
             &channels,
             &alpha,
@@ -752,6 +835,7 @@ fn apply_de_fringe_strips(rgba: &mut RgbaImage, radius: usize, strip_h: usize) {
             width,
             rows,
             radius,
+            &mut channel_scratch,
         );
         for row in y0..y1 {
             let source_row = row - b0;

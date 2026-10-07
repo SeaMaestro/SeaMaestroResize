@@ -88,7 +88,17 @@ pub(crate) fn avif_threads() -> usize {
 }
 
 pub(crate) fn encode_to_vec(img: &image::DynamicImage, config: &Config, icc: Option<&[u8]>, exif: Option<&[u8]>) -> Result<Vec<u8>> {
+    let had_exif = exif.is_some_and(|blob| !blob.is_empty());
     let exif = exif.and_then(|blob| normalize_exif(blob.to_vec(), img.width(), img.height()));
+    let carries_exif = matches!(
+        config.format,
+        ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Avif | ImageFormat::Png | ImageFormat::Jxl
+    );
+    if had_exif && !carries_exif {
+        eprintln!("{}", crate::msg().note_exif_not_kept);
+    } else if had_exif && exif.is_none() {
+        eprintln!("{}", crate::msg().note_exif_rewrite_failed);
+    }
     let exif = exif.as_deref();
     match config.format {
         ImageFormat::Jpeg => encode_jpeg_to_vec(img, config.quality, config.progressive, icc, exif),

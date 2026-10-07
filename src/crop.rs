@@ -3111,6 +3111,8 @@ fn warp(img: &image::DynamicImage, corners: &[(f32, f32); 4]) -> Option<image::D
 mod tests {
     use super::*;
 
+    type Case = ([(f32, f32); 4], f32, f32);
+
     const SKEWED_QUAD: [(f32, f32); 4] = [
         (10.0, 12.0),
         (110.0, 10.0),
@@ -3693,7 +3695,7 @@ mod tests {
 
     #[test]
     fn validate_tracks_reason_exactly() {
-        let cases: [([(f32, f32); 4], f32, f32); 5] = [
+        let cases: [Case; 5] = [
             (
                 [
                     (100.0, 100.0),
@@ -3737,7 +3739,7 @@ mod tests {
 
     #[test]
     fn validate_implies_consistent_cross_signs() {
-        let cases: [([(f32, f32); 4], f32, f32); 4] = [
+        let cases: [Case; 4] = [
             (
                 [
                     (100.0, 100.0),
